@@ -1,0 +1,34 @@
+{
+	"appId": "com.zoutiw.omnichurch",
+	"appName": "OmniChurch",
+	"webDir": "dist",
+	"bundledWebRuntime": false,
+	"server": {
+		"androidScheme": "https"
+	},
+	"android": {
+		"allowMixedContent": true,
+		"captureInput": true,
+		"webContentsDebuggingEnabled": false
+	},
+	"plugins": {
+		"GoogleAuth": {
+			"scopes": [
+				"profile",
+				"email"
+			],
+			"serverClientId": "770562747895-9u95tikk4ae0u1prn4rmvcl12ubcrd9i.apps.googleusercontent.com",
+			"forceCodeForRefreshToken": true
+		},
+		"SplashScreen": {
+			"launchShowDuration": 2200,
+			"launchAutoHide": true,
+			"backgroundColor": "#0F172A",
+			"androidSplashResourceName": "splash",
+			"androidScaleType": "CENTER_CROP",
+			"showSpinner": false,
+			"splashFullScreen": true,
+			"splashImmersive": true
+		}
+	}
+}

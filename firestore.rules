@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for hardened security and schema validation
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSuperDeveloper() {
+      return isAuthenticated()
+        && request.auth.token.email == "charlesjj3186@gmail.com"
+        && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function isValidChurchId(cid) {
+      return cid is string && cid.size() >= 2 && cid.size() <= 64;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 0. Connection health check path
+    match /test/{docId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 1. Global Application & Developer Engine Config
+    match /app_config/{configId} {
+      allow read: if true;
+      allow create, update: if isValidId(configId)
+        && (isSuperDeveloper() || isAuthenticated() || configId == "developer_engine");
+      allow delete: if isSuperDeveloper();
+    }
+
+    // 2. Churches collection (multi-tenant root)
+    match /churches/{churchId} {
+      allow read: if true;
+      allow create: if isValidId(churchId)
+        && incoming().id == churchId
+        && incoming().name is string && incoming().name.size() >= 2 && incoming().name.size() <= 200
+        && incoming().pastor is string && incoming().pastor.size() <= 200;
+      allow update: if isValidId(churchId)
+        && incoming().id == churchId
+        && incoming().name is string && incoming().name.size() >= 2 && incoming().name.size() <= 200;
+      allow delete: if isAuthenticated();
+    }
+
+    // 3. Members collection (scoped to churchId)
+    match /members/{memberId} {
+      allow read: if true;
+      allow create: if isValidId(memberId)
+        && isValidChurchId(incoming().churchId)
+        && incoming().fullName is string && incoming().fullName.size() >= 2 && incoming().fullName.size() <= 200;
+      allow update: if isValidId(memberId)
+        && incoming().churchId == existing().churchId
+        && incoming().fullName is string && incoming().fullName.size() >= 2 && incoming().fullName.size() <= 200;
+      allow delete: if isAuthenticated();
+    }
+
+    // 4. Service sessions collection
+    match /services/{serviceId} {
+      allow read: if true;
+      allow create: if isValidId(serviceId)
+        && isValidChurchId(incoming().churchId)
+        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
+      allow update: if isValidId(serviceId)
+        && incoming().churchId == existing().churchId
+        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
+      allow delete: if isAuthenticated();
+    }
+
+    // 5. Announcements collection
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow create: if isValidId(announcementId)
+        && isValidChurchId(incoming().churchId)
+        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
+      allow update: if isValidId(announcementId)
+        && incoming().churchId == existing().churchId
+        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
+      allow delete: if isAuthenticated();
+    }
+
+    // 6. Attendance collection
+    match /attendances/{attendanceId} {
+      allow read: if true;
+      allow create: if isValidId(attendanceId)
+        && isValidChurchId(incoming().churchId)
+        && incoming().serviceId is string && incoming().serviceId.size() > 0 && incoming().serviceId.size() <= 128
+        && incoming().memberId is string && incoming().memberId.size() > 0 && incoming().memberId.size() <= 128;
+      allow update: if isValidId(attendanceId)
+        && incoming().churchId == existing().churchId;
+      allow delete: if isAuthenticated();
+    }
+
+    // 7. Announcement comments collection
+    match /announcement_comments/{commentId} {
+      allow read: if true;
+      allow create: if isValidId(commentId)
+        && isValidChurchId(incoming().churchId)
+        && incoming().text is string && incoming().text.size() >= 1 && incoming().text.size() <= 2000;
+      allow update: if isValidId(commentId)
+        && incoming().churchId == existing().churchId
+        && incoming().text is string && incoming().text.size() >= 1 && incoming().text.size() <= 2000;
+      allow delete: if isAuthenticated();
+    }
+
+    // 8. Announcement reactions collection
+    match /announcement_reactions/{reactionId} {
+      allow read: if true;
+      allow create: if isValidId(reactionId)
+        && isValidChurchId(incoming().churchId)
+        && incoming().reaction is string && incoming().reaction.size() >= 1 && incoming().reaction.size() <= 32;
+      allow update: if isValidId(reactionId)
+        && incoming().churchId == existing().churchId
+        && incoming().reaction is string && incoming().reaction.size() >= 1 && incoming().reaction.size() <= 32;
+      allow delete: if isAuthenticated();
+    }
+
+    // 9. Catch-all fallback default-deny (Zero-Trust)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

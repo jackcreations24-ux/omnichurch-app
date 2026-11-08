@@ -1,0 +1,6 @@
+{
+  "summary":  "Plan Enjenieri Mèt OmniChurch (100% Pare pou Mache & Android Studio):\n- Faz 1: Sekirizasyon Imedya (Règ Firestore milti-tenant, modpas admin chifre ak hash) ak Aliyman Capacitor 8 pou Android Studio san okenn konfli depandans.\n- Faz 2: Achitekti Done Reaktif (Zustand + File Datatans IndexedDB Offline) ak Netwayaj Kòd Legacy.\n- Faz 3: Modilarizasyon Fichye Monolitik yo ak Tès Otomatisasyon (Vitest pou kalkil prezans/absans/retay).\n- Faz 4: Pwodiksyon & Bati Android Studio (AAB/APK) ak Pake Windows NSIS.",
+  "updatedAt":  "2026-11-07T15:13:49.172518365Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

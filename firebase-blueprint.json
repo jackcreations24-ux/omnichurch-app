@@ -1,0 +1,120 @@
+{
+  "$schema": "https://raw.githubusercontent.com/firebase/firebase-tools/master/schema/firestore-blueprint.json",
+  "entities": {
+    "Church": {
+      "collection": "churches",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "code": { "type": "string", "required": true },
+        "name": { "type": "string", "required": true },
+        "pastor": { "type": "string", "required": true },
+        "address": { "type": "string", "required": true },
+        "city": { "type": "string", "required": true },
+        "phone": { "type": "string", "required": true },
+        "email": { "type": "string", "required": true },
+        "motto": { "type": "string", "required": true },
+        "themeColor": { "type": "string", "required": true },
+        "logoIcon": { "type": "string", "required": true },
+        "createdAt": { "type": "string", "required": true }
+      }
+    },
+    "Member": {
+      "collection": "members",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "memberId": { "type": "string", "required": true },
+        "fullName": { "type": "string", "required": true },
+        "dateOfBirth": { "type": "string", "required": true },
+        "phone": { "type": "string", "required": true },
+        "email": { "type": "string", "required": true },
+        "address": { "type": "string" },
+        "department": { "type": "string", "required": true },
+        "role": { "type": "string", "required": true },
+        "joinedDate": { "type": "string", "required": true },
+        "status": { "type": "string", "required": true },
+        "barcodeToken": { "type": "string", "required": true },
+        "notes": { "type": "string" }
+      }
+    },
+    "ServiceSession": {
+      "collection": "services",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "category": { "type": "string", "required": true },
+        "title": { "type": "string", "required": true },
+        "date": { "type": "string", "required": true },
+        "startTime": { "type": "string", "required": true },
+        "endTime": { "type": "string", "required": true },
+        "preacherOrLeader": { "type": "string", "required": true },
+        "isOpenForAttendance": { "type": "boolean", "required": true },
+        "createdAt": { "type": "string", "required": true }
+      }
+    },
+    "Announcement": {
+      "collection": "announcements",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "title": { "type": "string", "required": true },
+        "content": { "type": "string", "required": true },
+        "category": { "type": "string", "required": true },
+        "date": { "type": "string", "required": true },
+        "author": { "type": "string", "required": true }
+      }
+    },
+    "AttendanceRecord": {
+      "collection": "attendances",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "serviceId": { "type": "string", "required": true },
+        "serviceCategory": { "type": "string", "required": true },
+        "serviceTitle": { "type": "string", "required": true },
+        "serviceDate": { "type": "string", "required": true },
+        "memberId": { "type": "string", "required": true },
+        "memberDbId": { "type": "string", "required": true },
+        "memberName": { "type": "string", "required": true },
+        "timestamp": { "type": "string", "required": true },
+        "checkInMethod": { "type": "string", "required": true },
+        "recordedBy": { "type": "string", "required": true }
+      }
+    },
+    "AnnouncementComment": {
+      "collection": "announcement_comments",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "announcementId": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "author": { "type": "string", "required": true },
+        "memberId": { "type": "string" },
+        "text": { "type": "string", "required": true },
+        "time": { "type": "string", "required": true },
+        "avatarInitials": { "type": "string", "required": true },
+        "isDemo": { "type": "boolean" },
+        "createdAt": { "type": "string", "required": true }
+      }
+    },
+    "AnnouncementReaction": {
+      "collection": "announcement_reactions",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "announcementId": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "memberId": { "type": "string", "required": true },
+        "reaction": { "type": "string", "required": true },
+        "createdAt": { "type": "string", "required": true },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "AppConfig": {
+      "collection": "app_config",
+      "fields": {
+        "id": { "type": "string", "required": true },
+        "systemStatus": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    }
+  }
+}

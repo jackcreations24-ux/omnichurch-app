@@ -1,0 +1,6 @@
+{
+  "name": "OmniChurch Pro",
+  "description": "Aplikasyon entèlijan jesyon legliz ak manm, prezans QR code offline, ak finans.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,43 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+    
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:9.4.0'
+        classpath 'com.google.gms:google-services:4.4.4'
+
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
+    }
+}
+
+apply from: "variables.gradle"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // Gid pwofesyonèl: fòse Gradle 9 sote "jcenter" si yon plugin ap rele l
+        maven { url "https://jcenter.bintray.com" }
+    }
+}
+
+// Solisyon Ultra Pro pou ignore metòd jcenter() nan tout sub-projects yo nan Gradle 9
+allprojects {
+    buildscript {
+        repositories {
+            delegate.metaClass.jcenter = { -> delegate.mavenCentral() }
+        }
+    }
+    repositories {
+        delegate.metaClass.jcenter = { -> delegate.mavenCentral() }
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
