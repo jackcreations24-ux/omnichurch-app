@@ -16,6 +16,9 @@ export type { DevSponsorsTabProps } from './DevSponsorsTab';
 export { DevModerationTab } from './DevModerationTab';
 export type { DevModerationTabProps } from './DevModerationTab';
 
+export { DevVerificationTab } from './DevVerificationTab';
+export type { DevVerificationTabProps } from './DevVerificationTab';
+
 export { DevSecurityTab } from './DevSecurityTab';
 export type { DevSecurityTabProps } from './DevSecurityTab';
 

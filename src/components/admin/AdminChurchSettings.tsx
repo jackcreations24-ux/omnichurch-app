@@ -56,21 +56,38 @@ import {
   Server,
   HardDrive,
   Cpu,
+  Camera,
+  User as UserIcon,
 } from "lucide-react";
 import { translations } from "../../utils/i18n";
+import { OmniChurchLogo } from "../common/OmniChurchLogo";
+import {
+  EMAIL_VERIFICATION_RESEND_COOLDOWN_SEC,
+  needsInlineReauthForVerification,
+  computeResendCooldownRemaining,
+  getVerificationEmailLastSentAt,
+  recordVerificationEmailSent,
+} from "../../utils/emailVerificationFlow";
 import {
   getAllChurches,
   compressImageToBase64,
   saveChurch,
+  clearPendingLocalUpload,
   createNewChurch,
+  authorizeChurchAdminSession,
+  syncCreatedChurchToCloudStrict,
   deleteChurch,
   resetSystemDatabase,
-  purgeTestChurches,
   getMembersByChurch,
   getServicesByChurch,
   getAnnouncementsByChurch,
   getAttendanceByChurch,
+  resolveChurchAdminAvatarUrl,
+  updateChurchAdminProfilePhoto,
+  updateChurchLogoPhoto,
 } from "../../utils/storage";
+import { syncChurchAdminOwnershipWithCloud } from "../../services/firestoreService";
+import { auth, measureFirestoreLatency } from "../../lib/firebase";
 import { useToast } from "../../context/ToastContext";
 import { useAuth } from "../../context/AuthContext";
 import {
@@ -87,6 +104,7 @@ import {
   isPasscodeHashed,
   hashAdminPasscodeSync,
   verifyAdminPasscode,
+  isSuperDeveloperEmail,
 } from "../../utils/cryptoSecurity";
 import { APP_BASE_VERSION as version } from "../../version";
 import { isValidRnc } from "../../utils/rncValidator";
@@ -127,7 +145,10 @@ export const AdminChurchSettings: React.FC<any> = ({
   onChurchCreated,
   onChurchDeleted,
   onSystemReset,
-  onRefreshAll
+  onRefreshAll,
+  onOpenPrivacyPolicy,
+  onOpenTermsOfService,
+  onOpenEmailVerificationScreen
 }) => {
   var _a3, _b3, _c2, _d2, _e3, _f2, _g2, _h2, _i2, _j2, _k2, _l2, _m2, _n2, _o, _p, _q, _r2, _s, _t2, _u, _v, _w, _x, _y, _z, _A, _B;
   const isEs = language === "es";
@@ -139,9 +160,16 @@ export const AdminChurchSettings: React.FC<any> = ({
   const toast = useToast();
   const {
     googleUser,
+    isEmailVerified,
     signInWithGoogle,
     signOutGoogle,
+    registerChurchAdminWithEmail,
+    signInChurchAdminWithEmail,
+    sendChurchAdminPasswordReset,
+    resendAdminVerificationEmail,
+    refreshAuthUserState,
     linkChurchAdminGoogleAccount,
+    linkChurchAdminEmailAccount,
     unlinkChurchAdminGoogleAccount
   } = useAuth();
   const [activeSubTab, setActiveSubTab] = reactExports.useState("profile");
@@ -152,8 +180,6 @@ export const AdminChurchSettings: React.FC<any> = ({
   const [isDeletingChurch, setIsDeletingChurch] = reactExports.useState(false);
   const [showSystemResetModal, setShowSystemResetModal] = reactExports.useState(false);
   const [isResettingSystem, setIsResettingSystem] = reactExports.useState(false);
-  const [showPurgeDemoModal, setShowPurgeDemoModal] = reactExports.useState(false);
-  const [isPurgingDemo, setIsPurgingDemo] = reactExports.useState(false);
   const [name2, setName] = reactExports.useState(activeChurch.name || "");
   const [code, setCode] = reactExports.useState(activeChurch.code || "");
   const [pastor, setPastor] = reactExports.useState(activeChurch.pastor || "");
@@ -163,26 +189,142 @@ export const AdminChurchSettings: React.FC<any> = ({
   const [email, setEmail] = reactExports.useState(activeChurch.email || "");
   const [website, setWebsite] = reactExports.useState(activeChurch.website || "");
   const [motto, setMotto] = reactExports.useState(activeChurch.motto || "");
-  const [rnc, setRnc] = reactExports.useState(activeChurch.rnc || activeChurch.rncNumber || "");
-  const [rncDocumentPhoto, setRncDocumentPhoto] = reactExports.useState(activeChurch.rncDocumentPhoto || "");
-  const [rncDocumentUploadedAt, setRncDocumentUploadedAt] = reactExports.useState(activeChurch.rncDocumentUploadedAt || "");
-  const [isPreviewingDocumentModal, setIsPreviewingDocumentModal] = reactExports.useState(false);
-  const [isUploadingDoc, setIsUploadingDoc] = reactExports.useState(false);
-  const legalDocInputRef = reactExports.useRef(null);
+  const adminPhotoInputRef = reactExports.useRef<HTMLInputElement | null>(null);
+  const churchLogoInputRef = reactExports.useRef<HTMLInputElement | null>(null);
+  const [adminProfilePhoto, setAdminProfilePhoto] = reactExports.useState<string | undefined>(activeChurch.adminGooglePhoto);
+  const [logoUrl, setLogoUrl] = reactExports.useState<string>(activeChurch.logoUrl || "");
+  const [isUpdatingAdminPhoto, setIsUpdatingAdminPhoto] = reactExports.useState(false);
+  const [isUpdatingLogoPhoto, setIsUpdatingLogoPhoto] = reactExports.useState(false);
   const [themeColor, setThemeColor] = reactExports.useState(activeChurch.themeColor || "amber");
   const [logoIcon, setLogoIcon] = reactExports.useState(activeChurch.logoIcon || "Church");
   const [adminPasscode, setAdminPasscode] = reactExports.useState(activeChurch.adminPasscode || "");
+  const [isPasscodeDirty, setIsPasscodeDirty] = reactExports.useState(false);
+  const [quickPinEnabled, setQuickPinEnabled] = reactExports.useState(Boolean(activeChurch.quickPinEnabled));
+  const [quickPinNewValue, setQuickPinNewValue] = reactExports.useState("");
+  const [showQuickPinInput, setShowQuickPinInput] = reactExports.useState(false);
+  const [autoLockMinutes, setAutoLockMinutes] = reactExports.useState(
+    typeof activeChurch.autoLockMinutes === "number" ? activeChurch.autoLockMinutes : 5
+  );
+  const syncedChurchIdRef = reactExports.useRef(activeChurch.id);
   const [customCardTitle, setCustomCardTitle] = reactExports.useState(
     activeChurch.customCardTitle || (isEs ? "TARJETA DE MEMBRESÍA" : isFr ? "CARTE DE MEMBRE OFFICIELLE" : isEn ? "OFFICIAL MEMBER CARD" : "KAT IDANTITE MANM")
   );
   const [signatureUrl, setSignatureUrl] = reactExports.useState(activeChurch.signatureUrl || "");
   const [showSignaturePad, setShowSignaturePad] = reactExports.useState(false);
   const [adminGoogleEmail, setAdminGoogleEmail] = reactExports.useState(activeChurch.adminGoogleEmail || "");
+  const [ownerVerifCooldown, setOwnerVerifCooldown] = reactExports.useState(() =>
+    computeResendCooldownRemaining(getVerificationEmailLastSentAt(activeChurch.adminGoogleEmail))
+  );
+  const ownerEmailMatchesVerifiedAuth = Boolean(
+    isEmailVerified &&
+    activeChurch.adminGoogleEmail &&
+    ((auth.currentUser && auth.currentUser.email) || (googleUser && googleUser.email) || "").trim().toLowerCase() === activeChurch.adminGoogleEmail.trim().toLowerCase()
+  );
+  const showOwnerEmailPendingVerification = Boolean(
+    activeChurch.adminGoogleEmail &&
+    !activeChurch.adminVerified &&
+    !ownerEmailMatchesVerifiedAuth
+  );
+  reactExports.useEffect(() => {
+    const targetEmail = activeChurch.adminGoogleEmail || "";
+    if (!targetEmail || !showOwnerEmailPendingVerification) {
+      setOwnerVerifCooldown(0);
+      return;
+    }
+    const tick = () => {
+      setOwnerVerifCooldown(computeResendCooldownRemaining(getVerificationEmailLastSentAt(targetEmail)));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [activeChurch.adminGoogleEmail, showOwnerEmailPendingVerification]);
+  const handleOwnerResendVerificationAction = async () => {
+    if (isSendingVerificationEmail || ownerVerifCooldown > 0) return;
+    const requiresReauth = needsInlineReauthForVerification({
+      church: activeChurch,
+      hasAuthUser: Boolean(auth.currentUser && auth.currentUser.uid),
+      authUserEmail: (auth.currentUser && auth.currentUser.email) || (googleUser && googleUser.email),
+    });
+    if (requiresReauth && onOpenEmailVerificationScreen) {
+      onOpenEmailVerificationScreen();
+      return;
+    }
+    setIsSendingVerificationEmail(true);
+    try {
+      const refreshed = await refreshAuthUserState();
+      if (!refreshed) {
+        await resendAdminVerificationEmail();
+        recordVerificationEmailSent(activeChurch.adminGoogleEmail);
+        setOwnerVerifCooldown(EMAIL_VERIFICATION_RESEND_COOLDOWN_SEC);
+        toast.success(
+          isEs ? "Correo de verificación reenviado" : isFr ? "E-mail renvoyé" : isEn ? "Verification Email Sent" : "Imèl Verifikasyon Voye",
+          isEn
+            ? `A fresh verification link was sent to ${activeChurch.adminGoogleEmail}.`
+            : `Nou voye yon nouvo lyen verifikasyon nan ${activeChurch.adminGoogleEmail}.`
+        );
+      } else {
+        const syncRes = await syncChurchAdminOwnershipWithCloud(activeChurch, { forceTokenRefresh: true, reloadUser: true });
+        if (syncRes.synced && syncRes.church) {
+          saveChurch(syncRes.church);
+          clearPendingLocalUpload("church", syncRes.church.id);
+        }
+        toast.success(
+          isEn ? "Verified & Synced!" : "Verifye & Senkronize ✓",
+          isEn ? "Email is verified and cloud admin permissions are synced." : "Imèl ou a verifye epi pèmisyon nwaj legliz la senkronize kounye a."
+        );
+        if (onRefreshAll) onRefreshAll();
+      }
+    } catch (err) {
+      if (onOpenEmailVerificationScreen && !auth.currentUser) {
+        onOpenEmailVerificationScreen();
+        return;
+      }
+      toast.error(isEn ? "Verification Note" : "Nòt Verifikasyon", (err == null ? void 0 : err.message) || "Re-konekte anvan pou voye lyen an.");
+    } finally {
+      setIsSendingVerificationEmail(false);
+    }
+  };
+  const handleOwnerCheckVerificationStatusAction = async () => {
+    if (isSendingVerificationEmail) return;
+    const requiresReauth = needsInlineReauthForVerification({
+      church: activeChurch,
+      hasAuthUser: Boolean(auth.currentUser && auth.currentUser.uid),
+      authUserEmail: (auth.currentUser && auth.currentUser.email) || (googleUser && googleUser.email),
+    });
+    if (requiresReauth && onOpenEmailVerificationScreen) {
+      onOpenEmailVerificationScreen();
+      return;
+    }
+    setIsSendingVerificationEmail(true);
+    try {
+      const refreshed = await refreshAuthUserState();
+      if (!refreshed) {
+        toast.warning(
+          isEn ? "Not Verified Yet" : "Poko Verifye",
+          isEn ? "Click the link in your email inbox (or Spam) first, then try again." : "Klike sou lyen ki nan imèl ou a (oswa Spam) dabò, epi re-eseye."
+        );
+      } else {
+        const syncRes = await syncChurchAdminOwnershipWithCloud(activeChurch, { forceTokenRefresh: true, reloadUser: true });
+        if (syncRes.synced && syncRes.church) {
+          saveChurch(syncRes.church);
+          clearPendingLocalUpload("church", syncRes.church.id);
+        }
+        toast.success(
+          isEn ? "Verified & Synced!" : "Verifye & Senkronize ✓",
+          isEn ? "Email is verified and cloud admin permissions are synced." : "Imèl ou a verifye epi pèmisyon nwaj legliz la senkronize kounye a."
+        );
+        if (onRefreshAll) onRefreshAll();
+      }
+    } catch (err) {
+      toast.error(isEn ? "Verification Note" : "Nòt Verifikasyon", (err == null ? void 0 : err.message) || "Re-eseye.");
+    } finally {
+      setIsSendingVerificationEmail(false);
+    }
+  };
   const [windowsExeDownloadUrl, setWindowsExeDownloadUrl] = reactExports.useState(activeChurch.windowsExeDownloadUrl || "");
   const [copiedCmd, setCopiedCmd] = reactExports.useState(null);
   const [qrDataUrl, setQrDataUrl] = reactExports.useState("");
   const signatureInputRef = reactExports.useRef(null);
-  const profileSignatureInputRef = reactExports.useRef(null);
   const [showLicenseModal, setShowLicenseModal] = reactExports.useState(false);
   const [licenseRefreshKey, setLicenseRefreshKey] = reactExports.useState(0);
   const isChurchLicensed = reactExports.useMemo(() => hasActiveChurchLicense(activeChurch.id), [activeChurch.id, licenseRefreshKey]);
@@ -219,37 +361,6 @@ export const AdminChurchSettings: React.FC<any> = ({
   const [donationZelleName, setDonationZelleName] = reactExports.useState(
     ((_p = activeChurch.donationInfo) == null ? void 0 : _p.zelleName) || activeChurch.name || ""
   );
-  const handleLegalDocUpload = async (e3) => {
-    var _a4;
-    const file = (_a4 = e3.target.files) == null ? void 0 : _a4[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      toast.error(
-        isEs ? "Formato No Válido" : isFr ? "Format Non Valide" : isEn ? "Invalid Format" : "Fòma Envalid",
-        isEs ? "Por favor suba una foto en formato JPG o PNG." : "Tanpri chwazi yon foto dokiman ki nan fòma JPG oswa PNG."
-      );
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      toast.error("Fichye Twò Gwo", "Tanpri chwazi yon foto ki mwens pase 10MB.");
-      return;
-    }
-    setIsUploadingDoc(true);
-    try {
-      const compressed = await compressImageToBase64(file, 1200, 0.85);
-      setRncDocumentPhoto(compressed);
-      setRncDocumentUploadedAt((/* @__PURE__ */ new Date()).toISOString());
-      toast.success(
-        isEs ? "Documento Legal Cargado" : isFr ? "Document Légal Ajouté" : isEn ? "Legal Document Uploaded" : "Dokiman Legal Anrejistre",
-        isEs ? "Foto del documento legal guardada." : "Foto dokiman legal la anrejistre kòrèkteman."
-      );
-    } catch (err) {
-      toast.error("Erè", (err == null ? void 0 : err.message) || "Pa t ka trete foto a.");
-    } finally {
-      setIsUploadingDoc(false);
-      if (legalDocInputRef.current) legalDocInputRef.current.value = "";
-    }
-  };
   const [donationCashAppEnabled, setDonationCashAppEnabled] = reactExports.useState(((_q = activeChurch.donationInfo) == null ? void 0 : _q.cashAppEnabled) ?? false);
   const [donationCashAppTag, setDonationCashAppTag] = reactExports.useState(((_r2 = activeChurch.donationInfo) == null ? void 0 : _r2.cashAppTag) || "");
   const [donationCustomGivingUrl, setDonationCustomGivingUrl] = reactExports.useState(
@@ -282,6 +393,7 @@ export const AdminChurchSettings: React.FC<any> = ({
   const [adminBioRecord, setAdminBioRecord] = reactExports.useState(null);
   const [isRegisteringBio, setIsRegisteringBio] = reactExports.useState(false);
   const [pingLatency, setPingLatency] = reactExports.useState(null);
+  const [cloudOnlineStatus, setCloudOnlineStatus] = reactExports.useState<boolean | null>(null);
   const [isPinging, setIsPinging] = reactExports.useState(false);
   const [isImporting, setIsImporting] = reactExports.useState(false);
   const fileInputRef = reactExports.useRef(null);
@@ -308,12 +420,23 @@ export const AdminChurchSettings: React.FC<any> = ({
     setEmail(activeChurch.email || "");
     setWebsite(activeChurch.website || "");
     setMotto(activeChurch.motto || "");
-    setRnc(activeChurch.rnc || activeChurch.rncNumber || "");
-    setRncDocumentPhoto(activeChurch.rncDocumentPhoto || "");
-    setRncDocumentUploadedAt(activeChurch.rncDocumentUploadedAt || "");
     setThemeColor(activeChurch.themeColor || "amber");
     setLogoIcon(activeChurch.logoIcon || "Church");
-    setAdminPasscode(activeChurch.adminPasscode || "");
+    setAdminProfilePhoto(activeChurch.adminGooglePhoto);
+    setLogoUrl(activeChurch.logoUrl || "");
+    if (syncedChurchIdRef.current !== activeChurch.id) {
+      syncedChurchIdRef.current = activeChurch.id;
+      setAdminPasscode(activeChurch.adminPasscode || "");
+      setIsPasscodeDirty(false);
+      setQuickPinEnabled(Boolean(activeChurch.quickPinEnabled));
+      setQuickPinNewValue("");
+      setAutoLockMinutes(
+        typeof activeChurch.autoLockMinutes === "number" ? activeChurch.autoLockMinutes : 5
+      );
+    } else if (!isPasscodeDirty && activeChurch.adminPasscode && activeChurch.adminPasscode !== adminPasscode) {
+      // Only update input from prop if user isn't actively editing and remote has a valid passcode
+      setAdminPasscode(activeChurch.adminPasscode);
+    }
     setCustomCardTitle(
       activeChurch.customCardTitle || (isEs ? "TARJETA DE MEMBRESÍA" : isFr ? "CARTE DE MEMBRE OFFICIELLE" : isEn ? "OFFICIAL MEMBER CARD" : "KAT IDANTITE MANM")
     );
@@ -396,9 +519,6 @@ export const AdminChurchSettings: React.FC<any> = ({
     if (signatureInputRef.current) {
       signatureInputRef.current.value = "";
     }
-    if (profileSignatureInputRef.current) {
-      profileSignatureInputRef.current.value = "";
-    }
     const updated = {
       ...activeChurch,
       signatureUrl: void 0
@@ -410,6 +530,137 @@ export const AdminChurchSettings: React.FC<any> = ({
     );
     if (onChurchSaved) onChurchSaved();
     if (onRefreshAll) onRefreshAll();
+  };
+  const resolvedAdminAvatarPreview = resolveChurchAdminAvatarUrl(
+    { ...activeChurch, adminGooglePhoto: adminProfilePhoto },
+    googleUser
+  );
+  const handleUploadAdminProfilePhoto = async (e3: any) => {
+    var _a4;
+    const file = (_a4 = e3.target.files) == null ? void 0 : _a4[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error(
+        isEs ? "Formato No Válido" : isFr ? "Format Non Valide" : isEn ? "Invalid Format" : "Fòma Envalid",
+        isEs ? "Por favor seleccione una imagen (JPG, PNG o WebP)." : isFr ? "Veuillez choisir une image (JPG, PNG ou WebP)." : isEn ? "Please select an image file (JPG, PNG, or WebP)." : "Tanpri chwazi yon fichye imaj (JPG, PNG oswa WebP)."
+      );
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error(
+        isEs ? "Archivo Demasiado Grande" : isFr ? "Fichier Trop Volumineux" : isEn ? "File Too Large" : "Fichye Twò Gwo",
+        isEs ? "Por favor elija una foto menor a 10MB." : isFr ? "Veuillez choisir une photo de moins de 10 Mo." : isEn ? "Please select a photo smaller than 10MB." : "Tanpri chwazi yon foto ki mwens pase 10MB."
+      );
+      return;
+    }
+    setIsUpdatingAdminPhoto(true);
+    try {
+      const compressed = String(await compressImageToBase64(file, 400, 0.85));
+      const updated = await updateChurchAdminProfilePhoto(activeChurch.id, compressed);
+      setAdminProfilePhoto((updated == null ? void 0 : updated.adminGooglePhoto) ?? compressed);
+      toast.success(
+        isEs ? "¡Foto de Perfil Actualizada!" : isFr ? "Photo de Profil Mise à Jour !" : isEn ? "Profile Photo Updated!" : "Foto Pwofil Admin Mete Ajou !",
+        isEs ? "Su nueva foto se ha guardado y sincronizado en todos los dispositivos." : isFr ? "Votre nouvelle photo est enregistrée et synchronisée partout." : isEn ? "Your new admin profile photo is saved and synced across devices." : "Nouvo foto pwofil ou a anrejistre epi li senkronize toupatou (menm ak kont Google)."
+      );
+      if (onChurchSaved) onChurchSaved();
+      if (onRefreshAll) onRefreshAll();
+    } catch (err: any) {
+      toast.error(
+        isEs ? "Error al Cargar Foto" : isFr ? "Erreur de Téléversement" : isEn ? "Upload Error" : "Erè Chajman Foto",
+        (err == null ? void 0 : err.message) || (isEn ? "Could not process the selected photo." : "Pa t ka trete foto sa a.")
+      );
+    } finally {
+      setIsUpdatingAdminPhoto(false);
+      if (adminPhotoInputRef.current) adminPhotoInputRef.current.value = "";
+    }
+  };
+  const handleRemoveAdminProfilePhoto = async () => {
+    setIsUpdatingAdminPhoto(true);
+    try {
+      await updateChurchAdminProfilePhoto(activeChurch.id, null);
+      setAdminProfilePhoto("");
+      if (adminPhotoInputRef.current) adminPhotoInputRef.current.value = "";
+      toast.info(
+        isEs ? "Foto de Perfil Eliminada" : isFr ? "Photo de Profil Supprimée" : isEn ? "Profile Photo Removed" : "Foto Pwofil Retire",
+        isEs ? "La foto personalizada ha sido eliminada y sincronizada." : isFr ? "La photo personnalisée a été retirée et synchronisée." : isEn ? "Custom profile photo removed and synced." : "Foto pwofil la retire epi tout sistèm nan senkronize."
+      );
+      if (onChurchSaved) onChurchSaved();
+      if (onRefreshAll) onRefreshAll();
+    } finally {
+      setIsUpdatingAdminPhoto(false);
+    }
+  };
+  const handleUseGoogleAdminPhoto = async () => {
+    const gPhoto = (googleUser == null ? void 0 : googleUser.photoURL) ? googleUser.photoURL.trim() : "";
+    if (!gPhoto) return;
+    setIsUpdatingAdminPhoto(true);
+    try {
+      await updateChurchAdminProfilePhoto(activeChurch.id, gPhoto);
+      setAdminProfilePhoto(gPhoto);
+      toast.success(
+        isEs ? "Foto de Google Restaurada" : isFr ? "Photo Google Restaurée" : isEn ? "Google Photo Restored" : "Foto Google Retabli",
+        isEs ? "Ahora se muestra la foto de su cuenta Google." : isFr ? "La photo de votre compte Google est maintenant utilisée." : isEn ? "Your Google account photo is now active and synced." : "Kounye a se foto kont Google ou a k ap parèt toupatou."
+      );
+      if (onChurchSaved) onChurchSaved();
+      if (onRefreshAll) onRefreshAll();
+    } finally {
+      setIsUpdatingAdminPhoto(false);
+    }
+  };
+  const handleUploadChurchLogo = async (e3: any) => {
+    var _a4;
+    const file = (_a4 = e3.target.files) == null ? void 0 : _a4[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.error(
+        isEs ? "Formato No Válido" : isFr ? "Format Non Valide" : isEn ? "Invalid Format" : "Fòma Envalid",
+        isEs ? "Por favor seleccione una imagen (JPG, PNG o WebP)." : isFr ? "Veuillez choisir une image (JPG, PNG ou WebP)." : isEn ? "Please select an image file (JPG, PNG, or WebP)." : "Tanpri chwazi yon fichye imaj (JPG, PNG oswa WebP)."
+      );
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error(
+        isEs ? "Archivo Demasiado Grande" : isFr ? "Fichier Trop Volumineux" : isEn ? "File Too Large" : "Fichye Twò Gwo",
+        isEs ? "Por favor elija un logo menor a 10MB." : isFr ? "Veuillez choisir un logo de moins de 10 Mo." : isEn ? "Please select an image smaller than 10MB." : "Tanpri chwazi yon imaj ki mwens pase 10MB."
+      );
+      return;
+    }
+    setIsUpdatingLogoPhoto(true);
+    try {
+      const compressed = String(await compressImageToBase64(file, 400, 0.85));
+      const updated = await updateChurchLogoPhoto(activeChurch.id, compressed);
+      setLogoUrl((updated == null ? void 0 : updated.logoUrl) ?? compressed);
+      toast.success(
+        isEs ? "¡Logo de la Iglesia Actualizado!" : isFr ? "Logo de l’Église Mis à Jour !" : isEn ? "Church Logo Updated!" : "Logo Legliz la Mete Ajou !",
+        isEs ? "El logo oficial se ha guardado y sincronizado en el feed y la barra." : isFr ? "Le logo officiel est enregistré et synchronisé partout." : isEn ? "The official church logo is saved and synced across the feed and header." : "Logo ofisyèl legliz la anrejistre epi li senkronize nan feed la ak nan tèt paj la."
+      );
+      if (onChurchSaved) onChurchSaved();
+      if (onRefreshAll) onRefreshAll();
+    } catch (err: any) {
+      toast.error(
+        isEs ? "Error al Cargar Logo" : isFr ? "Erreur de Téléversement" : isEn ? "Upload Error" : "Erè Chajman Logo",
+        (err == null ? void 0 : err.message) || (isEn ? "Could not process the selected image." : "Pa t ka trete imaj sa a.")
+      );
+    } finally {
+      setIsUpdatingLogoPhoto(false);
+      if (churchLogoInputRef.current) churchLogoInputRef.current.value = "";
+    }
+  };
+  const handleRemoveChurchLogo = async () => {
+    setIsUpdatingLogoPhoto(true);
+    try {
+      await updateChurchLogoPhoto(activeChurch.id, null);
+      setLogoUrl("");
+      if (churchLogoInputRef.current) churchLogoInputRef.current.value = "";
+      toast.info(
+        isEs ? "Logo Eliminado" : isFr ? "Logo Supprimé" : isEn ? "Church Logo Removed" : "Logo Legliz Retire",
+        isEs ? "Se usará el icono estándar de la iglesia." : isFr ? "L’icône standard de l’église sera utilisée." : isEn ? "Reverted to standard church icon." : "Legliz la ap itilize ikòn estanda li a."
+      );
+      if (onChurchSaved) onChurchSaved();
+      if (onRefreshAll) onRefreshAll();
+    } finally {
+      setIsUpdatingLogoPhoto(false);
+    }
   };
   reactExports.useEffect(() => {
     checkBiometricSupport().then((support) => {
@@ -474,11 +725,184 @@ export const AdminChurchSettings: React.FC<any> = ({
   const [newPhone, setNewPhone] = reactExports.useState("+1 ");
   const [newEmail, setNewEmail] = reactExports.useState("");
   const [newMotto, setNewMotto] = reactExports.useState("");
-  const [newAdminPasscode, setNewAdminPasscode] = reactExports.useState("");
-  const [newConfirmPasscode, setNewConfirmPasscode] = reactExports.useState("");
+  const [newAdminEmail, setNewAdminEmail] = reactExports.useState("");
+  const [newAdminPassword, setNewAdminPassword] = reactExports.useState("");
+  const [newConfirmPassword, setNewConfirmPassword] = reactExports.useState("");
+  const hasLiveReusableAuthUser = Boolean(
+    googleUser &&
+    googleUser.email &&
+    googleUser.uid &&
+    !isSuperDeveloperEmail(googleUser.email) &&
+    auth.currentUser &&
+    auth.currentUser.uid === googleUser.uid
+  );
+  const [useGoogleForNewChurch, setUseGoogleForNewChurch] = reactExports.useState(hasLiveReusableAuthUser);
+  const [isGoogleConnectingNewChurch, setIsGoogleConnectingNewChurch] = reactExports.useState(false);
+  const [isCreatingChurchSubmit, setIsCreatingChurchSubmit] = reactExports.useState(false);
   const [showNewPasscode, setShowNewPasscode] = reactExports.useState(false);
-  const handleSaveCurrentChurch = (e3) => {
-    e3.preventDefault();
+  reactExports.useEffect(() => {
+    if (isCreatingNew) {
+      const canUseLive = Boolean(
+        googleUser &&
+        googleUser.email &&
+        googleUser.uid &&
+        !isSuperDeveloperEmail(googleUser.email) &&
+        auth.currentUser &&
+        auth.currentUser.uid === googleUser.uid
+      );
+      setUseGoogleForNewChurch(canUseLive);
+    }
+  }, [isCreatingNew, googleUser]);
+  const handleConnectGoogleForNewChurch = async () => {
+    setIsGoogleConnectingNewChurch(true);
+    try {
+      const signed = await signInWithGoogle();
+      if (!signed || !signed.email || !signed.uid) {
+        throw new Error("Pa jwenn enfòmasyon kont Google la.");
+      }
+      if (isSuperDeveloperEmail(signed.email)) {
+        setUseGoogleForNewChurch(false);
+        toast.error(
+          isEs ? "Cuenta Reservada" : isEn ? "Reserved Account" : "Kont Rezève",
+          isEn
+            ? "This account is reserved for System Administration. Use another Google account or Email + Password."
+            : "Kont sa a rezève pou Panèl Administrasyon Jeneral sistèm nan. Chwazi yon lòt kont Google oswa Imèl + Modpas."
+        );
+        return;
+      }
+      setUseGoogleForNewChurch(true);
+      setNewAdminEmail(signed.email);
+      if (!newEmail) setNewEmail(signed.email);
+    } catch (err: any) {
+      toast.error("Erè Koneksyon Google", (err == null ? void 0 : err.message) || "Pa ka konekte ak Google.");
+    } finally {
+      setIsGoogleConnectingNewChurch(false);
+    }
+  };
+  const [isSendingPasswordReset, setIsSendingPasswordReset] = reactExports.useState(false);
+  const [isSendingVerificationEmail, setIsSendingVerificationEmail] = reactExports.useState(false);
+  const [upgradeEmailInput, setUpgradeEmailInput] = reactExports.useState("");
+  const [upgradePasswordInput, setUpgradePasswordInput] = reactExports.useState("");
+  const [isUpgradingEmailAuth, setIsUpgradingEmailAuth] = reactExports.useState(false);
+  const handleSaveQuickPinConfig = (
+    overrideQuickPinEnabled?: boolean,
+    overrideAutoLockMinutes?: number
+  ) => {
+    const nextQuickPinEnabled =
+      typeof overrideQuickPinEnabled === "boolean" ? overrideQuickPinEnabled : quickPinEnabled;
+    const nextAutoLockMinutes =
+      typeof overrideAutoLockMinutes === "number" ? overrideAutoLockMinutes : autoLockMinutes;
+    const cleanNewPin = quickPinNewValue.trim();
+
+    if (cleanNewPin && cleanNewPin.length < 4) {
+      toast.error(
+        isEs ? "PIN Inválido" : isFr ? "PIN Invalide" : isEn ? "Invalid PIN" : "Kòd PIN Envalid",
+        isEs
+          ? "El PIN rápido debe tener al menos 4 dígitos."
+          : isFr
+          ? "Le code PIN rapide doit contenir au moins 4 chiffres."
+          : isEn
+          ? "Quick PIN must be at least 4 characters."
+          : "Kòd PIN rapid la dwe gen omwen 4 chif."
+      );
+      return;
+    }
+
+    const existingHashedPin = (adminPasscode || activeChurch.adminPasscode || "").trim();
+    if (nextQuickPinEnabled && !cleanNewPin && !existingHashedPin) {
+      toast.error(
+        isEs ? "Defina un PIN primero" : isFr ? "Définissez un PIN d'abord" : isEn ? "Set a PIN first" : "Antre yon kòd PIN dabò",
+        isEs
+          ? "Escriba un PIN de 4 a 6 dígitos antes de activar el desbloqueo rápido."
+          : isEn
+          ? "Enter a 4–6 digit PIN below before enabling Quick PIN unlock."
+          : "Tanpri ekri yon kòd PIN 4–6 chif anba a anvan ou aktive deblokaj rapid la."
+      );
+      return;
+    }
+
+    const hasNewPin = Boolean(cleanNewPin);
+    const nextPasscode = hasNewPin
+      ? hashAdminPasscodeSync(cleanNewPin, activeChurch.id)
+      : existingHashedPin || void 0;
+
+    const updated = {
+      ...activeChurch,
+      adminPasscode: nextPasscode,
+      quickPinEnabled: nextQuickPinEnabled,
+      autoLockMinutes: nextAutoLockMinutes,
+    };
+
+    saveChurch(updated, { deliberatePasscodeUpdate: hasNewPin });
+    if (hasNewPin) {
+      setAdminPasscode(nextPasscode || "");
+      setQuickPinNewValue("");
+      setIsPasscodeDirty(false);
+    }
+    setQuickPinEnabled(nextQuickPinEnabled);
+    setAutoLockMinutes(nextAutoLockMinutes);
+
+    toast.success(
+      isEs ? "Seguridad Actualizada" : isFr ? "Sécurité Mise à Jour" : isEn ? "Security Updated" : "Sekirite Mete Ajou ✓",
+      hasNewPin
+        ? isEs
+          ? "Nuevo PIN rápido cifrado y guardado."
+          : isEn
+          ? "Quick PIN encrypted and saved."
+          : "Kòd PIN rapid la kripte epi anrejistre ak siksè."
+        : isEs
+        ? "Opciones de acceso rápido guardadas."
+        : isEn
+        ? "Quick unlock and auto-lock settings saved."
+        : "Opsyon deblokaj rapid ak oto-blokaj la anrejistre."
+    );
+    if (onChurchSaved) onChurchSaved();
+    if (onRefreshAll) onRefreshAll();
+  };
+
+  const handleSaveCurrentChurch = (e3, forceDeliberatePasscode = false) => {
+    if (e3 && typeof e3.preventDefault === "function") e3.preventDefault();
+    const cleanNewQuickPin = quickPinNewValue.trim();
+    const cleanInputPass = cleanNewQuickPin || adminPasscode.trim();
+    const isDeliberatePasscodeChange =
+      Boolean(cleanNewQuickPin) ||
+      forceDeliberatePasscode ||
+      (isPasscodeDirty && cleanInputPass !== (activeChurch.adminPasscode || "").trim());
+
+    if (cleanNewQuickPin && cleanNewQuickPin.length < 4) {
+      toast.error(
+        isEs ? "PIN Inválido" : isFr ? "PIN Invalide" : isEn ? "Invalid Passcode" : "Kòd PIN Envalid",
+        isEs
+          ? "El código de seguridad debe tener al menos 4 caracteres."
+          : isFr
+          ? "Le code de sécurité doit contenir au moins 4 caractères."
+          : isEn
+          ? "Security passcode must be at least 4 characters long."
+          : "Kòd sekirite a dwe gen omwen 4 karaktè."
+      );
+      return;
+    }
+
+    if (quickPinEnabled && !cleanInputPass) {
+      toast.error(
+        isEs ? "Defina un PIN primero" : isEn ? "Quick PIN Required" : "Kòd PIN Manke",
+        isEs
+          ? "Escriba un PIN de 4 a 6 dígitos para mantener activo el desbloqueo rápido."
+          : isEn
+          ? "Enter a 4–6 digit Quick PIN to keep Quick PIN unlock enabled."
+          : "Antre yon kòd PIN 4–6 chif pou w ka kenbe deblokaj rapid la aktive."
+      );
+      return;
+    }
+
+    const nextPasscode = isDeliberatePasscodeChange
+      ? cleanInputPass
+        ? isPasscodeHashed(cleanInputPass)
+          ? cleanInputPass
+          : hashAdminPasscodeSync(cleanInputPass, activeChurch.id)
+        : void 0
+      : (activeChurch.adminPasscode || "").trim() || void 0;
+
     const updated = {
       ...activeChurch,
       name: name2.trim(),
@@ -490,13 +914,13 @@ export const AdminChurchSettings: React.FC<any> = ({
       email: email.trim(),
       website: website.trim(),
       motto: motto.trim(),
-      rnc: rnc.trim() || void 0,
-      rncNumber: rnc.trim() || void 0,
-      rncDocumentPhoto: rncDocumentPhoto.trim() || void 0,
-      rncDocumentUploadedAt: rncDocumentPhoto.trim() ? rncDocumentUploadedAt || (/* @__PURE__ */ new Date()).toISOString() : void 0,
       themeColor,
       logoIcon,
-      adminPasscode: adminPasscode.trim() ? isPasscodeHashed(adminPasscode.trim()) ? adminPasscode.trim() : hashAdminPasscodeSync(adminPasscode.trim(), activeChurch.id) : void 0,
+      logoUrl: logoUrl.trim() || void 0,
+      adminGooglePhoto: adminProfilePhoto,
+      adminPasscode: nextPasscode,
+      quickPinEnabled,
+      autoLockMinutes,
       customCardTitle: customCardTitle.trim() || void 0,
       signatureUrl: signatureUrl.trim() || void 0,
       adminGoogleEmail: adminGoogleEmail.trim().toLowerCase() || void 0,
@@ -534,7 +958,18 @@ export const AdminChurchSettings: React.FC<any> = ({
         lastUpdated: (/* @__PURE__ */ new Date()).toISOString()
       }
     };
-    saveChurch(updated);
+    const isClearingAdminPhoto = adminProfilePhoto === "" || Boolean(activeChurch.adminGooglePhoto && adminProfilePhoto === void 0);
+    const isClearingLogo = !logoUrl.trim() && Boolean(activeChurch.logoUrl);
+    saveChurch(updated, {
+      deliberatePasscodeUpdate: isDeliberatePasscodeChange,
+      clearAdminGooglePhoto: isClearingAdminPhoto,
+      clearLogoUrl: isClearingLogo,
+    });
+    if (isDeliberatePasscodeChange) {
+      setAdminPasscode(nextPasscode || "");
+      setQuickPinNewValue("");
+      setIsPasscodeDirty(false);
+    }
     setSavedSuccess(true);
     toast.success(
       isEs ? "¡Ajustes Guardados!" : isFr ? "Paramètres Enregistrés !" : isEn ? "Settings Saved!" : "Paramèt Anrejistre!",
@@ -544,32 +979,67 @@ export const AdminChurchSettings: React.FC<any> = ({
     if (onChurchSaved) onChurchSaved();
     if (onRefreshAll) onRefreshAll();
   };
-  const handleCreateChurch = (e3) => {
+  const handleCreateChurch = async (e3) => {
     e3.preventDefault();
-    if (!newName.trim() || !newPastor.trim()) {
+    if (newName.trim().length < 2 || !newPastor.trim()) {
       toast.error(
         isEs ? "Faltan Datos" : isFr ? "Données Manquantes" : isEn ? "Missing Information" : "Enfòmasyon Manke",
-        isEs ? "Por favor indique el nombre de la iglesia y el nombre del pastor principal." : isFr ? "Veuillez renseigner le nom de l’église et le pasteur titulaire." : isEn ? "Please provide the church name and senior pastor name." : "Tanpri bay non legliz la ak non pastè titilè a."
+        isEs ? "Por favor indique el nombre de la iglesia (mín. 2 caracteres) y el nombre del pastor principal." : isFr ? "Veuillez renseigner le nom de l’église (min. 2 caractères) et le pasteur titulaire." : isEn ? "Please provide the church name (at least 2 chars) and senior pastor name." : "Tanpri bay non legliz la (omwen 2 karaktè) ak non pastè titilè a."
       );
       return;
     }
-    const cleanPin = newAdminPasscode.trim();
-    const cleanConfirm = newConfirmPasscode.trim();
-    if (!cleanPin || cleanPin.length < 4) {
+    const usingExistingGoogle = Boolean(
+      useGoogleForNewChurch &&
+      googleUser &&
+      googleUser.email &&
+      googleUser.uid &&
+      auth.currentUser &&
+      auth.currentUser.uid === googleUser.uid
+    );
+    const cleanAdminEmail = usingExistingGoogle ? (googleUser.email || "").trim().toLowerCase() : newAdminEmail.trim().toLowerCase();
+    if (isSuperDeveloperEmail(cleanAdminEmail)) {
       toast.error(
-        isEs ? "PIN de Seguridad Requerido" : isFr ? "PIN de Sécurité Obligatoire" : isEn ? "Security PIN Required" : "Kòd PIN Obligatwa",
-        isEs ? "Cada iglesia debe tener su propio PIN de seguridad exclusivo de al menos 4 caracteres." : isFr ? "Chaque église doit avoir son propre code PIN de sécurité d’au moins 4 caractères." : isEn ? "Every church must define its own master security PIN of at least 4 characters." : "Chak legliz dwe defini pwòp kòd sekirite (PIN) mèt pa li ki gen omwen 4 karaktè."
+        isEs ? "Cuenta Reservada" : isEn ? "Reserved Account" : "Kont Rezève",
+        isEn
+          ? "This account is strictly reserved for the System Administration Panel."
+          : "Kont sa a rezève sèlman pou Panèl Administrasyon Jeneral sistèm nan. Chwazi yon lòt kont."
       );
       return;
     }
-    if (cleanPin !== cleanConfirm) {
-      toast.error(
-        isEs ? "Los PIN no coinciden" : isFr ? "Les PIN ne correspondent pas" : isEn ? "PINs do not match" : "Kòd PIN yo pa koresponn",
-        isEs ? "La confirmación del PIN no coincide." : "Konfimasyon kòd PIN lan pa koresponn."
-      );
-      return;
+    if (!usingExistingGoogle) {
+      if (!cleanAdminEmail || !cleanAdminEmail.includes("@")) {
+        toast.error(
+          isEs ? "Correo Requerido" : isFr ? "E-mail Obligatoire" : isEn ? "Admin Email Required" : "Imèl Administratè Obligatwa",
+          isEs ? "Ingrese un correo electrónico válido para el administrador de esta iglesia." : isFr ? "Saisissez un e-mail administrateur valide." : isEn ? "Enter a valid email address for this church administrator." : "Tanpri antre yon imèl valab pou administratè legliz sa a."
+        );
+        return;
+      }
+      if (!newAdminPassword || newAdminPassword.length < 6) {
+        toast.error(
+          isEs ? "Contraseña Muy Corta" : isFr ? "Mot de Passe Trop Court" : isEn ? "Password Too Short" : "Modpas la Twò Kout",
+          isEs ? "La contraseña del administrador debe tener al menos 6 caracteres." : isFr ? "Le mot de passe doit contenir au moins 6 caractères." : isEn ? "Admin password must be at least 6 characters long." : "Modpas administratè a dwe gen omwen 6 karaktè."
+        );
+        return;
+      }
+      if (newAdminPassword !== newConfirmPassword) {
+        toast.error(
+          isEs ? "Las contraseñas no coinciden" : isFr ? "Mots de passe différents" : isEn ? "Passwords do not match" : "Modpas yo pa koresponn",
+          isEs ? "La confirmación de contraseña no coincide." : "Konfimasyon modpas la pa koresponn."
+        );
+        return;
+      }
     }
+    setIsCreatingChurchSubmit(true);
     try {
+      let authOwner = usingExistingGoogle ? googleUser : null;
+      let authMethod: "email_password" | "google" = "google";
+      if (!usingExistingGoogle) {
+        authOwner = await registerChurchAdminWithEmail(cleanAdminEmail, newAdminPassword, newPastor.trim() || newName.trim());
+        authMethod = "email_password";
+      }
+      if (!authOwner || !authOwner.email || !authOwner.uid) {
+        throw new Error("Enfòmasyon kont administratè a pa konplè.");
+      }
       const created = createNewChurch({
         name: newName,
         code: newCode,
@@ -577,14 +1047,18 @@ export const AdminChurchSettings: React.FC<any> = ({
         address: newAddress,
         city: newCity,
         phone: newPhone,
-        email: newEmail,
+        email: newEmail || authOwner.email || "",
         motto: newMotto,
-        adminPasscode: cleanPin,
-        adminGoogleEmail: (googleUser == null ? void 0 : googleUser.email) || ""
-      });
+        adminGoogleEmail: (authOwner.email || cleanAdminEmail).toLowerCase(),
+        adminGoogleUid: authOwner.uid,
+        adminGoogleName: authOwner.displayName || newPastor.trim() || newName.trim(),
+        adminAuthMethod: authMethod
+      }, { skipImmediateCloudSave: true });
+      await syncCreatedChurchToCloudStrict(created);
+      authorizeChurchAdminSession(created.id);
       toast.success(
         isEs ? "¡Nueva Iglesia Creada!" : isFr ? "Nouvelle Église Créée !" : isEn ? "New Church Created!" : "Nouvo Legliz Kreye!",
-        isEs ? `El espacio privado "${created.name}" (${created.id}) está listo con su código de seguridad propio.` : isFr ? `L'espace d'église privé "${created.name}" (${created.id}) est prêt avec son code de sécurité propre.` : isEn ? `Private church workspace "${created.name}" (${created.id}) is ready with its dedicated passcode.` : `Espas prive "${created.name}" (${created.id}) pare avèk kòd sekirite pa li.`
+        isEs ? `El espacio privado "${created.name}" (${created.id}) está listo con autenticación segura.` : isFr ? `L'espace d'église privé "${created.name}" (${created.id}) est prêt avec connexion sécurisée.` : isEn ? `Private church workspace "${created.name}" (${created.id}) is ready with secure login.` : `Espas prive "${created.name}" (${created.id}) pare ak koneksyon imèl & modpas sekirize.`
       );
       try {
         confetti({ particleCount: 50, spread: 70, origin: { y: 0.6 } });
@@ -597,8 +1071,9 @@ export const AdminChurchSettings: React.FC<any> = ({
       setNewAddress("");
       setNewEmail("");
       setNewMotto("");
-      setNewAdminPasscode("");
-      setNewConfirmPasscode("");
+      setNewAdminEmail("");
+      setNewAdminPassword("");
+      setNewConfirmPassword("");
       if (onChurchCreated) {
         onChurchCreated(created);
       } else if (onChurchChange) {
@@ -609,33 +1084,59 @@ export const AdminChurchSettings: React.FC<any> = ({
         isEs ? "Error al crear la iglesia" : "Erè pandan kreyasyon legliz la",
         (err == null ? void 0 : err.message) || "Pa ka kreye espas legliz la."
       );
+    } finally {
+      setIsCreatingChurchSubmit(false);
     }
   };
   const handleConfirmDeleteChurch = async () => {
     if (!churchToDelete) return;
     setDeletePasscodeError(null);
     const requiredPasscode = (churchToDelete.adminPasscode || "").trim();
-    const enteredPasscode = deletePasscode.trim();
-    if (!enteredPasscode) {
+    const targetAdminEmail = (churchToDelete.adminGoogleEmail || "").trim().toLowerCase();
+    const enteredSecret = deletePasscode.trim();
+    if (!enteredSecret) {
       setDeletePasscodeError(
-        isEs ? "Por favor ingrese el código de seguridad de esta iglesia para confirmar la eliminación." : isFr ? "Veuillez entrer le code de sécurité de cette église pour confirmer la suppression." : isEn ? "Please enter the security passcode of this church to confirm deletion." : "Tanpri antre kòd sekirite mèt legliz sa a pou w ka konfime sipresyon an."
+        targetAdminEmail
+          ? isEs ? "Ingrese la contraseña de administrador (o código corto de confirmación si usa Google)." : isFr ? "Entrez le mot de passe administrateur (ou le code court si connecté via Google)." : isEn ? "Enter the admin password (or church code if using Google Sign-In)." : "Tanpri antre modpas administratè a (oswa kòd legliz la si w konekte ak Google)."
+          : isEs ? "Por favor ingrese el código PIN de seguridad de esta iglesia." : isEn ? "Please enter the security PIN of this church to confirm deletion." : "Tanpri antre kòd PIN sekirite legliz sa a pou w ka konfime sipresyon an."
       );
       return;
     }
-    if (requiredPasscode) {
-      const verify = await verifyAdminPasscode(enteredPasscode, requiredPasscode, churchToDelete.id);
-      if (!verify.matches) {
+    setIsDeletingChurch(true);
+    try {
+      let verified = false;
+      if (targetAdminEmail) {
+        try {
+          await signInChurchAdminWithEmail(targetAdminEmail, enteredSecret);
+          verified = true;
+        } catch {
+          const isSignedInAsOwner = Boolean(
+            googleUser &&
+            googleUser.email &&
+            (googleUser.email.toLowerCase() === targetAdminEmail ||
+              (churchToDelete.adminGoogleUid && googleUser.uid === churchToDelete.adminGoogleUid))
+          );
+          if (isSignedInAsOwner && enteredSecret.toUpperCase() === (churchToDelete.code || churchToDelete.id).toUpperCase()) {
+            verified = true;
+          }
+        }
+      }
+      if (!verified && requiredPasscode) {
+        const verify = await verifyAdminPasscode(enteredSecret, requiredPasscode, churchToDelete.id);
+        verified = verify.matches;
+      }
+      if (!verified) {
+        setIsDeletingChurch(false);
         setDeletePasscodeError(
-          isEs ? "Código de seguridad incorrecto. Verifique el código maestro de esta iglesia." : isFr ? "Code de sécurité incorrect. Vérifiez le code maître de cette église." : isEn ? "Incorrect security passcode. Please verify this church’s master PIN." : "Kòd sekirite sa a pa kòrèk pou legliz sa a. Verifye kòd sekirite mèt li a."
+          targetAdminEmail
+            ? isEs ? "Contraseña incorrecta. Verifique su contraseña de administrador o ingrese el código de la iglesia si usa Google." : isEn ? "Incorrect password. Check your admin password (or enter church code if signed in with Google)." : "Modpas la pa kòrèk. Verifye vrè modpas admin lan (oswa tape kòd legliz la si w konekte ak Google)."
+            : isEs ? "Código PIN incorrecto." : "Kòd sekirite sa a pa kòrèk pou legliz sa a."
         );
         return;
       }
-    }
-    setIsDeletingChurch(true);
-    try {
       const deletedId = churchToDelete.id;
       const deletedName = churchToDelete.name;
-      await deleteChurch(deletedId, enteredPasscode);
+      await deleteChurch(deletedId);
       toast.success(
         isEs ? "¡Iglesia Eliminada!" : isEn ? "Church Deleted!" : isFr ? "Église Supprimée !" : "Legliz la Efase!",
         isEs ? `La iglesia "${deletedName}" y todos sus datos han sido eliminados de la base de datos.` : isEn ? `The church "${deletedName}" and all associated data have been deleted.` : isFr ? `L'église "${deletedName}" et toutes ses données ont été supprimées.` : `Legliz "${deletedName}" ak tout done li yo efase nèt nan baz done a.`
@@ -679,25 +1180,6 @@ export const AdminChurchSettings: React.FC<any> = ({
       );
     } finally {
       setIsResettingSystem(false);
-    }
-  };
-  const handleConfirmPurgeDemo = async () => {
-    setIsPurgingDemo(true);
-    try {
-      const count = await purgeTestChurches();
-      toast.success(
-        isEs ? "¡Limpieza Completada!" : isEn ? "Cleanup Completed!" : isFr ? "Nettoyage Terminé !" : "Netwayaj Konplè!",
-        isEs ? `Se eliminaron ${count} iglesia(s) de prueba/demo de la base de datos.` : isEn ? `Deleted ${count} test/demo church(es) from the database.` : isFr ? `${count} église(s) de test/démo ont été supprimées de la base de données.` : `Yo efase ${count} legliz tès/demo nan baz done a.`
-      );
-      setShowPurgeDemoModal(false);
-      if (onRefreshAll) onRefreshAll();
-    } catch (err) {
-      toast.error(
-        isEs ? "Error de limpieza" : isEn ? "Cleanup error" : isFr ? "Erreur de nettoyage" : "Erè netwayaj",
-        (err == null ? void 0 : err.message) || (isEs ? "No se pudieron eliminar las iglesias de prueba." : isEn ? "Could not clean test churches." : isFr ? "Impossible de supprimer les églises de test." : "Pa ka netwaye legliz tès yo.")
-      );
-    } finally {
-      setIsPurgingDemo(false);
     }
   };
   const handleCopyId = () => {
@@ -799,18 +1281,26 @@ export const AdminChurchSettings: React.FC<any> = ({
     };
     reader.readAsText(file);
   };
-  const handleTestLatency = () => {
+  const handleCheckCloudLatency = async () => {
     setIsPinging(true);
-    const start = performance.now();
-    setTimeout(() => {
-      const end = performance.now();
-      setPingLatency(Math.round(end - start));
+    try {
+      const res = await measureFirestoreLatency();
+      setPingLatency(res.latencyMs);
+      setCloudOnlineStatus(res.ok);
+      if (res.ok) {
+        toast.success(
+          isEs ? "Conexión Cloud Verificada" : isFr ? "Connexion Cloud Vérifiée" : isEn ? "Cloud Connection Verified" : "Koneksyon Cloud Verifye ✓",
+          isEs ? `Servidor Firestore respondió en ${res.latencyMs} ms.` : isFr ? `Serveur Firestore a répondu en ${res.latencyMs} ms.` : isEn ? `Firestore server responded in ${res.latencyMs} ms.` : `Sèvè Firestore reponn nan ${res.latencyMs} ms.`
+        );
+      } else {
+        toast.warning(
+          isEs ? "Modo Sin Conexión" : isFr ? "Mode Hors-Ligne" : isEn ? "Offline Mode" : "Pa gen Koneksyon Cloud",
+          isEs ? "Los datos se guardan en caché local hasta que vuelva el internet." : isFr ? "Les données restent en cache local jusqu’au retour d’internet." : isEn ? "Data stays cached locally until internet returns." : "Done yo ap rete an sekirite nan memwa lokal jiskaske entènèt la retounen."
+        );
+      }
+    } finally {
       setIsPinging(false);
-      toast.success(
-        isEs ? "Sistema Operacional" : isFr ? "Système Opérationnel" : isEn ? "System Operational" : "Sistèm Operasyonèl",
-        isEs ? "Conexión local y nube respondiendo rápidamente." : isFr ? "Connexion locale et cloud répondant rapidement." : isEn ? "Local cache and cloud sync responding quickly." : "Koneksyon lokal & nwaj ap reponn rapidman."
-      );
-    }, 180);
+    }
   };
   const activeMembersCount = reactExports.useMemo(() => getMembersByChurch(activeChurch.id).length, [activeChurch.id]);
   const activeServicesCount = reactExports.useMemo(() => getServicesByChurch(activeChurch.id).length, [activeChurch.id]);
@@ -819,35 +1309,23 @@ export const AdminChurchSettings: React.FC<any> = ({
   const logoIcons = getLogoIcons(isEs, isFr, isEn);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-6 pb-16 max-w-5xl mx-auto font-sans", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2.5 flex-wrap", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("h2", { className: "text-xl sm:text-2xl font-extrabold text-white tracking-tight flex items-center gap-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { className: "w-6 h-6 text-amber-400" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Ajustes y Configuración General" : isFr ? "Paramètres & Configuration Générale" : isEn ? "General Settings & Configuration" : "Paramèt & Konfigirasyon Ultra Pro Max" })
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3.5 min-w-0", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(OmniChurchLogo, { variant: "icon", priority: true, className: "h-10 w-10 sm:h-11 sm:w-11" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2.5 flex-wrap", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("h2", { className: "text-xl sm:text-2xl font-extrabold text-white tracking-tight flex items-center gap-2", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { className: "w-5 h-5 text-amber-400 shrink-0" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Ajustes y Configuración General" : isFr ? "Paramètres & Configuration Générale" : isEn ? "General Settings & Configuration" : "Paramèt & Konfigirasyon Ultra Pro Max" })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-mono font-extrabold", children: activeChurch.code || activeChurch.id })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/30 text-amber-300 text-xs font-mono font-extrabold", children: activeChurch.code || activeChurch.id })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs sm:text-sm text-slate-400 mt-0.5", children: isEs ? "Gestión centralizada, diseño de tarjetas, seguridad Google/PIN y aislamiento multi-iglesia." : isFr ? "Gestion centralisée, personnalisation des cartes, sécurité Google/PIN et isolation multi-églises." : isEn ? "Centralized management, card customization, Google/PIN security, and multi-church isolation." : "Jesyon santralize, pèsonalizasyon kat, sekirite Google/PIN ak izolasyon multi-legliz." })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 flex-wrap", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            type: "button",
-            onClick: handleExportJsonBackup,
-            className: "inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 font-bold text-xs shadow transition-all cursor-pointer",
-            title: isEs ? "Descargar todos los datos de esta iglesia en JSON" : isFr ? "Télécharger toutes les données de cette église en JSON" : isEn ? "Download all data for this church in JSON" : "Telechaje tout done legliz sa a an JSON",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Download, { className: "w-3.5 h-3.5" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Copia JSON" : isFr ? "Sauvegarde JSON" : isEn ? "JSON Backup" : "Sovgad JSON" })
-            ]
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1.5", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4 text-emerald-400" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Datos Aislados (Multi-Tenant)" : isFr ? "Données Isolées (Multi-Tenant)" : isEn ? "Isolated Data (Multi-Tenant)" : "Done Izole (Multi-Tenant)" })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs sm:text-sm text-slate-400 mt-0.5", children: isEs ? "Gestión centralizada, diseño de tarjetas, seguridad Google/PIN y aislamiento multi-iglesia." : isFr ? "Gestion centralisée, personnalisation des cartes, sécurité Google/PIN et isolation multi-églises." : isEn ? "Centralized management, card customization, Google/PIN security, and multi-church isolation." : "Jesyon santralize, pèsonalizasyon kat, sekirite Google/PIN ak izolasyon multi-legliz." })
         ] })
-      ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-2 flex-wrap", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1.5", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4 text-emerald-400" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Datos Aislados (Multi-Tenant)" : isFr ? "Données Isolées (Multi-Tenant)" : isEn ? "Isolated Data (Multi-Tenant)" : "Done Izole (Multi-Tenant)" })
+      ] }) })
     ] }),
     savedSuccess && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3.5 bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 rounded-2xl text-xs font-bold flex items-center gap-2.5 animate-fadeIn", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(CheckCheck, { className: "w-5 h-5 text-emerald-400 shrink-0" }),
@@ -856,16 +1334,16 @@ export const AdminChurchSettings: React.FC<any> = ({
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-gradient-to-r from-[#1E293B] via-[#1E293B] to-[#162235] rounded-3xl p-5 border border-slate-700/80 shadow-xl space-y-4", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col md:flex-row md:items-center justify-between gap-4", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3.5", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-amber-300 font-extrabold text-xl shadow-inner", children: activeChurch.logoIcon === "Flame" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Flame, { className: "w-6 h-6 text-amber-400" }) : activeChurch.logoIcon === "Book" ? /* @__PURE__ */ jsxRuntimeExports.jsx(BookOpen, { className: "w-6 h-6 text-amber-400" }) : activeChurch.logoIcon === "Heart" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Heart, { className: "w-6 h-6 text-amber-400" }) : activeChurch.logoIcon === "Crown" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Crown, { className: "w-6 h-6 text-amber-400" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Building2, { className: "w-6 h-6 text-amber-400" }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-amber-300 font-extrabold text-xl shadow-inner overflow-hidden shrink-0", children: logoUrl.trim() ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: logoUrl.trim(), alt: activeChurch.name, className: "w-full h-full object-cover" }) : activeChurch.logoIcon === "Flame" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Flame, { className: "w-6 h-6 text-amber-400" }) : activeChurch.logoIcon === "Book" ? /* @__PURE__ */ jsxRuntimeExports.jsx(BookOpen, { className: "w-6 h-6 text-amber-400" }) : activeChurch.logoIcon === "Heart" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Heart, { className: "w-6 h-6 text-amber-400" }) : activeChurch.logoIcon === "Crown" ? /* @__PURE__ */ jsxRuntimeExports.jsx(Crown, { className: "w-6 h-6 text-amber-400" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Building2, { className: "w-6 h-6 text-amber-400" }) }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-base sm:text-lg font-black text-white", children: activeChurch.name }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-[10px] font-mono text-slate-300", children: activeChurch.id })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs text-slate-400", children: [
-              activeChurch.pastor,
-              " • ",
-              activeChurch.city || (isEs ? "Sede Principal" : isFr ? "Siège Principal" : isEn ? "Main Campus" : "Ayiti")
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-base sm:text-lg font-black text-white", children: activeChurch.name }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 mt-0.5", children: [
+              resolvedAdminAvatarPreview ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: resolvedAdminAvatarPreview, alt: activeChurch.pastor || "Admin", referrerPolicy: "no-referrer", className: "w-4 h-4 rounded-full object-cover border border-amber-400/60 shrink-0" }) : null,
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs text-slate-400", children: [
+                activeChurch.pastor,
+                " • ",
+                activeChurch.city || (isEs ? "Sede Principal" : isFr ? "Siège Principal" : isEn ? "Main Campus" : "Ayiti")
+              ] })
             ] })
           ] })
         ] }),
@@ -977,7 +1455,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           className: `flex items-center gap-2 px-3.5 py-2.5 rounded-2xl font-bold whitespace-nowrap transition-all cursor-pointer ${activeSubTab === "cards" ? "bg-amber-400 text-slate-950 shadow-lg shadow-amber-400/20" : "text-slate-400 hover:text-white hover:bg-slate-800/80"}`,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(CreditCard, { className: "w-4 h-4" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "4. Tarjetas y Colores" : isFr ? "4. Cartes & Couleurs" : isEn ? "4. Cards & Colors" : "4. Modèl Kat & Koulè" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "5. Tarjetas y Colores" : isFr ? "5. Cartes & Couleurs" : isEn ? "5. Cards & Colors" : "5. Modèl Kat & Koulè" })
           ]
         }
       ),
@@ -990,7 +1468,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           className: `flex items-center gap-2 px-3.5 py-2.5 rounded-2xl font-bold whitespace-nowrap transition-all cursor-pointer ${activeSubTab === "backup" ? "bg-amber-400 text-slate-950 shadow-lg shadow-amber-400/20" : "text-slate-400 hover:text-white hover:bg-slate-800/80"}`,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(Database, { className: "w-4 h-4" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "5. Copia de Seguridad" : isFr ? "5. Sauvegarde & Restauration" : isEn ? "5. Backup & Restore" : "5. Sovgad & Restorasyon" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "6. Copia de Seguridad" : isFr ? "6. Sauvegarde & Restauration" : isEn ? "6. Backup & Restore" : "6. Sovgad & Restorasyon" })
           ]
         }
       ),
@@ -1003,7 +1481,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           className: `flex items-center gap-2 px-3.5 py-2.5 rounded-2xl font-bold whitespace-nowrap transition-all cursor-pointer ${activeSubTab === "donations" ? "bg-amber-400 text-slate-950 shadow-lg shadow-amber-400/20" : "text-slate-400 hover:text-white hover:bg-slate-800/80"}`,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(HeartHandshake, { className: "w-4 h-4" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "6. Donaciones y Finanzas" : isFr ? "6. Dîmes, Dons & Paiements" : isEn ? "6. Church Giving & Donations" : "6. Donasyon & Kont Labank Legliz la" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "7. Donaciones y Finanzas" : isFr ? "7. Dîmes, Dons & Paiements" : isEn ? "7. Church Giving & Donations" : "7. Donasyon & Kont Labank Legliz la" })
           ]
         }
       ),
@@ -1016,7 +1494,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           className: `flex items-center gap-2 px-3.5 py-2.5 rounded-2xl font-bold whitespace-nowrap transition-all cursor-pointer ${activeSubTab === "rules" ? "bg-amber-400 text-slate-950 shadow-lg shadow-amber-400/20" : "text-slate-400 hover:text-white hover:bg-slate-800/80"}`,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "7. Estatutos y Privacidad" : isFr ? "7. Règlement & Vie Privée" : isEn ? "7. Church Rules & Privacy" : "7. Règleman & Vi Prive" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "8. Estatutos y Privacidad" : isFr ? "8. Règlement & Vie Privée" : isEn ? "8. Church Rules & Privacy" : "8. Règleman & Vi Prive" })
           ]
         }
       ),
@@ -1029,21 +1507,102 @@ export const AdminChurchSettings: React.FC<any> = ({
           className: `flex items-center gap-2 px-3.5 py-2.5 rounded-2xl font-bold whitespace-nowrap transition-all cursor-pointer ${activeSubTab === "diagnostics" ? "bg-amber-400 text-slate-950 shadow-lg shadow-amber-400/20" : "text-slate-400 hover:text-white hover:bg-slate-800/80"}`,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(Activity, { className: "w-4 h-4" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "8. Diagnósticos del Sistema" : isFr ? "8. Diagnostics Système" : isEn ? "8. System Diagnostics" : "8. Dyagnostik Sistèm" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "9. Diagnósticos del Sistema" : isFr ? "9. Diagnostics Système" : isEn ? "9. System Diagnostics" : "9. Dyagnostik Sistèm" })
           ]
         }
       )
     ] }),
     activeSubTab === "profile" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-6", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("form", { onSubmit: handleSaveCurrentChurch, className: "space-y-6", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-5 text-slate-200", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "border-b border-slate-700/80 pb-3 flex items-center justify-between", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { className: "font-bold text-base text-white flex items-center gap-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Building2, { className: "w-5 h-5 text-amber-400" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Perfil y Datos Oficiales de la Iglesia" : isFr ? "Profil et Informations Officielles de l’Église" : isEn ? "Church Profile and Official Information" : "Pwofil & Detay Ofisyèl Legliz la" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "border-b border-slate-700/80 pb-3 flex items-center justify-between", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { className: "font-bold text-base text-white flex items-center gap-2", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(Building2, { className: "w-5 h-5 text-amber-400" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Perfil y Datos Oficiales de la Iglesia" : isFr ? "Profil et Informations Officielles de l’Église" : isEn ? "Church Profile and Official Information" : "Pwofil & Detay Ofisyèl Legliz la" })
+        ] }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 md:grid-cols-2 gap-4", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "admin-profile-photo-card", className: "p-4 rounded-2xl bg-slate-900/75 border border-slate-700/80 flex items-center gap-4", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "relative w-16 h-16 rounded-full bg-slate-800 border-2 border-amber-400/70 flex items-center justify-center overflow-hidden shrink-0 shadow-lg", children: resolvedAdminAvatarPreview ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: resolvedAdminAvatarPreview, alt: activeChurch.pastor || "Admin", referrerPolicy: "no-referrer", className: "w-full h-full object-cover" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(UserIcon, { className: "w-7 h-7 text-amber-300" }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 flex-1 space-y-2", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs font-extrabold text-white flex items-center gap-1.5", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Camera, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Foto de Perfil del Admin / Propietario" : isFr ? "Photo de Profil Admin / Propriétaire" : isEn ? "Admin / Owner Profile Photo" : "Foto Pwofil Admin / Mèt Legliz la" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 mt-0.5 leading-snug", children: isEs ? "Funciona incluso conectado con Google y se sincroniza en toda la plataforma." : isFr ? "Fonctionne même connecté avec Google et se synchronise partout." : isEn ? "Works even when signed in with Google and syncs across all views." : "Ou ka chanje foto pwofil ou menm si w konekte ak Google; tout bagay ap senkronize." })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("input", { ref: adminPhotoInputRef, id: "input-admin-profile-photo", type: "file", accept: "image/*", className: "hidden", onChange: handleUploadAdminProfilePhoto }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-1.5", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "btn-upload-admin-profile-photo",
+                  disabled: isUpdatingAdminPhoto,
+                  onClick: () => { if (adminPhotoInputRef.current) adminPhotoInputRef.current.click(); },
+                  className: "px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Upload, { className: "w-3.5 h-3.5" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isUpdatingAdminPhoto ? (isEn ? "Saving..." : "Ap anrejistre...") : resolvedAdminAvatarPreview ? (isEs ? "Cambiar Foto" : isFr ? "Changer la Photo" : isEn ? "Change Photo" : "Chanje Foto") : (isEs ? "Subir Foto" : isFr ? "Ajouter Photo" : isEn ? "Upload Photo" : "Mete yon Foto") })
+                  ]
+                }),
+                googleUser && googleUser.photoURL && adminProfilePhoto !== googleUser.photoURL && /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "btn-use-google-admin-photo",
+                  disabled: isUpdatingAdminPhoto,
+                  onClick: handleUseGoogleAdminPhoto,
+                  className: "px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-3 h-3" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Usar Foto Google" : isFr ? "Photo Google" : isEn ? "Use Google Photo" : "Itilize Foto Google" })
+                  ]
+                }),
+                resolvedAdminAvatarPreview && /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "btn-remove-admin-profile-photo",
+                  disabled: isUpdatingAdminPhoto,
+                  onClick: handleRemoveAdminProfilePhoto,
+                  className: "px-2.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3 h-3" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Quitar" : isFr ? "Retirer" : isEn ? "Remove" : "Retire" })
+                  ]
+                })
+              ] })
+            ] })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-xs text-slate-400", children: [
-            "ID: ",
-            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { className: "text-amber-400 font-mono", children: activeChurch.id })
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "church-logo-photo-card", className: "p-4 rounded-2xl bg-slate-900/75 border border-slate-700/80 flex items-center gap-4", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "relative w-16 h-16 rounded-2xl bg-slate-800 border-2 border-slate-600/80 flex items-center justify-center overflow-hidden shrink-0 shadow-lg", children: logoUrl.trim() ? /* @__PURE__ */ jsxRuntimeExports.jsx("img", { src: logoUrl.trim(), alt: activeChurch.name, className: "w-full h-full object-cover" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Building2, { className: "w-7 h-7 text-amber-300" }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 flex-1 space-y-2", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-xs font-extrabold text-white flex items-center gap-1.5", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(ImagePlus, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Foto / Logo Oficial de la Iglesia" : isFr ? "Photo / Logo Officiel de l’Église" : isEn ? "Official Church Logo / Photo" : "Logo / Foto Pwofil Legliz la" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 mt-0.5 leading-snug", children: isEs ? "Aparece en las publicaciones de cultos y encabezados." : isFr ? "Apparaît dans le fil des cultes et l’en-tête." : isEn ? "Displayed on service feed cards and church headers." : "Parèt sou kat sèvis yo nan feed manm yo ak nan tèt legliz la." })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("input", { ref: churchLogoInputRef, id: "input-church-logo", type: "file", accept: "image/*", className: "hidden", onChange: handleUploadChurchLogo }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-1.5", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "btn-upload-church-logo",
+                  disabled: isUpdatingLogoPhoto,
+                  onClick: () => { if (churchLogoInputRef.current) churchLogoInputRef.current.click(); },
+                  className: "px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/40 font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Upload, { className: "w-3.5 h-3.5" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isUpdatingLogoPhoto ? (isEn ? "Saving..." : "Ap anrejistre...") : logoUrl.trim() ? (isEs ? "Cambiar Logo" : isFr ? "Changer Logo" : isEn ? "Change Logo" : "Chanje Logo") : (isEs ? "Subir Logo" : isFr ? "Ajouter Logo" : isEn ? "Upload Logo" : "Mete Logo Legliz") })
+                  ]
+                }),
+                logoUrl.trim() && /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "btn-remove-church-logo",
+                  disabled: isUpdatingLogoPhoto,
+                  onClick: handleRemoveChurchLogo,
+                  className: "px-2.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-semibold text-[11px] inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3 h-3" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Quitar" : isFr ? "Retirer" : isEn ? "Remove" : "Retire" })
+                  ]
+                })
+              ] })
+            ] })
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs", children: [
@@ -1198,315 +1757,40 @@ export const AdminChurchSettings: React.FC<any> = ({
             }
           )
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 sm:p-5 bg-gradient-to-br from-slate-900/95 via-slate-900/80 to-slate-950 rounded-2xl border border-slate-700/80 space-y-4", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-3", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 shrink-0 shadow-inner", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-5 h-5" }) }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { className: "text-xs font-bold text-white flex items-center gap-2", children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "RNC Oficial y Documento Legal de la Iglesia" : isFr ? "RNC Officiel & Document Légal de l’Église" : isEn ? "Official Church Tax ID / RNC & Legal Document" : "RNC Ofisyèl & Dokiman Legal Legliz la" }) }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10.5px] text-slate-400", children: isEs ? "Protección contra fraude: Requiere Licencia Activa ($70 USD/año) y Foto del Documento Legal" : isFr ? "Protection anti-fraude : Requiert une Licence ($70 USD/an) et la Photo du Document Légal" : isEn ? "Anti-fraud protection: Requires Active License ($70 USD/yr) and Legal Document Photo" : "Pwoteksyon anti-fwòd: Egzije Lisans Aktif ($70 USD/ane) ak Foto Dokiman Legal" })
+        (() => {
+          const churchRnc = (activeChurch.rnc || activeChurch.rncNumber || "").trim();
+          const hasDoc = Boolean(activeChurch.rncDocumentPhoto);
+          const isRncVerified = activeChurch.rncVerificationStatus === "verified" || (isChurchLicensed && hasDoc && isValidRnc(churchRnc));
+          const isRncPending = !isRncVerified && (activeChurch.rncVerificationStatus === "pending" || hasDoc || Boolean(churchRnc));
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "profile-rnc-shortcut-card", className: "p-4 bg-slate-900/80 rounded-2xl border border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3 min-w-0", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4" }) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 flex-wrap", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { className: "text-xs font-bold text-white", children: isEs ? "Verificación Legal y RNC" : isFr ? "Vérification Légale & RNC" : isEn ? "Legal Verification & RNC" : "RNC & Verifikasyon Legal" }),
+                  isRncVerified ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold inline-flex items-center gap-1", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-3 h-3" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Verificado" : isFr ? "Vérifié" : isEn ? "Verified" : "Verifye" })
+                  ] }) : isRncPending ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold inline-flex items-center gap-1", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Clock, { className: "w-3 h-3" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "En Revisión" : isFr ? "En Attente" : isEn ? "Pending" : "An Atant" })
+                  ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 text-[10px] font-medium", children: isEs ? "No Enviado" : isFr ? "Non Soumis" : isEn ? "Not Submitted" : "Poko Soumèt" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 mt-0.5 truncate", children: churchRnc ? `RNC: ${churchRnc}` : (isEs ? "Gestione el RNC, el documento legal y la firma oficial desde sus pestañas dedicadas." : isFr ? "Gérez le RNC, le document légal et la signature depuis leurs onglets dédiés." : isEn ? "Manage church RNC & legal documents in tab 3, and card signatures in tab 5." : "Jere RNC ak dokiman legal la nan tab 3 a, epi siyati kat yo nan tab 5 la.") })
               ] })
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  type: "button",
-                  onClick: () => setActiveSubTab("rnc_verification"),
-                  className: "px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer",
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-3.5 h-3.5 text-amber-400" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Abrir Sección de Verificación RNC" : "Ouvri Panèl Verifikasyon RNC" })
-                  ]
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: activeChurch.rncVerificationStatus === "verified" || isChurchLicensed && rncDocumentPhoto && isValidRnc(rnc) ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10.5px] font-extrabold flex items-center gap-1.5 shadow-sm", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-4 h-4 text-emerald-400" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "RNC VERIFICADO ✓" : isFr ? "RNC VÉRIFIÉ ✓" : isEn ? "RNC VERIFIED ✓" : "RNC VERIFYE ✓" })
-              ] }) : activeChurch.rncVerificationStatus === "pending" || rncDocumentPhoto || rnc.trim() ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10.5px] font-bold flex items-center gap-1.5", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Clock, { className: "w-4 h-4 text-amber-400" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "En Revisión" : isFr ? "En Attente" : isEn ? "Pending" : "An Atant" })
-              ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 border border-slate-700 text-[10px] font-medium", children: isEs ? "No Enviado" : isFr ? "Non Soumis" : isEn ? "Not Submitted" : "Poko Soumèt" }) })
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 text-xs text-slate-300 space-y-2", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 font-bold text-slate-200", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4 text-amber-400" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Reglas de Seguridad y Prevención de Fraude:" : isFr ? "Règles de Sécurité & Prévention de Fraude :" : isEn ? "Security & Fraud Prevention Rules:" : "Règ Sekirite & Pwoteksyon Kont Fwòd:" })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 leading-relaxed", children: isEs ? "Para evitar que cualquier persona use números RNC ajenos o fraudulentos, para activar y validar el RNC en el carnet de los miembros, la iglesia debe:" : isFr ? "Pour éviter l’usage frauduleux de faux numéros RNC, l’activation officielle du RNC sur la carte des membres exige :" : isEn ? "To prevent unauthorized use of false RNC numbers, official RNC validation on member cards strictly requires:" : "Pou evite nenpòt moun mete fo nimewo RNC oswa fè frod devan Lapolis ak Leta, RNC a sèlman sètifye sou kat manm yo si legliz la ranpli 2 kondisyon sa yo:" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] pt-1", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `p-2.5 rounded-lg border ${isChurchLicensed ? "bg-emerald-950/20 border-emerald-500/40 text-emerald-200" : "bg-amber-950/20 border-amber-500/40 text-amber-200"} flex items-start gap-2`, children: [
-                isChurchLicensed ? /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-4 h-4 text-emerald-400 shrink-0 mt-0.5" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Lock, { className: "w-4 h-4 text-amber-400 shrink-0 mt-0.5" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { className: "block font-bold", children: [
-                    "1. ",
-                    isEs ? "Licencia Pro Activa ($70 USD / 1 año)" : "Lisans Pro Aktif ($70.00 USD / 1 ane)"
-                  ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] opacity-80", children: isChurchLicensed ? isEs ? "Licencia activa y validada" : "Lisans ou aktif e an règ" : isEs ? "Se requiere licencia activa de $70 USD" : "Lisans $70 USD / 1 ane egzije pou otorize RNC" })
-                ] })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `p-2.5 rounded-lg border ${rncDocumentPhoto ? "bg-emerald-950/20 border-emerald-500/40 text-emerald-200" : "bg-amber-950/20 border-amber-500/40 text-amber-200"} flex items-start gap-2`, children: [
-                rncDocumentPhoto ? /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-4 h-4 text-emerald-400 shrink-0 mt-0.5" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "w-4 h-4 text-amber-400 shrink-0 mt-0.5" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { className: "block font-bold", children: [
-                    "2. ",
-                    isEs ? "Foto del Documento Legal" : "Foto Dokiman Legal Legliz la"
-                  ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] opacity-80", children: rncDocumentPhoto ? isEs ? "Documento cargado correctamente" : "Foto dokiman anrejistre" : isEs ? "Debe subir foto de patente o decreto" : "Fòk ou founi foto patant DGI oswa dekrè" })
-                ] })
-              ] })
-            ] }),
-            !isChurchLicensed && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-t border-slate-800/80", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[11px] text-amber-300 font-medium", children: isEs ? "💡 Nota: Esta misma licencia de $70 USD / 1 año también activa la sección de Diezmos y Ofrendas." : "💡 Nòt: Se menm lisans $70 USD / 1 ane sa a ki sèvi tou pou aktive seksyon Dîm ak Ofrann lan." }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  type: "button",
-                  onClick: () => setShowLicenseModal(true),
-                  className: "px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-[11px] flex items-center gap-1.5 shadow cursor-pointer",
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(Lock, { className: "w-3.5 h-3.5" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Activar Licencia ($70 USD / 1 Año)" : "Aktive Lisans ($70 USD / 1 Ane)" })
-                  ]
-                }
-              )
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-1.5", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "block text-xs font-semibold text-slate-300", children: isEs ? "Número de RNC / Matrícula Fiscal Oficial" : "Nimewo RNC / Matrikil Fiskal Ofisyèl" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "input",
-              {
-                type: "text",
-                value: rnc,
-                onChange: (e3) => setRnc(e3.target.value),
-                placeholder: isEs ? "ej: 1-32-45678-9 o 004-582-193-4" : isFr ? "ex: 1-32-45678-9 ou 004-582-193-4" : isEn ? "e.g. 1-32-45678-9 or 004-582-193-4" : "eg: 1-32-45678-9 oswa 004-582-193-4",
-                className: "w-full px-3.5 py-2.5 rounded-xl border border-slate-700 bg-slate-950 text-white font-mono text-xs focus:ring-1 focus:ring-emerald-400 focus:border-emerald-400 focus:outline-none"
-              }
-            )
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-2 pt-2 border-t border-slate-800", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "block text-xs font-bold text-white", children: isEs ? "Foto del Documento Legal de la Iglesia" : isFr ? "Photo du Document Légal de l’Église" : isEn ? "Church Legal Registration Document Photo" : "Foto Dokiman Legal Legliz la" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10.5px] text-slate-400", children: isEs ? "Suba una foto clara de la Patente DGI/DGII, Decreto Presidencial o Certificado del Ministerio" : "Mete yon foto klè Patant DGI / DGII, Dekrè Ofisyèl oswa Sètifika Rekonesans Legal Ministè" })
-              ] }),
-              rncDocumentPhoto && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Check, { className: "w-3 h-3 text-emerald-400" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Cargado" : "Founi ✓" })
-              ] })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "input",
-              {
-                type: "file",
-                ref: legalDocInputRef,
-                onChange: handleLegalDocUpload,
-                accept: "image/*",
-                className: "hidden"
-              }
-            ),
-            rncDocumentPhoto ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                  "div",
-                  {
-                    onClick: () => setIsPreviewingDocumentModal(true),
-                    className: "w-16 h-16 rounded-lg overflow-hidden border border-slate-700 bg-slate-900 cursor-pointer relative group shrink-0",
-                    title: isEs ? "Haga clic para ampliar" : "Klike pou wè an gwo",
-                    children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(
-                        "img",
-                        {
-                          src: rncDocumentPhoto,
-                          alt: "Legal Document",
-                          className: "w-full h-full object-cover group-hover:scale-105 transition-transform"
-                        }
-                      ),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4 text-white" }) })
-                    ]
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-xs font-bold text-white", children: isEs ? "Documento Legal Registrado" : "Dokiman Legal Anrejistre" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] text-emerald-400 font-bold", children: "✓" })
-                  ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10.5px] text-slate-400 mt-0.5", children: rncDocumentUploadedAt ? `${isEs ? "Registrado el" : "Anrejistre le"}: ${new Date(rncDocumentUploadedAt).toLocaleDateString()}` : isEs ? "Documento oficial adjunto" : "Dokiman ofisyèl atache" })
-                ] })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 self-end sm:self-center", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                  "button",
-                  {
-                    type: "button",
-                    onClick: () => setIsPreviewingDocumentModal(true),
-                    className: "px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer",
-                    children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-3.5 h-3.5" }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Ver" : "Gade" })
-                    ]
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                  "button",
-                  {
-                    type: "button",
-                    onClick: () => {
-                      var _a4;
-                      return (_a4 = legalDocInputRef.current) == null ? void 0 : _a4.click();
-                    },
-                    disabled: isUploadingDoc,
-                    className: "px-2.5 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/40 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer",
-                    children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(Upload, { className: "w-3.5 h-3.5" }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isUploadingDoc ? "..." : isEs ? "Cambiar" : "Chanje" })
-                    ]
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                  "button",
-                  {
-                    type: "button",
-                    onClick: () => {
-                      setRncDocumentPhoto("");
-                      setRncDocumentUploadedAt("");
-                    },
-                    className: "px-2.5 py-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer",
-                    children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3.5 h-3.5" }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Eliminar" : "Retire" })
-                    ]
-                  }
-                )
-              ] })
-            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "div",
-              {
-                onClick: () => {
-                  var _a4;
-                  return (_a4 = legalDocInputRef.current) == null ? void 0 : _a4.click();
-                },
-                className: "p-4 rounded-xl border-2 border-dashed border-slate-700 hover:border-emerald-500/60 bg-slate-950/60 hover:bg-slate-900/60 transition-all cursor-pointer flex flex-col items-center justify-center text-center gap-2 group",
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-10 h-10 rounded-full bg-slate-800 group-hover:bg-emerald-500/20 text-slate-400 group-hover:text-emerald-400 flex items-center justify-center transition-colors", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ImagePlus, { className: "w-5 h-5" }) }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-bold text-slate-200 group-hover:text-white", children: isUploadingDoc ? isEs ? "Subiendo documento..." : "Ap telechaje dokiman an..." : isEs ? "Haga clic para subir o tomar foto del Documento Legal" : "Klike pou chwazi oswa pran foto Dokiman Legal la" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10.5px] text-slate-400 mt-0.5", children: isEs ? "Formato JPG, PNG (máx. 10MB)" : "Fòma JPG, PNG (Patant DGI, Dekrè oswa Sètifika)" })
-                  ] })
-                ]
-              }
-            )
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-4 bg-slate-900/90 rounded-2xl border border-slate-700/80 space-y-3", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-3", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-10 h-10 rounded-xl bg-amber-400/10 border border-amber-400/20 flex items-center justify-center text-amber-400 shrink-0", children: /* @__PURE__ */ jsxRuntimeExports.jsx(PenTool, { className: "w-5 h-5" }) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { className: "text-xs font-bold text-white", children: isEs ? "Firma Electrónica Autorizada (Admin / Pastor)" : isFr ? "Signature Électronique Autorisée (Admin / Pasteur)" : isEn ? "Authorized Electronic Signature (Admin / Pastor)" : "Siyati Elektwonik Otorize (Admin / Pastè)" }),
-                signatureUrl ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full font-bold flex items-center gap-1", children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-3 h-3" }),
-                  isEs ? "Activa" : isFr ? "Active" : isEn ? "Active" : "Aktive"
-                ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-full", children: isEs ? "Texto por defecto" : isFr ? "Texte par défaut" : isEn ? "Default text" : "Tèks pa defo" })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 mt-0.5", children: isEs ? "Elija una imagen de firma (PNG o JPG) o dibújela en pantalla. Aparecerá en todas las tarjetas de miembros." : isFr ? "Téléversez une signature (PNG transparent ou JPG) ou dessinez-la à l’écran. Elle s’affichera sur toutes les cartes." : isEn ? "Upload a signature image (transparent PNG or JPG) or draw it on screen. It will appear on all member cards." : "Chwazi yon imaj siyati (PNG transparan oswa JPG). URL siyati sa a anrejistre nan estrikti legliz la epi li disponib globalman pou tout jenerasyon badge ak kat manm yo." })
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 shrink-0", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "input",
-              {
-                ref: profileSignatureInputRef,
-                type: "file",
-                accept: "image/png, image/jpeg, image/webp, image/svg+xml",
-                onChange: handleUploadSignature,
-                className: "hidden",
-                id: "profile-signature-upload-input"
-              }
-            ),
-            signatureUrl ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "h-10 px-3 bg-white/95 rounded-xl border border-slate-500 flex items-center justify-center shadow-inner", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "img",
-                {
-                  src: signatureUrl,
-                  alt: "Firma",
-                  className: "h-8 max-w-[90px] object-contain"
-                }
-              ) }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  type: "button",
-                  onClick: () => setShowSignaturePad(true),
-                  className: "px-3 py-2 rounded-xl bg-gradient-to-r from-amber-500/20 to-amber-400/30 hover:from-amber-500/30 hover:to-amber-400/40 text-amber-300 border border-amber-400/40 text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-sm transition-all",
-                  title: isEs ? "Redibujar la firma directamente en pantalla" : isFr ? "Redessiner la signature à l’écran" : isEn ? "Redraw signature directly on screen" : "Retrase siyati a dirèkteman sou ekran an",
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(PenTool, { className: "w-3.5 h-3.5" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Redibujar" : isFr ? "Redessiner" : isEn ? "Redraw" : "Retrase Dirèk" })
-                  ]
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  type: "button",
-                  onClick: () => {
-                    var _a4;
-                    return (_a4 = profileSignatureInputRef.current) == null ? void 0 : _a4.click();
-                  },
-                  className: "px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors",
-                  title: isEs ? "Cambiar por archivo de imagen" : isFr ? "Changer par fichier image" : isEn ? "Change image file" : "Chanje pa imaj siyati a",
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(Upload, { className: "w-3.5 h-3.5" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Subir" : isFr ? "Téléverser" : isEn ? "Upload" : "Upload" })
-                  ]
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  onClick: handleRemoveSignature,
-                  className: "p-2 rounded-xl bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-500/30 text-xs cursor-pointer transition-colors",
-                  title: isEs ? "Eliminar firma" : isFr ? "Supprimer la signature" : isEn ? "Remove signature" : "Retire siyati a",
-                  children: /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-4 h-4" })
-                }
-              )
-            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  type: "button",
-                  id: "btn-draw-profile-signature",
-                  onClick: () => setShowSignaturePad(true),
-                  className: "px-4 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-slate-950 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer shadow-md shadow-amber-400/20 transition-all active:scale-95",
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(PenTool, { className: "w-4 h-4" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "✍️ Dibujar en Pantalla" : isFr ? "✍️ Dessiner à l’Écran" : isEn ? "✍️ Draw on Screen" : "✍️ Ekri Dirèk nan App la" })
-                  ]
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "button",
-                {
-                  type: "button",
-                  id: "btn-upload-profile-signature",
-                  onClick: () => {
-                    var _a4;
-                    return (_a4 = profileSignatureInputRef.current) == null ? void 0 : _a4.click();
-                  },
-                  className: "px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-750 text-amber-300 border border-amber-400/40 text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-sm transition-all",
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(ImagePlus, { className: "w-4 h-4 text-amber-400" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Subir Imagen" : isFr ? "Téléverser Image" : isEn ? "Upload Image" : "Upload Imaj" })
-                  ]
-                }
-              )
-            ] })
-          ] })
-        ] }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+              type: "button",
+              id: "btn-open-rnc-subtab-from-profile",
+              onClick: () => setActiveSubTab("rnc_verification"),
+              className: "px-3.5 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/35 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition-colors shrink-0 self-start sm:self-center",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-3.5 h-3.5 text-amber-400" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Gestionar RNC" : isFr ? "Gérer le RNC" : isEn ? "Manage RNC" : "Jere RNC & Legal" })
+              ]
+            })
+          ] });
+        })(),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pt-3 border-t border-slate-700/80 flex items-center justify-end", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
@@ -1581,13 +1865,13 @@ export const AdminChurchSettings: React.FC<any> = ({
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-0.5", children: isEs ? "Cuenta Google Activa en este Dispositivo:" : isFr ? "Compte Google Actif sur cet Appareil :" : isEn ? "Active Google Account on this Device:" : "Kont Google Aktif sou Aparèy Sa a:" }),
               googleUser ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2.5", children: [
-                googleUser.photoURL ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                resolvedAdminAvatarPreview ? /* @__PURE__ */ jsxRuntimeExports.jsx(
                   "img",
                   {
-                    src: googleUser.photoURL,
-                    alt: "Google User",
+                    src: resolvedAdminAvatarPreview,
+                    alt: "Admin Profile",
                     referrerPolicy: "no-referrer",
-                    className: "w-7 h-7 rounded-full border border-emerald-400"
+                    className: "w-7 h-7 rounded-full border border-emerald-400 object-cover"
                   }
                 ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-7 h-7 rounded-full bg-indigo-500 text-white flex items-center justify-center font-bold text-xs", children: "G" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
@@ -1704,36 +1988,133 @@ export const AdminChurchSettings: React.FC<any> = ({
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "border-b border-slate-700/80 pb-3", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { className: "font-bold text-base text-white flex items-center gap-2", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(Lock, { className: "w-5 h-5 text-amber-400" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Código de Seguridad de Administrador (PIN Maestro)" : isFr ? "Code de Sécurité Administrateur (PIN Maître)" : isEn ? "Admin Security Code (Master Passcode)" : "Kòd Sekirite Administratè (Master Passcode)" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Seguridad del Propietario (Correo y Contraseña)" : isFr ? "Sécurité du Propriétaire (E-mail & Mot de Passe)" : isEn ? "Church Owner Account (Email & Password)" : "Sekirite Mèt Legliz la (Imèl & Modpas Reyèl)" })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400 mt-0.5", children: isEs ? "Código PIN para verificar acciones administrativas sensibles como eliminar o editar miembros." : isFr ? "Code PIN secret pour valider les actions administratives sensibles (suppression ou modification)." : isEn ? "Secret PIN code to verify sensitive administrative actions like member deletion or modification." : "Kòd PIN sekrè pou verifye aksyon administratif sansib tankou sipresyon oswa modifikasyon manm." })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400 mt-0.5", children: isEs ? "Administre la cuenta protegida por Firebase Authentication para proteger todos los datos y acciones sensibles." : isFr ? "Gérez le compte protégé par Firebase Authentication pour sécuriser vos données." : isEn ? "Manage your Firebase-authenticated owner credentials used to protect administrative access and cloud records." : "Jere kont imèl ak modpas Firebase ki sekirize tablo bò admin lan ak done nwaj legliz la." })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "text-slate-300 font-bold block mb-1", children: isEs ? "Código PIN Admin (Opcional)" : isFr ? "Code PIN Admin (Optionnel)" : isEn ? "Admin PIN Code (Optional)" : "Kòd Sekirite PIN Admin (Opsyonèl)" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "input",
-                {
-                  type: showPasscode ? "text" : "password",
-                  value: adminPasscode,
-                  onChange: (e3) => setAdminPasscode(e3.target.value),
-                  placeholder: isEs ? "ej: 8899 o código de 6 dígitos" : isFr ? "ex: 8899 ou code à 6 chiffres" : isEn ? "e.g., 8899 or 6-digit code" : "eg: 8899 oswa kòd 6 chif",
-                  className: "w-full px-3 py-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-mono focus:ring-1 focus:ring-amber-400 focus:border-amber-400 focus:outline-none"
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  onClick: () => setShowPasscode(!showPasscode),
-                  className: "absolute right-3 top-3 text-slate-400 hover:text-white",
-                  children: showPasscode ? /* @__PURE__ */ jsxRuntimeExports.jsx(EyeOff, { className: "w-4 h-4" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4" })
-                }
-              )
+        activeChurch.adminGoogleEmail ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 bg-slate-900/90 rounded-2xl border border-slate-700/80 space-y-3 text-xs", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-2", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-slate-400 block text-[11px]", children: isEs ? "Correo Propietario:" : isFr ? "E-mail Propriétaire :" : isEn ? "Owner Email:" : "Imèl Administratè Ofisyèl:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-mono font-bold text-white text-sm", children: activeChurch.adminGoogleEmail })
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] text-slate-400 mt-1 block", children: isEs ? "Cada iglesia tiene su propio código PIN exclusivo de seguridad." : isFr ? "Chaque église possède son propre code PIN exclusif de sécurité." : isEn ? "Each church maintains its own exclusive master security PIN." : "Chak legliz gen pwòp kòd PIN sekirite mèt pa li." })
+            !showOwnerEmailPendingVerification ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-emerald-400 font-semibold flex items-center gap-1.5 self-start sm:self-auto text-xs", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-4 h-4 shrink-0" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Correo verificado" : isFr ? "E-mail vérifié" : isEn ? "Email verified" : "Imèl verifye" })
+            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2 self-start sm:self-auto", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                type: "button",
+                id: "settings-owner-resend-verification-btn",
+                disabled: isSendingVerificationEmail || ownerVerifCooldown > 0,
+                onClick: handleOwnerResendVerificationAction,
+                className: "px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/35 font-semibold cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap",
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(Mail, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", {
+                    className: "tabular-nums",
+                    children: (() => {
+                      if (isSendingVerificationEmail) return "...";
+                      const label = isEs ? "Reenviar correo de verificación" : isFr ? "Renvoyer l’e-mail de vérification" : isEn ? "Resend verification email" : "Resend imel verifikasyon";
+                      return ownerVerifCooldown > 0 ? `${label} (${ownerVerifCooldown}s)` : label;
+                    })()
+                  })
+                ]
+              }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                type: "button",
+                disabled: isSendingVerificationEmail,
+                onClick: handleOwnerCheckVerificationStatusAction,
+                className: "px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap",
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: `w-3.5 h-3.5 ${isSendingVerificationEmail ? "animate-spin" : ""}` }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Verificar estado" : isFr ? "Vérifier" : isEn ? "Check status" : "Verifye estati" })
+                ]
+              })
+            ] })
           ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2 pt-1", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", {
+              type: "button",
+              disabled: isSendingPasswordReset,
+              onClick: async () => {
+                setIsSendingPasswordReset(true);
+                try {
+                  await sendChurchAdminPasswordReset(activeChurch.adminGoogleEmail || "");
+                  toast.success(
+                    isEs ? "Enlace Enviado" : isEn ? "Reset Email Sent" : "Imèl Re-inisyalizasyon Voye ✓",
+                    isEn ? `Password reset instructions sent to ${activeChurch.adminGoogleEmail}.` : `Nou voye yon imèl bay ${activeChurch.adminGoogleEmail} pou w ka chanje modpas ou.`
+                  );
+                } catch (err) {
+                  toast.error(isEn ? "Reset Error" : "Erè", (err == null ? void 0 : err.message) || "Pa ka voye imèl la.");
+                } finally {
+                  setIsSendingPasswordReset(false);
+                }
+              },
+              className: "px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 font-bold text-xs cursor-pointer disabled:opacity-50",
+              children: isSendingPasswordReset ? "..." : isEs ? "Enviar Correo para Cambiar Contraseña" : isFr ? "Envoyer Lien de Changement de Mot de Passe" : isEn ? "Send Password Reset Email" : "Voye Imèl pou Chanje Modpas"
+            })
+          ] })
+        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 bg-amber-500/10 rounded-2xl border border-amber-500/30 space-y-3 text-xs", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-amber-200 font-semibold", children: isEn ? "Upgrade this legacy PIN church to Email + Password authentication:" : "Aktive yon kont Imèl + Modpas reyèl pou legliz sa a:" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-2.5", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("input", {
+              type: "email",
+              value: upgradeEmailInput,
+              onChange: (e3) => setUpgradeEmailInput(e3.target.value),
+              placeholder: isEn ? "Admin email" : "Imèl administratè",
+              className: "px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white"
+            }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("input", {
+              type: "password",
+              value: upgradePasswordInput,
+              onChange: (e3) => setUpgradePasswordInput(e3.target.value),
+              placeholder: isEn ? "Password (min 6 chars)" : "Modpas (omwen 6 karaktè)",
+              className: "px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white"
+            })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", {
+            type: "button",
+            disabled: isUpgradingEmailAuth,
+            onClick: async () => {
+              setIsUpgradingEmailAuth(true);
+              try {
+                const user = await registerChurchAdminWithEmail(upgradeEmailInput, upgradePasswordInput, activeChurch.pastor || activeChurch.name);
+                linkChurchAdminEmailAccount(activeChurch.id, user);
+                const upgradedCandidate = {
+                  ...activeChurch,
+                  adminGoogleEmail: (user.email || upgradeEmailInput).trim().toLowerCase(),
+                  adminGoogleUid: user.uid,
+                  adminGoogleName: user.displayName || activeChurch.pastor || activeChurch.name,
+                  adminAuthMethod: activeChurch.adminAuthMethod === "google" ? "both" : "email_password"
+                };
+                const syncRes = await syncChurchAdminOwnershipWithCloud(upgradedCandidate, { forceTokenRefresh: true });
+                if (syncRes.synced && syncRes.church) {
+                  saveChurch(syncRes.church);
+                  clearPendingLocalUpload("church", syncRes.church.id);
+                }
+                setAdminGoogleEmail(user.email || "");
+                setUpgradeEmailInput("");
+                setUpgradePasswordInput("");
+                if (syncRes.status === "email_verification_required") {
+                  toast.warning(
+                    isEn ? "Verify Email to Finish Sync" : "Verifye Imèl pou Fini Senkronizasyon",
+                    isEn ? `Check ${user.email} and click the verification link so cloud writes sync.` : `Louvri ${user.email} epi klike sou lyen verifikasyon an pou fini senkronize pèmisyon nwaj la.`
+                  );
+                } else {
+                  toast.success(isEn ? "Admin Account Linked!" : "Kont Imèl & Modpas Aktive ✓", `${user.email}`);
+                }
+                if (onRefreshAll) onRefreshAll();
+              } catch (err) {
+                toast.error(isEn ? "Error" : "Erè", (err == null ? void 0 : err.message) || "Pa ka aktive kont la.");
+              } finally {
+                setIsUpgradingEmailAuth(false);
+              }
+            },
+            className: "px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer disabled:opacity-50",
+            children: isUpgradingEmailAuth ? "..." : isEn ? "Activate Email + Password" : "Aktive Imèl & Modpas"
+          })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 gap-4 text-xs", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-4 text-slate-200", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/80 pb-3", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
@@ -1783,38 +2164,133 @@ export const AdminChurchSettings: React.FC<any> = ({
               ) })
             ] }) })
           ] }),
+          /* QUICK PIN RESUME CARD */
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-4 text-slate-200", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/80 pb-3", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-10 h-10 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-inner", children: /* @__PURE__ */ jsxRuntimeExports.jsx(KeyRound, { className: "w-5 h-5" }) }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "font-bold text-base text-white", children: isEs ? "Desbloqueo Rápido con PIN (Tras Inactividad)" : isFr ? "Déverrouillage Rapide par PIN (Après Inactivité)" : isEn ? "Quick PIN Unlock (Resume After Lock)" : "Deblokaj Rapid ak Kòd PIN (Aprè Inaktivite / Blokaj)" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400", children: isEs ? "Cuando ya inició sesión con correo y contraseña, use un PIN corto para reabrir rápido tras 5 min de pausa." : isFr ? "Une fois connecté par e-mail, utilisez un PIN court pour reprendre vite après verrouillage." : isEn ? "While your owner account stays signed in on this device, enter a quick PIN to resume immediately after lock." : "Lè w deja konekte ak imèl + modpas ou sou aparèy sa a, sèvi ak yon kòd PIN rapid pou reprann aktivite w vit apre blokaj." })
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  type: "button",
+                  id: "btn-toggle-quick-pin",
+                  onClick: () => {
+                    const nextState = !quickPinEnabled;
+                    if (!nextState) {
+                      setQuickPinEnabled(false);
+                      handleSaveQuickPinConfig(false, autoLockMinutes);
+                    } else if (quickPinNewValue.trim().length >= 4 || Boolean(adminPasscode || activeChurch.adminPasscode)) {
+                      setQuickPinEnabled(true);
+                      handleSaveQuickPinConfig(true, autoLockMinutes);
+                    } else {
+                      setQuickPinEnabled(true);
+                    }
+                  },
+                  className: `px-3.5 py-1.5 rounded-full text-xs font-extrabold border flex items-center gap-1.5 cursor-pointer self-start sm:self-auto transition-all ${quickPinEnabled ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40" : "bg-slate-800 text-slate-300 border-slate-700 hover:border-amber-400/50"}`,
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: `w-3.5 h-3.5 ${quickPinEnabled ? "text-emerald-400" : "text-slate-500"}` }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: quickPinEnabled ? isEs ? "Activado ✓" : isEn ? "Enabled ✓" : isFr ? "Activé ✓" : "Aktive ✓" : isEs ? "Desactivado (Activar)" : isEn ? "Off (Click to Enable)" : isFr ? "Désactivé (Activer)" : "Dezaktive (Klike pou Aktive)" })
+                  ]
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 bg-slate-900/90 rounded-2xl border border-slate-700/80 space-y-3 text-xs", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center justify-between gap-2", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-slate-300 font-semibold", children: isEs ? "PIN Rápido (4 a 6 dígitos):" : isEn ? "Quick PIN (4–6 digits):" : isFr ? "Code PIN Rapide (4 à 6 chiffres) :" : "Kòd PIN Rapid (4 a 6 chif):" }),
+                Boolean(adminPasscode || activeChurch.adminPasscode) ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold", children: isEs ? "PIN ya configurado ✓" : isEn ? "PIN already set ✓" : isFr ? "PIN déjà configuré ✓" : "Kòd PIN deja konfigire ✓" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[11px] font-bold", children: isEs ? "Sin PIN configurado" : isEn ? "No PIN configured yet" : isFr ? "Aucun PIN configuré" : "Poko gen PIN konfigire" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row gap-2.5", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative flex-1", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: showQuickPinInput ? "text" : "password",
+                      inputMode: "numeric",
+                      maxLength: 8,
+                      id: "input-quick-pin-settings",
+                      value: quickPinNewValue,
+                      onChange: (e3) => setQuickPinNewValue(e3.target.value),
+                      placeholder: Boolean(adminPasscode || activeChurch.adminPasscode) ? isEs ? "Nuevo PIN (opcional si desea cambiarlo)" : isEn ? "Enter new PIN to change (optional)" : isFr ? "Nouveau PIN (optionnel pour modifier)" : "Antre yon nouvo PIN si w vle chanje l" : isEs ? "Cree un PIN de 4 a 6 dígitos" : isEn ? "Create a 4–6 digit PIN" : isFr ? "Créer un PIN de 4 à 6 chiffres" : "Kreye yon kòd PIN 4–6 chif",
+                      className: "w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono tracking-widest focus:border-amber-400 focus:outline-none"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      type: "button",
+                      onClick: () => setShowQuickPinInput(!showQuickPinInput),
+                      className: "absolute right-3 top-2.5 text-slate-400 hover:text-white cursor-pointer",
+                      children: showQuickPinInput ? /* @__PURE__ */ jsxRuntimeExports.jsx(EyeOff, { className: "w-4 h-4" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4" })
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "button",
+                  {
+                    type: "button",
+                    id: "btn-save-quick-pin",
+                    onClick: () => handleSaveQuickPinConfig(true, autoLockMinutes),
+                    className: "px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow whitespace-nowrap",
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(Save, { className: "w-4 h-4" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar y Activar PIN" : isEn ? "Save & Enable Quick PIN" : isFr ? "Enregistrer & Activer PIN" : "Anrejistre & Aktive PIN Rapid" })
+                    ]
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 leading-relaxed", children: isEs ? "Nota de seguridad: El PIN se cifra con SHA-256 y solo desbloquea la pantalla cuando la cuenta oficial ya está autenticada." : isEn ? "Security note: Your PIN is SHA-256 hashed and only works to quickly unlock an already authenticated owner device." : isFr ? "Note de sécurité : Le PIN est haché (SHA-256) et sert uniquement à déverrouiller rapidement une session déjà connectée." : "Nòt sekirite: PIN lan kripte an SHA-256 epi li travay sèlman sou aparèy ki deja konekte ak imèl + modpas ofisyèl legliz la." })
+            ] })
+          ] }),
+
+          /* AUTO-LOCK TIMEOUT CARD */
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-4 text-slate-200", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/80 pb-3", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-10 h-10 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner", children: /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldAlert, { className: "w-5 h-5" }) }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { className: "font-bold text-base text-white flex items-center gap-2", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Bloqueo Automático por Inactividad (5 Minutos)" : isFr ? "Verrouillage Automatique par Inactivité (5 Minutes)" : isEn ? "Automatic Inactivity Lock (5 Minutes)" : "Blokaj Otomatik pou Inaktivite (5 Minit)" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono font-bold", children: isEs ? "PROTECCIÓN ACTIVA" : isFr ? "PROTECTION ACTIVE" : isEn ? "ACTIVE PROTECTION" : "PWOTEKSYON AKTIF" })
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { className: "font-bold text-base text-white flex items-center gap-2 flex-wrap", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Bloqueo Automático por Inactividad" : isFr ? "Verrouillage Automatique par Inactivité" : isEn ? "Automatic Inactivity Lock" : "Blokaj Otomatik pou Inaktivite" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] px-2 py-0.5 rounded-full border font-mono font-bold ${autoLockMinutes > 0 ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-slate-800 text-slate-400 border-slate-700"}`, children: autoLockMinutes > 0 ? isEs ? `ACTIVO (${autoLockMinutes} MIN)` : isEn ? `ACTIVE (${autoLockMinutes} MIN)` : `AKTIF (${autoLockMinutes} MIN)` : isEn ? "DISABLED" : "DEZAKTIVE" })
                   ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400", children: isEs ? "Cierra y asegura la sesión de administración automáticamente si el dispositivo queda desatendido durante 5 minutos." : isFr ? "Ferme et sécurise la session d’administration automatiquement si l’appareil reste sans surveillance pendant 5 minutes." : isEn ? "Automatically locks and secures the admin session if the device is left unattended for 5 minutes." : "Bloke epi sekirize sesyon administratè a otomatikman si aparèy la rete san siveyans pandan 5 minit." })
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400", children: isEs ? "Elija después de cuántos minutos sin uso se bloquea la pantalla de administración." : isFr ? "Choisissez le délai d'inactivité avant le verrouillage de la session admin." : isEn ? "Choose how long without activity before the admin screen automatically locks." : "Chwazi konbyen minit san aktivite anvan ekran administratè a bloke otomatikman." })
                 ] })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 self-start sm:self-auto", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-3.5 h-3.5" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Activo (5 min)" : isFr ? "Actif (5 min)" : isEn ? "Active (5 min)" : "Aktif (5 min)" })
               ] })
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-4 bg-slate-900/90 rounded-2xl border border-slate-700/80 text-xs space-y-2 text-slate-300", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-start gap-2.5", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4 text-emerald-400 shrink-0 mt-0.5" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "leading-relaxed", children: isEs ? "Cualquier movimiento del ratón, toque en la pantalla o tecla pulsada renueva el tiempo. Si pasan 5 minutos continuos sin actividad, el sistema revoca los privilegios y exige el PIN, huella digital o cuenta de Google para reanudar." : isFr ? "Tout mouvement de souris, toucher d’écran ou frappe clavier réinitialise le délai. Si 5 minutes s’écoulent sans activité, le système révoque les privilèges et exige le code PIN, l’empreinte ou le compte Google." : isEn ? "Any mouse movement, screen tap, or key press resets the timer. If 5 continuous minutes pass without activity, the system revokes privileges and requires your PIN, fingerprint, or Google account to resume." : "Nenpòt mouvman sourit, touche ekran oswa tape nan klavye a renouvle kontè a. Si 5 minit pase san okenn aktivite, sistèm nan bloke aksè a otomatikman epi l mande kòd PIN, anprent oswa Google pou relouvri." })
-            ] }) })
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 bg-slate-900/90 rounded-2xl border border-slate-700/80 text-xs space-y-3 text-slate-300", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex flex-wrap gap-2", children: [5, 10, 15, 30, 0].map((mins) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  onClick: () => {
+                    setAutoLockMinutes(mins);
+                    handleSaveQuickPinConfig(quickPinEnabled, mins);
+                  },
+                  className: `px-3.5 py-2 rounded-xl font-bold text-xs border cursor-pointer transition-all ${autoLockMinutes === mins ? "bg-amber-400 text-slate-950 border-amber-400 shadow" : "bg-slate-950 text-slate-300 border-slate-700 hover:border-slate-500"}`,
+                  children: mins === 0 ? isEs ? "Desactivado" : isFr ? "Désactivé" : isEn ? "Disabled" : "Dezaktive" : mins === 5 ? isEs ? "5 min (Recomendado)" : isFr ? "5 min (Recommandé)" : isEn ? "5 min (Recommended)" : "5 min (Rekòmande)" : `${mins} min`
+                },
+                mins
+              )) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-start gap-2.5 pt-1", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-4 h-4 text-emerald-400 shrink-0 mt-0.5" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "leading-relaxed text-slate-400", children: quickPinEnabled ? isEn ? "When locked, you can resume immediately with your Quick PIN or biometrics." : "Lè l bloke, w ap ka reprann li vit avèk Kòd PIN Rapid ou a oswa anprent ou." : isEn ? "When locked, your admin password, biometrics, or Google sign-in will be required to resume." : "Lè l bloke, l ap mande modpas admin ou, anprent ou oswa Google pou relouvri." })
+              ] })
+            ] })
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pt-2 flex justify-end", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
             type: "button",
-            onClick: handleSaveCurrentChurch,
+            onClick: (e3) => handleSaveCurrentChurch(e3, false),
             className: "px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow",
             children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx(Save, { className: "w-4 h-4" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar Código de Seguridad" : isFr ? "Enregistrer le Code de Sécurité" : isEn ? "Save Security Code" : "Anrejistre Kòd Sekirite" })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar Configuración de Seguridad" : isFr ? "Enregistrer la Sécurité" : isEn ? "Save Security Settings" : "Anrejistre Paramèt Sekirite yo" })
             ]
           }
         ) })
@@ -1827,10 +2303,8 @@ export const AdminChurchSettings: React.FC<any> = ({
         language,
         onSaveChurch: (updated) => {
           saveChurch(updated);
-          setRnc(updated.rnc || "");
-          setRncDocumentPhoto(updated.rncDocumentPhoto || "");
-          setRncDocumentUploadedAt(updated.rncDocumentUploadedAt || "");
           if (onChurchSaved) onChurchSaved();
+          if (onRefreshAll) onRefreshAll();
         }
       }
     ),
@@ -1843,39 +2317,23 @@ export const AdminChurchSettings: React.FC<any> = ({
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Cambiar o Crear un Espacio de Iglesia" : isEn ? "Switch or Create Church Workspace" : isFr ? "Changer ou Créer un Espace d’Église" : "Navige oswa Kreye yon Lòt Espas Legliz" })
           ] })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              type: "button",
-              id: "btn-purge-test-churches-multitab",
-              onClick: () => setShowPurgeDemoModal(true),
-              className: "inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-rose-300 font-bold text-xs transition-all cursor-pointer",
-              title: t3.purgeDemoChurches,
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3.5 h-3.5 text-rose-400" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.cleanDemos })
-              ]
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              type: "button",
-              id: "btn-open-create-church",
-              onClick: () => setIsCreatingNew(true),
-              className: "inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs shadow-lg shadow-amber-400/20 transition-all cursor-pointer",
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "w-4 h-4" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.createChurch })
-              ]
-            }
-          )
-        ] })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-2", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "btn-open-create-church",
+            onClick: () => setIsCreatingNew(true),
+            className: "inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs shadow-lg shadow-amber-400/20 transition-all cursor-pointer",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "w-4 h-4" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.createChurch })
+            ]
+          }
+        ) })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-3", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col sm:flex-row sm:items-center justify-between gap-2", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "text-xs text-slate-400 font-medium", children: isEs ? "Cambie de iglesia para verificar el aislamiento total de datos:" : isEn ? "Switch church to verify complete tenant isolation:" : isFr ? "Changez d’église pour vérifier l’isolation complète des données :" : "Chanje Legliz pou teste izolasyon total done yo:" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "text-xs text-slate-400 font-medium", children: isEs ? "Cambie su espacio de iglesia activo para gestionar los datos de esa congregación:" : isEn ? "Switch active church workspace to manage that congregation’s records:" : isFr ? "Changez d’espace d’église actif pour gérer les données de cette congrégation :" : "Chanje espas legliz aktif la pou jere done kongregasyon sa a:" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-[11px] text-amber-400 font-mono font-bold", children: [
             filteredChurches.length,
             " ",
@@ -2273,52 +2731,28 @@ export const AdminChurchSettings: React.FC<any> = ({
             /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-rose-300/80 mt-1", children: t3.dangerManagementDesc })
           ] })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 rounded-2xl bg-slate-900/80 border border-rose-900/40 flex flex-col justify-between gap-3", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("h5", { className: "font-bold text-slate-200 flex items-center gap-1.5", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-4 h-4 text-amber-400" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.purgeDemoOptionTitle })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400 mt-1 leading-relaxed", children: t3.purgeDemoOptionDesc })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "pt-1", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 rounded-2xl bg-rose-950/40 border border-rose-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-4", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("h5", { className: "font-bold text-rose-200 flex items-center gap-1.5", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-4 h-4 text-rose-400" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.systemResetOptionTitle })
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "button",
-              {
-                type: "button",
-                id: "btn-purge-demo-churches",
-                onClick: () => setShowPurgeDemoModal(true),
-                className: "w-full py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-amber-500/30 text-amber-300 font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-95",
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3.5 h-3.5" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.purgeDemoButton })
-                ]
-              }
-            )
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-rose-300/80 mt-1 leading-relaxed", children: t3.systemResetOptionDesc })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 rounded-2xl bg-rose-950/40 border border-rose-800/60 flex flex-col justify-between gap-3", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("h5", { className: "font-bold text-rose-200 flex items-center gap-1.5", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-4 h-4 text-rose-400" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.systemResetOptionTitle })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-rose-300/80 mt-1 leading-relaxed", children: t3.systemResetOptionDesc })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs(
-              "button",
-              {
-                type: "button",
-                id: "btn-open-system-reset-modal",
-                onClick: () => setShowSystemResetModal(true),
-                className: "w-full py-2.5 px-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-rose-600/30 transition-all active:scale-95",
-                children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-3.5 h-3.5" }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.systemReset })
-                ]
-              }
-            )
-          ] })
-        ] })
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              id: "btn-open-system-reset-modal",
+              onClick: () => setShowSystemResetModal(true),
+              className: "shrink-0 py-2.5 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-rose-600/30 transition-all active:scale-95",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-3.5 h-3.5" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: t3.systemReset })
+              ]
+            }
+          )
+        ] }) })
       ] })
     ] }) }),
     activeSubTab === "donations" && /* @__PURE__ */ jsxRuntimeExports.jsx("form", { onSubmit: handleSaveCurrentChurch, className: "space-y-6", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-6 text-slate-200", children: [
@@ -2330,31 +2764,18 @@ export const AdminChurchSettings: React.FC<any> = ({
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400 mt-1", children: isEs ? "Configure los canales oficiales de donación exclusivos de su iglesia: transferencias bancarias, PayPal, MonCash, Zelle y notas personalizadas." : isFr ? "Configurez les canaux officiels de don propres à votre église : coordonnées bancaires, PayPal, MonCash, Zelle et consignes personnalisées." : isEn ? "Configure your church-specific giving channels: official bank transfers, PayPal, MonCash, Zelle, and custom instructions." : "Konfigire kanal ofisyèl donasyon legliz ou sèlman: enfòmasyon labank, PayPal, MonCash, Zelle, Cash App ak enstriksyon pèsonalize pou manm yo." })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 self-end sm:self-auto", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              type: "button",
-              onClick: () => setShowDonationPreviewModal(true),
-              className: "px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow",
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Ver como Miembro (Preview)" : isFr ? "Aperçu Membre" : isEn ? "Member Preview" : "Gade Kijan Manm yo ap Wè li" })
-              ]
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
-            {
-              type: "submit",
-              className: "px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-lg shadow-amber-400/20 transition-all cursor-pointer",
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx(Save, { className: "w-4 h-4" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar Cambios" : isFr ? "Enregistrer" : isEn ? "Save" : "Anrejistre" })
-              ]
-            }
-          )
-        ] })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-2 self-end sm:self-auto", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            onClick: () => setShowDonationPreviewModal(true),
+            className: "px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Ver como Miembro (Preview)" : isFr ? "Aperçu Membre" : isEn ? "Member Preview" : "Gade Kijan Manm yo ap Wè li" })
+            ]
+          }
+        ) })
       ] }),
       isChurchLicensed ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 sm:p-5 rounded-2xl bg-emerald-950/40 border border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3", children: [
@@ -2747,20 +3168,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           ] })
         ] })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between pt-2", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            type: "button",
-            onClick: () => setShowDonationPreviewModal(true),
-            className: "px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-2 cursor-pointer transition-all shadow",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Probar y Ver Modal como Miembro" : isFr ? "Tester et Voir comme Membre" : isEn ? "Test & Preview Modal" : "Teste & Wè Kijan Manm yo ap Wè li" })
-            ]
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center justify-end pt-2", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
             type: "submit",
@@ -2770,8 +3178,7 @@ export const AdminChurchSettings: React.FC<any> = ({
               /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar Información de Donación" : isFr ? "Enregistrer les Informations" : isEn ? "Save Giving Configuration" : "Anrejistre Enfòmasyon Donasyon yo" })
             ]
           }
-        )
-      ] })
+        ) })
     ] }) }),
     activeSubTab === "rules" && /* @__PURE__ */ jsxRuntimeExports.jsx("form", { onSubmit: handleSaveCurrentChurch, className: "space-y-6 animate-fadeIn", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-6 text-slate-200", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "border-b border-slate-700/80 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3", children: [
@@ -2782,7 +3189,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400 mt-0.5", children: isEs ? "Establezca las normas de convivencia cristiana, el uso responsable de la plataforma y las garantías de protección de datos de los miembros." : isFr ? "Définissez les règles de vie chrétienne, l’utilisation responsable et les garanties de confidentialité des données." : isEn ? "Define Christian community conduct, terms of use, and strict member data confidentiality policies." : "Mete kanpe prensip lavi kretyen, bon itilizasyon platfòm lan ak garanti pwoteksyon done manm yo." })
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center gap-2", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex flex-wrap items-center gap-2", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
             type: "button",
@@ -2866,32 +3273,18 @@ export const AdminChurchSettings: React.FC<any> = ({
           }
         )
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between pt-3 border-t border-slate-800", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            type: "button",
-            onClick: () => setShowRulesPreviewModal(true),
-            className: "px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-2 cursor-pointer transition-all shadow",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Eye, { className: "w-4 h-4" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Probar y Ver Modal" : isFr ? "Tester et Voir l’Aperçu" : isEn ? "Test & Preview Modal" : "Teste & Wè Kijan l ap Parèt" })
-            ]
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            type: "submit",
-            id: "btn-save-church-rules",
-            className: "px-6 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2 shadow-xl shadow-amber-400/20 transition-all cursor-pointer transform active:scale-95",
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(Save, { className: "w-4 h-4" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar Reglamento y Privacidad" : isFr ? "Enregistrer le Règlement" : isEn ? "Save Rules & Privacy" : "Anrejistre Règleman & Vi Prive" })
-            ]
-          }
-        )
-      ] })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center justify-end pt-3 border-t border-slate-800", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          type: "submit",
+          id: "btn-save-church-rules",
+          className: "px-6 py-3 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs sm:text-sm flex items-center gap-2 shadow-xl shadow-amber-400/20 transition-all cursor-pointer transform active:scale-95",
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Save, { className: "w-4 h-4" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Guardar Reglamento y Privacidad" : isFr ? "Enregistrer le Règlement" : isEn ? "Save Rules & Privacy" : "Anrejistre Règleman & Vi Prive" })
+          ]
+        }
+      ) })
     ] }) }),
     activeSubTab === "diagnostics" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] rounded-3xl border border-slate-700/80 p-6 shadow-xl space-y-5 text-slate-200", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "border-b border-slate-700/80 pb-3 flex items-center justify-between", children: [
@@ -2900,18 +3293,18 @@ export const AdminChurchSettings: React.FC<any> = ({
             /* @__PURE__ */ jsxRuntimeExports.jsx(Activity, { className: "w-5 h-5 text-emerald-400" }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Diagnósticos y Estado del Sistema" : "Dyagnostik & Sante Sistèm nan" })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400 mt-0.5", children: isEs ? "Inspección en tiempo real del estado de Firestore, memoria local y servicios." : "Enspeksyon an tan reyèl sou eta baz done Firestore, memwa lokal ak sèvis yo." })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-400 mt-0.5", children: isEs ? "Inspección en tiempo real del estado del servidor, memoria local y servicios." : "Enspeksyon an tan reyèl sou eta sèvè a, memwa lokal ak sèvis yo." })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
             type: "button",
-            onClick: handleTestLatency,
+            onClick: handleCheckCloudLatency,
             disabled: isPinging,
-            className: "px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-emerald-300 border border-emerald-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer",
+            className: "px-3.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-emerald-300 border border-emerald-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60",
             children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: `w-3.5 h-3.5 ${isPinging ? "animate-spin" : ""}` }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Probar Latencia" : "Teste Latans" })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Verificar Conexión" : isFr ? "Vérifier Connexion" : isEn ? "Verify Cloud Sync" : "Verifye Sèvè Cloud" })
             ]
           }
         )
@@ -2919,12 +3312,12 @@ export const AdminChurchSettings: React.FC<any> = ({
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-1", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between text-slate-400", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-bold", children: isEs ? "Sincronización Firestore" : isFr ? "Synchronisation Firestore" : isEn ? "Firestore Synchronization" : "Firestore Sync" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Server, { className: "w-4 h-4 text-emerald-400" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-bold", children: isEs ? "Sincronización en la Nube" : isFr ? "Synchronisation Cloud" : isEn ? "Cloud Synchronization" : "Senkronizasyon Cloud" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Server, { className: `w-4 h-4 ${cloudOnlineStatus === false ? "text-amber-400" : "text-emerald-400"}` })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-lg font-extrabold text-emerald-400 flex items-center gap-1.5", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Conectado / En Línea" : isFr ? "Connecté / En Ligne" : isEn ? "Connected / Online" : "Konekte / Online" })
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `text-lg font-extrabold flex items-center gap-1.5 ${cloudOnlineStatus === false ? "text-amber-400" : "text-emerald-400"}`, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `w-2.5 h-2.5 rounded-full ${cloudOnlineStatus === false ? "bg-amber-400" : "bg-emerald-400 animate-pulse"}` }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: cloudOnlineStatus === false ? (isEs ? "Modo Local / Offline" : isFr ? "Mode Hors-Ligne" : isEn ? "Local / Offline Mode" : "Mòd Lokal / Offline") : (isEs ? "Conectado / En Línea" : isFr ? "Connecté / En Ligne" : isEn ? "Connected / Online" : "Konekte / Online") })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10px] text-slate-500", children: isEs ? "Escuchando cambios en tiempo real" : isFr ? "Écoute des modifications en direct" : isEn ? "Listening to real-time sync updates" : "Koute modifikasyon an tan reyèl" })
         ] }),
@@ -2942,11 +3335,11 @@ export const AdminChurchSettings: React.FC<any> = ({
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-1", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between text-slate-400", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-bold", children: isEs ? "Latencia de Red" : isFr ? "Latence Réseau" : isEn ? "Network Latency" : "Latans Kominikasyon" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-bold", children: isEs ? "Latencia Firestore" : isFr ? "Latence Firestore" : isEn ? "Firestore Latency" : "Latans Firestore" }),
             /* @__PURE__ */ jsxRuntimeExports.jsx(Cpu, { className: "w-4 h-4 text-amber-400" })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-lg font-extrabold text-amber-400", children: pingLatency ? `${pingLatency} ms` : "< 12 ms" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10px] text-slate-500", children: isEs ? "Tiempo de respuesta ultra rápido" : isFr ? "Temps de réponse ultra-rapide" : isEn ? "Ultra fast round-trip latency" : "Tan repons ultra rapid" })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-lg font-extrabold text-amber-400", children: pingLatency !== null ? `${pingLatency} ms` : "—" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[10px] text-slate-500", children: pingLatency !== null ? (isEs ? "Medición real desde servidor Firestore" : isFr ? "Mesure réelle du serveur Firestore" : isEn ? "Live Firestore server round-trip" : "Mezi reyèl ak sèvè Firestore la") : (isEs ? "Pulse Verificar Conexión para medir" : isFr ? "Cliquez sur Vérifier pour mesurer" : isEn ? "Click Verify Cloud Sync to measure" : "Klike Verifye Sèvè Cloud pou mezire") })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-4 rounded-2xl bg-slate-900/60 border border-slate-800 text-xs space-y-2", children: [
@@ -2955,7 +3348,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
             isEs ? "Versión:" : isFr ? "Version :" : isEn ? "Version:" : "Vèsyon:",
             " ",
-            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { className: "text-white", children: "v2.4.0-ProMax" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { className: "text-white", children: `v${version}` })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
             isEs ? "Motor:" : isFr ? "Moteur :" : isEn ? "Engine:" : "Motè:",
@@ -2965,7 +3358,7 @@ export const AdminChurchSettings: React.FC<any> = ({
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
             isEs ? "Base de Datos:" : isFr ? "Base de Données :" : isEn ? "Database:" : "Baz Done:",
             " ",
-            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { className: "text-white", children: "Firestore Cloud" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { className: "text-white", children: "Cloud Sync" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
             isEs ? "Seguridad:" : isFr ? "Sécurité :" : isEn ? "Security:" : "Sekirite:",
@@ -2973,6 +3366,32 @@ export const AdminChurchSettings: React.FC<any> = ({
             /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { className: "text-white", children: "WebAuthn + Google" })
           ] })
         ] })
+      ] })
+    ] }),
+    (onOpenPrivacyPolicy || onOpenTermsOfService) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-3 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px] text-slate-400", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-slate-500", children: isEs ? "Documentos legales oficiales de OmniChurch Pro" : isFr ? "Documents légaux officiels d’OmniChurch Pro" : isEn ? "Official OmniChurch Pro legal documents" : "Dokiman legal ofisyèl OmniChurch Pro" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2.5", children: [
+        onOpenPrivacyPolicy && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            id: "admin-settings-privacy-link",
+            onClick: onOpenPrivacyPolicy,
+            className: "text-slate-300 hover:text-white underline underline-offset-2 cursor-pointer bg-transparent border-0 p-0",
+            children: isEs ? "Política de Privacidad" : isFr ? "Politique de Confidentialité" : isEn ? "Privacy Policy" : "Politik Konfidansyalite"
+          }
+        ),
+        onOpenPrivacyPolicy && onOpenTermsOfService && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-slate-600", "aria-hidden": "true", children: "•" }),
+        onOpenTermsOfService && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            id: "admin-settings-terms-link",
+            onClick: onOpenTermsOfService,
+            className: "text-slate-300 hover:text-white underline underline-offset-2 cursor-pointer bg-transparent border-0 p-0",
+            children: isEs ? "Términos de Servicio" : isFr ? "Conditions d’Utilisation" : isEn ? "Terms of Service" : "Kondisyon Itilizasyon"
+          }
+        )
       ] })
     ] }),
     isCreatingNew && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm overflow-y-auto", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative w-full max-w-lg bg-[#1E293B] rounded-3xl shadow-2xl border border-slate-700 overflow-hidden my-auto text-slate-200", children: [
@@ -3139,9 +3558,9 @@ export const AdminChurchSettings: React.FC<any> = ({
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 text-amber-300 font-bold text-xs", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx(Lock, { className: "w-4 h-4 text-amber-400" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Código PIN de Seguridad Admin *" : isFr ? "Code PIN de Sécurité Admin *" : isEn ? "Admin Security PIN *" : "Kòd PIN Sekirite Administratè *" })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Cuenta Admin (Correo y Contraseña) *" : isFr ? "Compte Admin (E-mail & Mot de Passe) *" : isEn ? "Admin Account (Email & Password) *" : "Kont Administratè (Imèl & Modpas) *" })
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            !(useGoogleForNewChurch && googleUser && googleUser.email) && /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "button",
               {
                 type: "button",
@@ -3154,32 +3573,62 @@ export const AdminChurchSettings: React.FC<any> = ({
               }
             )
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-300", children: isEs ? "Defina el código maestro para proteger el acceso y permitir eliminar o modificar datos sensibles." : isFr ? "Définissez le code maître pour protéger l’accès et confirmer les suppressions." : isEn ? "Set the master passcode required for admin access and sensitive operations." : "Chak legliz dwe gen pwòp kòd sekirite mèt li pou verifye aksè ak konfimasyon sipresyon." }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-2.5", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-300", children: isEs ? "Defina el correo y contraseña real para proteger el acceso y la nube de esta iglesia." : isFr ? "Définissez l'e-mail et le vrai mot de passe administrateur pour sécuriser cette église." : isEn ? "Set the dedicated admin email & password securing this church." : "Defini imèl ak vrè modpas administratè a pou pwoteje espas ak done legliz sa a." }),
+          hasLiveReusableAuthUser && /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "flex items-center gap-2 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 cursor-pointer select-none", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("input", {
+              type: "checkbox",
+              checked: useGoogleForNewChurch,
+              onChange: (e3) => setUseGoogleForNewChurch(e3.target.checked),
+              className: "w-3.5 h-3.5 rounded border-slate-700 bg-slate-900 text-emerald-500"
+            }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-semibold truncate", children: isEn ? `Use signed-in account (${googleUser.email})` : `Sèvi ak kont konekte a (${googleUser.email})` })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", {
+            type: "button",
+            id: "btn-settings-create-church-google-connect",
+            disabled: isGoogleConnectingNewChurch || isCreatingChurchSubmit,
+            onClick: handleConnectGoogleForNewChurch,
+            className: "w-full py-2 px-3 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-[11px] shadow-sm flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 border border-slate-200",
+            children: isGoogleConnectingNewChurch ? (isEn ? "Connecting..." : "Ap konekte...") : hasLiveReusableAuthUser ? (isEs ? "Cambiar cuenta Google" : isFr ? "Changer de compte Google" : isEn ? "Switch Google account" : "Chanje kont Google") : (isEs ? "Continuar con Google (1 clic)" : isFr ? "Continuer avec Google (1 clic)" : isEn ? "Connect with Google (1-click)" : "Konekte ak Google (1 klik)")
+          }),
+          !(useGoogleForNewChurch && hasLiveReusableAuthUser) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-2.5", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "input",
               {
-                type: showNewPasscode ? "text" : "password",
+                type: "email",
                 required: true,
-                maxLength: 12,
-                value: newAdminPasscode,
-                onChange: (e3) => setNewAdminPasscode(e3.target.value),
-                placeholder: isEs ? "PIN (ej: 1234, 7788)" : "Kòd PIN (eg: 1234, 7788)",
-                className: "w-full px-3 py-2 rounded-xl bg-slate-900 border border-amber-400/40 text-white font-mono text-center text-sm font-bold tracking-widest focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                value: newAdminEmail,
+                onChange: (e3) => setNewAdminEmail(e3.target.value),
+                placeholder: isEs ? "Correo Admin (ej: pastor@iglesia.org)" : isEn ? "Admin Email (e.g. pastor@church.org)" : "Imèl Admin (eg: paste@legliz.org)",
+                className: "w-full px-3 py-2 rounded-xl bg-slate-900 border border-amber-400/40 text-white text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
               }
             ),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "input",
-              {
-                type: showNewPasscode ? "text" : "password",
-                required: true,
-                maxLength: 12,
-                value: newConfirmPasscode,
-                onChange: (e3) => setNewConfirmPasscode(e3.target.value),
-                placeholder: isEs ? "Confirmar PIN" : "Konfime Kòd PIN lan",
-                className: "w-full px-3 py-2 rounded-xl bg-slate-900 border border-amber-400/40 text-white font-mono text-center text-sm font-bold tracking-widest focus:ring-1 focus:ring-amber-400 focus:outline-none"
-              }
-            )
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "grid grid-cols-1 sm:grid-cols-2 gap-2.5", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: showNewPasscode ? "text" : "password",
+                  required: true,
+                  minLength: 6,
+                  value: newAdminPassword,
+                  onChange: (e3) => setNewAdminPassword(e3.target.value),
+                  placeholder: isEs ? "Contraseña (mín. 6)" : "Modpas (omwen 6 karaktè)",
+                  className: "w-full px-3 py-2 rounded-xl bg-slate-900 border border-amber-400/40 text-white text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: showNewPasscode ? "text" : "password",
+                  required: true,
+                  minLength: 6,
+                  value: newConfirmPassword,
+                  onChange: (e3) => setNewConfirmPassword(e3.target.value),
+                  placeholder: isEs ? "Confirmar Contraseña" : "Konfime Modpas la",
+                  className: "w-full px-3 py-2 rounded-xl bg-slate-900 border border-amber-400/40 text-white text-xs focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                }
+              )
+            ] })
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-4 border-t border-slate-700 flex justify-end gap-2.5", children: [
@@ -3197,8 +3646,9 @@ export const AdminChurchSettings: React.FC<any> = ({
             {
               type: "submit",
               id: "btn-submit-new-church",
-              className: "px-6 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer shadow-lg shadow-amber-400/20",
-              children: isEs ? "Crear Espacio de Iglesia" : isFr ? "Créer l’Espace d’Église" : isEn ? "Create Church Workspace" : "Kreye Espas Legliz la"
+              disabled: isCreatingChurchSubmit,
+              className: "px-6 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer shadow-lg shadow-amber-400/20 disabled:opacity-50",
+              children: isCreatingChurchSubmit ? "..." : isEs ? "Crear Espacio de Iglesia" : isFr ? "Créer l’Espace d’Église" : isEn ? "Create Church Workspace" : "Kreye Espas Legliz la"
             }
           )
         ] })
@@ -3239,7 +3689,7 @@ export const AdminChurchSettings: React.FC<any> = ({
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "text-rose-300 font-bold flex items-center gap-1.5", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(Lock, { className: "w-4 h-4 text-rose-400" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Código PIN de Seguridad Maestro *" : isFr ? "Code PIN de Sécurité Maître *" : isEn ? "Master Admin Passcode *" : "Kòd Sekirite Mèt Legliz Sa a *" })
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: churchToDelete.adminGoogleEmail ? isEs ? "Contraseña del Administrador *" : isFr ? "Mot de Passe Admin *" : isEn ? "Admin Password *" : "Modpas Administratè *" : isEs ? "Código PIN Maestro *" : isEn ? "Master Admin Passcode *" : "Kòd Sekirite Mèt *" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "button",
@@ -3254,7 +3704,7 @@ export const AdminChurchSettings: React.FC<any> = ({
             }
           )
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400", children: isEs ? `Para confirmar la eliminación, ingrese el código de seguridad de "${churchToDelete.name}".` : isFr ? `Pour confirmer la suppression, entrez le code PIN de sécurité de "${churchToDelete.name}".` : isEn ? `To confirm deletion, enter the security PIN for "${churchToDelete.name}".` : `Pou konfime sipresyon an, antre kòd sekirite mèt ki te kreye pou "${churchToDelete.name}".` }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400", children: churchToDelete.adminGoogleEmail ? isEn ? `Enter the admin password for "${churchToDelete.name}" (or its short code ${churchToDelete.code || churchToDelete.id} if signed in with Google) to confirm deletion.` : `Antre modpas administratè "${churchToDelete.name}" (oswa kòd ${churchToDelete.code || churchToDelete.id} si w konekte ak Google) pou konfime sipresyon an.` : isEn ? `To confirm deletion, enter the legacy PIN for "${churchToDelete.name}".` : `Pou konfime sipresyon an, antre ansyen kòd PIN ki te kreye pou "${churchToDelete.name}".` }),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "input",
           {
@@ -3265,8 +3715,8 @@ export const AdminChurchSettings: React.FC<any> = ({
               setDeletePasscode(e3.target.value);
               setDeletePasscodeError(null);
             },
-            placeholder: isEs ? "Ingrese el PIN de seguridad" : "Antre kòd sekirite legliz sa a...",
-            className: "w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-rose-500/50 text-white font-mono text-center text-sm font-bold tracking-widest focus:ring-2 focus:ring-rose-500 focus:outline-none placeholder:text-slate-600"
+            placeholder: churchToDelete.adminGoogleEmail ? isEn ? "Enter admin password..." : "Antre modpas administratè a..." : isEs ? "Ingrese el PIN de seguridad" : "Antre kòd sekirite legliz sa a...",
+            className: "w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-rose-500/50 text-white text-center text-sm font-bold focus:ring-2 focus:ring-rose-500 focus:outline-none placeholder:text-slate-600"
           }
         ),
         deletePasscodeError && /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-rose-400 text-[11px] font-semibold flex items-center gap-1.5 pt-1", children: [
@@ -3300,42 +3750,6 @@ export const AdminChurchSettings: React.FC<any> = ({
             children: [
               isDeletingChurch ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-3.5 h-3.5 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3.5 h-3.5" }),
               /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isDeletingChurch ? isEs ? "Eliminando..." : isEn ? "Deleting..." : isFr ? "Suppression..." : "W ap efase..." : t3.confirmDeleteChurchBtn })
-            ]
-          }
-        )
-      ] })
-    ] }) }),
-    showPurgeDemoModal && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "bg-[#1E293B] border border-amber-500/50 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 text-slate-200", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-3 border-b border-slate-700/80 pb-3", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-10 h-10 rounded-2xl bg-amber-400/20 text-amber-400 border border-amber-400/30 flex items-center justify-center shrink-0", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-5 h-5" }) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "font-extrabold text-base text-white", children: t3.purgeDemoModalTitle }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-amber-300", children: t3.purgeDemoModalSubtitle })
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs text-slate-300 leading-relaxed", children: t3.purgeDemoModalDesc }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-2 flex items-center justify-end gap-2.5", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            type: "button",
-            disabled: isPurgingDemo,
-            onClick: () => setShowPurgeDemoModal(false),
-            className: "px-4 py-2.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 font-bold text-xs cursor-pointer transition-colors",
-            children: t3.cancel
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "button",
-          {
-            type: "button",
-            id: "btn-confirm-purge-demo",
-            disabled: isPurgingDemo,
-            onClick: handleConfirmPurgeDemo,
-            className: "px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs flex items-center gap-2 cursor-pointer shadow-lg shadow-amber-400/20 transition-all active:scale-95 disabled:opacity-50",
-            children: [
-              isPurgingDemo ? /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-3.5 h-3.5 animate-spin" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Trash2, { className: "w-3.5 h-3.5" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isPurgingDemo ? isEs ? "Limpiando..." : isEn ? "Cleaning..." : isFr ? "Nettoyage..." : "W ap netwaye..." : t3.purgeDemoModalConfirm })
             ]
           }
         )
@@ -3450,54 +3864,6 @@ export const AdminChurchSettings: React.FC<any> = ({
           setDonationEnabled(true);
           if (onRefreshAll) onRefreshAll();
         }
-      }
-    ),
-    isPreviewingDocumentModal && rncDocumentPhoto && /* @__PURE__ */ jsxRuntimeExports.jsx(
-      "div",
-      {
-        role: "dialog",
-        "aria-modal": "true",
-        className: "fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200",
-        children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative w-full max-w-2xl bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between p-4 border-b border-slate-800 bg-slate-950/80", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(FileText, { className: "w-5 h-5 text-amber-400" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { className: "text-sm font-bold text-white", children: isEs ? "Documento Legal de la Iglesia" : "Dokiman Legal Legliz la" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-slate-400", children: activeChurch.name })
-              ] })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "button",
-              {
-                type: "button",
-                onClick: () => setIsPreviewingDocumentModal(false),
-                className: "w-8 h-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center justify-center cursor-pointer transition-colors",
-                children: /* @__PURE__ */ jsxRuntimeExports.jsx(X$1, { className: "w-4 h-4" })
-              }
-            )
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "p-4 overflow-y-auto flex items-center justify-center bg-black/40", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "img",
-            {
-              src: rncDocumentPhoto,
-              alt: "Dokiman Legal",
-              className: "max-h-[65vh] w-auto object-contain rounded-lg shadow-lg border border-slate-800"
-            }
-          ) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-3.5 border-t border-slate-800 bg-slate-950 flex items-center justify-between text-xs text-slate-400", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: rncDocumentUploadedAt ? `${isEs ? "Fecha de carga" : "Dat li te anrejistre"}: ${new Date(rncDocumentUploadedAt).toLocaleString()}` : "" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "button",
-              {
-                type: "button",
-                onClick: () => setIsPreviewingDocumentModal(false),
-                className: "px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs cursor-pointer transition-colors",
-                children: isEs ? "Cerrar" : "Fèmen"
-              }
-            )
-          ] })
-        ] })
       }
     )
   ] });

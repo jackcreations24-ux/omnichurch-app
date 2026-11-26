@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Church,
-  DeveloperSettings,
   ChurchLicense,
+  DeveloperSettings,
   LicenseTier,
   LicenseStatus,
   Language,
@@ -10,614 +10,1017 @@ import {
 import {
   generateLicenseKey,
   validateAndActivateLicense,
+  generateAndActivateLicenseForChurch,
+  extendOrUpgradeLicense,
   deleteLicensePermanently,
+  deleteLicenseForChurch,
   updateLicenseStatus,
   purgeAllLicensesPermanently,
-  purgeAllDemoLicenses,
 } from '../../utils/developerStorage';
 import { useToast } from '../../context/ToastContext';
+import { ConfirmDeleteModal } from '../common/ConfirmDeleteModal';
 import {
-  KeyRound,
-  CheckCircle2,
-  Sparkles,
-  Layers,
-  X,
-  Trash2,
+  Key,
+  Copy,
   Check,
+  ShieldCheck,
+  Sparkles,
+  Lock,
+  Unlock,
+  Plus,
+  Trash2,
+  Building2,
+  Ban,
+  RefreshCw,
   Search,
+  AlertTriangle,
+  Download,
+  CalendarPlus,
+  Crown,
+  Zap,
+  CheckCircle2,
 } from 'lucide-react';
 
 export interface DevLicensesTabProps {
   settings: DeveloperSettings;
   allChurches: Church[];
-  currentChurch: Church | null;
-  onUpdateSettings: (updated: Partial<DeveloperSettings>) => Promise<void>;
+  currentChurch?: Church | null;
+  onUpdateSettings: (partial: Partial<DeveloperSettings>) => Promise<void>;
+  onRefreshSettings?: () => void;
   language?: Language;
 }
+
+const LICENSE_UI_PREFS_KEY = 'omnichurch_dev_licenses_ui_v1';
 
 export const DevLicensesTab: React.FC<DevLicensesTabProps> = ({
   settings,
   allChurches,
-  currentChurch,
   onUpdateSettings,
-  language = 'ht',
+  onRefreshSettings,
 }) => {
   const toast = useToast();
 
+  // Load persisted UI preferences so the developer's working context is remembered
+  const savedPrefs = useMemo(() => {
+    try {
+      const raw = localStorage.getItem(LICENSE_UI_PREFS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }, []);
+
   // Generator State
-  const [selectedChurchForLicense, setSelectedChurchForLicense] = useState<string>(
-    currentChurch?.id || allChurches[0]?.id || 'GLOBAL'
+  const [targetChurchId, setTargetChurchId] = useState<string>(
+    savedPrefs.targetChurchId || allChurches[0]?.id || 'GLOBAL'
   );
-  const [selectedTier, setSelectedTier] = useState<LicenseTier>('pro_annual');
+  const [selectedTier, setSelectedTier] = useState<LicenseTier>(
+    savedPrefs.selectedTier || 'pro_annual'
+  );
+  const [customNotes, setCustomNotes] = useState<string>(savedPrefs.customNotes || '');
   const [generatedKey, setGeneratedKey] = useState<string>('');
-  const [copiedKey, setCopiedKey] = useState<boolean>(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [isGeneratingAndActivating, setIsGeneratingAndActivating] = useState(false);
 
-  // Quick Activation State
-  const [activationKeyInput, setActivationKeyInput] = useState<string>('');
-  const [activationChurchId, setActivationChurchId] = useState<string>(
-    currentChurch?.id || allChurches[0]?.id || ''
+  // Manual Activation State
+  const [activateKeyInput, setActivateKeyInput] = useState('');
+  const [activateChurchId, setActivateChurchId] = useState<string>(
+    savedPrefs.activateChurchId || allChurches[0]?.id || 'GLOBAL'
   );
-  const [isActivating, setIsActivating] = useState<boolean>(false);
 
-  // License Management & Search State
-  const [licenseSearchQuery, setLicenseSearchQuery] = useState<string>('');
-  const [licenseStatusFilter, setLicenseStatusFilter] = useState<'all' | 'active' | 'revoked' | 'expired'>('all');
-  const [manualDeleteKeyOrId, setManualDeleteKeyOrId] = useState<string>('');
-  const [isManualDeleting, setIsManualDeleting] = useState<boolean>(false);
+  // Direct Delete / Lookup by Key or Church ID State
+  const [directTargetInput, setDirectTargetInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState(savedPrefs.searchQuery || '');
+  const [statusFilter, setStatusFilter] = useState<'all' | LicenseStatus>(
+    savedPrefs.statusFilter || 'all'
+  );
 
-  // Generate License Key
-  const handleGenerateLicense = () => {
-    const key = generateLicenseKey(selectedChurchForLicense, selectedTier);
+  // Persist generator & filter selections whenever the developer changes them
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        LICENSE_UI_PREFS_KEY,
+        JSON.stringify({
+          targetChurchId,
+          selectedTier,
+          customNotes,
+          activateChurchId,
+          searchQuery,
+          statusFilter,
+        })
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [targetChurchId, selectedTier, customNotes, activateChurchId, searchQuery, statusFilter]);
+
+  // Confirmation Modal State
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: async () => {},
+  });
+
+  const refreshParentOrStorage = () => {
+    if (onRefreshSettings) onRefreshSettings();
+  };
+
+  const licenses = settings.licenses || [];
+
+  // Live License Metrics
+  const stats = useMemo(() => {
+    const total = licenses.length;
+    const active = licenses.filter((l) => l.status === 'active').length;
+    const lifetime = licenses.filter(
+      (l) => l.tier === 'enterprise_lifetime' && l.status === 'active'
+    ).length;
+    const proAnnual = licenses.filter(
+      (l) => l.tier === 'pro_annual' && l.status === 'active'
+    ).length;
+    const trial = licenses.filter((l) => l.tier === 'trial' && l.status === 'active').length;
+    const revokedOrExpired = licenses.filter(
+      (l) => l.status === 'revoked' || l.status === 'expired'
+    ).length;
+    return { total, active, lifetime, proAnnual, trial, revokedOrExpired };
+  }, [licenses]);
+
+  const handleGenerateOnly = () => {
+    const key = generateLicenseKey(targetChurchId, selectedTier);
     setGeneratedKey(key);
-    setCopiedKey(false);
-    toast.info(
-      'Kle Lisans Jenere',
-      `Kle: ${key} (${selectedTier.toUpperCase()})`
+    setActivateKeyInput(key);
+    setActivateChurchId(targetChurchId);
+    toast.success(
+      'Kle Lisans Jenere!',
+      `Kle ${key} pare pou kopye oswa aktive.`
     );
   };
 
-  // Copy Key
-  const handleCopyKey = () => {
-    if (!generatedKey) return;
-    navigator.clipboard.writeText(generatedKey);
-    setCopiedKey(true);
-    toast.success('Kopye!', 'Kle lisans lan kopye nan kayeclip ou.');
-    setTimeout(() => setCopiedKey(false), 2500);
+  const handleGenerateAndActivateNow = async () => {
+    setIsGeneratingAndActivating(true);
+    try {
+      const targetChurch = allChurches.find((c) => c.id === targetChurchId);
+      const churchName =
+        targetChurchId === 'GLOBAL'
+          ? 'Tout Legliz (Global)'
+          : targetChurch?.name || targetChurchId;
+
+      const res = await generateAndActivateLicenseForChurch(
+        targetChurchId,
+        churchName,
+        selectedTier,
+        customNotes
+      );
+
+      if (res.success && res.license) {
+        setGeneratedKey(res.license.key);
+        refreshParentOrStorage();
+        toast.success(
+          'Lisans Jenere & Aktive!',
+          `${res.license.key} aktive imedyatman pou ${churchName}.`
+        );
+      } else {
+        toast.error('Erè Aktivasyon', res.message);
+      }
+    } finally {
+      setIsGeneratingAndActivating(false);
+    }
   };
 
-  // Quick Activate
-  const handleActivateLicense = async () => {
-    const trimmedKey = activationKeyInput.trim();
-    if (!trimmedKey) {
-      toast.error('Kle Manke', 'Tanpri antre yon kle lisans valid pou aktive.');
+  const handleCopy = (keyText: string) => {
+    navigator.clipboard.writeText(keyText);
+    setCopiedKey(keyText);
+    toast.info('Kle Kopye!', `${keyText} kopye nan clipboard ou.`);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const handleActivateManual = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activateKeyInput.trim()) return;
+
+    const targetChurch = allChurches.find((c) => c.id === activateChurchId);
+    const churchName =
+      activateChurchId === 'GLOBAL'
+        ? 'Tout Legliz (Global)'
+        : targetChurch?.name || activateChurchId;
+
+    const result = await validateAndActivateLicense(
+      activateKeyInput,
+      activateChurchId,
+      churchName
+    );
+
+    if (result.success) {
+      toast.success('Lisans Aktive!', result.message);
+      setActivateKeyInput('');
+      refreshParentOrStorage();
+    } else {
+      toast.error('Erè Aktivasyon', result.message);
+    }
+  };
+
+  const handleExtendOrUpgrade = async (
+    licenseKey: string,
+    mode: 'extend_1_year' | 'upgrade_lifetime'
+  ) => {
+    const res = await extendOrUpgradeLicense(licenseKey, mode);
+    if (res.success) {
+      toast.success('Lisans Mete Ajou!', res.message);
+      refreshParentOrStorage();
+    } else {
+      toast.error('Erè Mizajou Lisans', res.message);
+    }
+  };
+
+  const handleExportLicensesCsv = () => {
+    if (licenses.length === 0) {
+      toast.warning('Okenn Lisans', 'Pa gen okenn lisans nan baz done a pou ekspòte.');
       return;
     }
 
-    setIsActivating(true);
-    try {
-      const res = await validateAndActivateLicense(
-        trimmedKey,
-        activationChurchId || 'GLOBAL'
-      );
+    const headers = [
+      'Kle Lisans',
+      'ID Legliz',
+      'Non Legliz',
+      'Nivo (Tier)',
+      'Estati',
+      'Dat Kreye',
+      'Dat Ekspirasyon',
+      ' San Piblisite (Ad-Free)',
+      'Nòt',
+    ];
+    const rows = licenses.map((lic) => [
+      lic.key,
+      lic.churchId,
+      `"${(lic.churchName || '').replace(/"/g, '""')}"`,
+      lic.tier,
+      lic.status,
+      lic.issuedAt ? new Date(lic.issuedAt).toISOString().split('T')[0] : '',
+      lic.expiresAt,
+      lic.allowAdFree ? 'Wi' : 'Non',
+      `"${(lic.notes || '').replace(/"/g, '""')}"`,
+    ]);
 
-      if (res.success) {
-        toast.success(
-          'Lisans Aktive Avèk Siksè! ✓',
-          `Legliz "${res.license?.churchName || activationChurchId}" aktive sou plan ${res.license?.tier?.toUpperCase()}.`
-        );
-        setActivationKeyInput('');
-      } else {
-        toast.error('Aktivasyon Echwe', res.message || 'Kle sa a pa valid.');
-      }
-    } catch (err: any) {
-      toast.error('Erè Aktivasyon', err?.message || 'Pa ka aktive lisans lan.');
-    } finally {
-      setIsActivating(false);
-    }
+    const csvContent =
+      'data:text/csv;charset=utf-8,' +
+      [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute(
+      'download',
+      `omnichurch-lisans-${new Date().toISOString().split('T')[0]}.csv`
+    );
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    toast.success(
+      'Rapò Lisans Ekspòte (.CSV)',
+      `${licenses.length} lisans ekspòte avèk siksè.`
+    );
   };
 
-  // Status Change
-  const handleUpdateLicenseStatus = async (
-    key: string,
-    newStatus: LicenseStatus,
-    churchName?: string
-  ) => {
-    const ok = await updateLicenseStatus(key, newStatus);
-    if (ok) {
-      toast.success(
-        'Estati Lisans Chanje',
-        `Lisans pou "${churchName || key}" pase kòm ${newStatus.toUpperCase()}.`
+  // Permanently delete a single license key from table
+  const handleDeleteLicense = (keyToDelete: string, churchName?: string) => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Efase Lisans Definitivman',
+      message: `Èske w sèten ou vle efase lisans "${keyToDelete}" (${churchName || 'Legliz'}) definitivman nan baz done a? Aksyon sa a pa ka defèt.`,
+      confirmText: 'Wi, Efase Definitivman',
+      variant: 'danger',
+      onConfirm: async () => {
+        const res = await deleteLicensePermanently(keyToDelete);
+        if (res.success) {
+          toast.success('Lisans Efase!', res.message);
+          refreshParentOrStorage();
+        } else {
+          toast.error('Erè', res.message);
+        }
+      },
+    });
+  };
+
+  // Revoke or Reactivate a license key
+  const handleToggleLicenseStatus = async (lic: ChurchLicense) => {
+    const nextStatus: LicenseStatus = lic.status === 'active' ? 'revoked' : 'active';
+    const res = await updateLicenseStatus(lic.key, nextStatus);
+    if (res.success) {
+      toast.info(
+        nextStatus === 'revoked' ? 'Lisans Revoke' : 'Lisans Reyaktive',
+        res.message
       );
+      refreshParentOrStorage();
     } else {
-      toast.error('Erè', 'Pa t ka mete ajou estati lisans lan.');
+      toast.error('Erè', res.message);
     }
   };
 
-  // Permanent Delete
-  const handleDeleteLicensePermanently = async (key: string, churchName?: string) => {
-    if (confirm(`Èske w vle efase lisans "${churchName || key}" la nèt nan baz done a?`)) {
-      const ok = await deleteLicensePermanently(key);
-      if (ok) {
-        toast.info('Lisans Efase', `Lisans ${key} retire nèt.`);
-      } else {
-        toast.error('Erè', 'Pa t ka efase lisans lan.');
-      }
-    }
-  };
-
-  // Direct manual purge
-  const handleManualDeleteLicense = async () => {
-    const target = manualDeleteKeyOrId.trim();
+  // Direct Delete by Key or Church ID input
+  const handleDirectDeleteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const target = directTargetInput.trim();
     if (!target) return;
 
-    setIsManualDeleting(true);
-    try {
-      const ok = await deleteLicensePermanently(target);
-      if (ok) {
-        toast.success('Lisans Efase Definitif!', `Kle/ID "${target}" efase nèt nan sistèm nan.`);
-        setManualDeleteKeyOrId('');
-      } else {
-        toast.error('Pa Jwenn', `Okenn lisans pa jwenn ak kle oswa ID "${target}".`);
-      }
-    } finally {
-      setIsManualDeleting(false);
+    setConfirmModal({
+      isOpen: true,
+      title: 'Efase Lisans pa Kle oswa ID Legliz',
+      message: `Èske w sèten ou vle efase definitivman tout lisans ki koresponn ak "${target}" nan baz done a?`,
+      confirmText: 'Efase Kounye a',
+      variant: 'danger',
+      onConfirm: async () => {
+        const res = await deleteLicensePermanently(target);
+        if (res.success) {
+          toast.success('Lisans Efase nan Baz Done!', res.message);
+          setDirectTargetInput('');
+          refreshParentOrStorage();
+        } else {
+          toast.warning('Pa Jwenn Lisans', res.message);
+        }
+      },
+    });
+  };
+
+  // Delete license for selected church in dropdown
+  const handleDeleteForSelectedChurch = () => {
+    const targetChurch = allChurches.find((c) => c.id === activateChurchId);
+    const label =
+      activateChurchId === 'GLOBAL'
+        ? 'Tout Legliz (GLOBAL)'
+        : `${targetChurch?.name || activateChurchId} (${activateChurchId})`;
+
+    setConfirmModal({
+      isOpen: true,
+      title: 'Retire Lisans Legliz la',
+      message: `Èske w vle retire epi efase definitivman lisans ki aktif sou legliz "${label}" nan baz done a?`,
+      confirmText: 'Wi, Retire Lisans lan',
+      variant: 'danger',
+      onConfirm: async () => {
+        const res = await deleteLicenseForChurch(activateChurchId);
+        if (res.success) {
+          toast.success('Lisans Legliz Efase!', res.message);
+          refreshParentOrStorage();
+        } else {
+          toast.warning('Okenn Lisans', res.message);
+        }
+      },
+    });
+  };
+
+  // Purge ALL licenses
+  const handlePurgeAllLicenses = () => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Efase TOUT Lisans nan Baz Done a',
+      message: `ATANSYON: Aksyon sa a pral efase TOUT (${licenses.length}) lisans ki anrejistre nan sistèm nan definitivman. Èske w sèten?`,
+      confirmText: 'Wi, Efase Tout Lisans',
+      variant: 'danger',
+      onConfirm: async () => {
+        const res = await purgeAllLicensesPermanently();
+        toast.success(
+          'Baz Done Lisans Netwaye!',
+          `${res.purgedCount} lisans efase definitivman.`
+        );
+        refreshParentOrStorage();
+      },
+    });
+  };
+
+  const getTierDetails = (tier: LicenseTier) => {
+    switch (tier) {
+      case 'enterprise_lifetime':
+        return {
+          label: 'Enterprise Pou Tout Tan (Lifetime)',
+          badge: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
+          desc: 'Manm san limit • Senkronizasyon • San Piblisite • Pa janm ekspire',
+        };
+      case 'pro_annual':
+        return {
+          label: 'Pro Anyèl (365 Jou)',
+          badge: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+          desc: 'Jiska 2,500 manm • Senkronizasyon • San Piblisite • Valab 1 ane',
+        };
+      case 'trial':
+        return {
+          label: 'Esè 30 Jou (Trial)',
+          badge: 'bg-sky-500/20 text-sky-300 border-sky-500/40',
+          desc: 'Jiska 200 manm • Valab 30 jou pou teste sistèm nan',
+        };
+      default:
+        return {
+          label: 'Pèsonalize (Custom)',
+          badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+          desc: 'Konfigirasyon espesyal',
+        };
     }
   };
 
-  // Purge All Demo Licenses
-  const handlePurgeAllDemoLicenses = async () => {
-    if (confirm('Èske w vle efase tout kle demo nan baz done a?')) {
-      const res = await purgeAllDemoLicenses();
-      toast.success(
-        'Kle Demo Netwaye!',
-        `${res.purgedCount} kle demo efase nan sistèm nan.`
-      );
-    }
-  };
-
-  // Purge ALL licenses permanently
-  const handlePurgeAllLicensesPermanently = async () => {
-    if (
-      confirm(
-        'ATANSYON MAJÈ: Èske w sèten ou vle efase TOUT lisans ki egziste nan baz done a nèt? Aksyon sa a pa ka defèt!'
-      )
-    ) {
-      const res = await purgeAllLicensesPermanently();
-      toast.success(
-        'Tout Lisans Efase!',
-        `${res.purgedCount} lisans efase nèt nan baz done a.`
-      );
-    }
-  };
-
-  const filteredLicenses = settings.licenses.filter((lic) => {
-    const matchesQuery =
-      !licenseSearchQuery ||
-      (lic.churchName || '').toLowerCase().includes(licenseSearchQuery.toLowerCase()) ||
-      (lic.churchId || '').toLowerCase().includes(licenseSearchQuery.toLowerCase()) ||
-      (lic.key || '').toLowerCase().includes(licenseSearchQuery.toLowerCase());
-    const matchesStatus =
-      licenseStatusFilter === 'all' || lic.status === licenseStatusFilter;
-    return matchesQuery && matchesStatus;
+  const filteredLicenses = licenses.filter((lic) => {
+    if (statusFilter !== 'all' && lic.status !== statusFilter) return false;
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      lic.key.toLowerCase().includes(q) ||
+      lic.churchId.toLowerCase().includes(q) ||
+      (lic.churchName || '').toLowerCase().includes(q) ||
+      lic.tier.toLowerCase().includes(q) ||
+      (lic.notes || '').toLowerCase().includes(q)
+    );
   });
 
   return (
-    <div className="space-y-6">
-      {/* 2 COLUMNS: GENERATOR & ACTIVATION */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 1. Generator Box */}
-        <div className="p-6 rounded-3xl bg-[#0B1120] border border-slate-800 space-y-4 shadow-xl">
-          <div className="flex items-center gap-3 border-b border-slate-800 pb-3.5">
-            <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
-              <KeyRound className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="font-extrabold text-sm text-white">
-                Dèlko Kle Lisans (License Key Generator)
+    <div className="space-y-6 animate-in fade-in duration-200">
+      {/* 1. Master License Lockout Switch */}
+      <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl">
+        <div className="flex items-start gap-4">
+          <div
+            className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border ${
+              settings.enforceLicenseLockout
+                ? 'bg-amber-400/20 border-amber-400/40 text-amber-300'
+                : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+            }`}
+          >
+            {settings.enforceLicenseLockout ? (
+              <Lock className="w-6 h-6" />
+            ) : (
+              <Unlock className="w-6 h-6" />
+            )}
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-extrabold text-white">
+                Kontwòl Egzijans Lisans (License Enforcement)
               </h3>
-              <p className="text-[11px] text-slate-400">
-                Kreye yon kle lisans inik ak chifreman pou nenpòt legliz
-              </p>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase ${
+                  settings.enforceLicenseLockout
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                }`}
+              >
+                {settings.enforceLicenseLockout ? 'STRIK (OBLIGATWA)' : 'MÒD LIB / ESÈ'}
+              </span>
             </div>
+            <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+              Lè opsyon sa a aktive, legliz ki pa gen yon kle lisans aktif ap wè yon fenèt ki mande yo antre kle lisans yo. Deplwaman sa a kontwole tout legliz yo an tan reyèl.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() =>
+            onUpdateSettings({ enforceLicenseLockout: !settings.enforceLicenseLockout })
+          }
+          className={`px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 transition-all cursor-pointer shrink-0 ${
+            settings.enforceLicenseLockout
+              ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+              : 'bg-amber-400 hover:bg-amber-300 text-slate-950 shadow-lg shadow-amber-400/20'
+          }`}
+        >
+          {settings.enforceLicenseLockout ? (
+            <>
+              <Unlock className="w-4 h-4" />
+              <span>Dezaktive Egzijans Lisans</span>
+            </>
+          ) : (
+            <>
+              <Lock className="w-4 h-4" />
+              <span>Aktive Egzijans Lisans (1-Click)</span>
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Live License Summary Metrics */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+            Total Lisans
+          </span>
+          <span className="text-2xl font-black text-white font-mono mt-1 block">
+            {stats.total}
+          </span>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">
+            Anrejistre nan sistèm nan
+          </span>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-emerald-500/30">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block">
+            Lisans Aktif
+          </span>
+          <span className="text-2xl font-black text-emerald-300 font-mono mt-1 block">
+            {stats.active}
+          </span>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">
+            Pwoteksyon Ad-Free aktif
+          </span>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-purple-500/30">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300 block">
+            Pou Tout Tan (Lifetime)
+          </span>
+          <span className="text-2xl font-black text-purple-300 font-mono mt-1 block">
+            {stats.lifetime}
+          </span>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">
+            Manm san limit • Pa ekspire
+          </span>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-amber-500/30">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300 block">
+            Pro Anyèl (365 Jou)
+          </span>
+          <span className="text-2xl font-black text-amber-300 font-mono mt-1 block">
+            {stats.proAnnual}
+          </span>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">
+            Abònman anyèl aktif
+          </span>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 col-span-2 sm:col-span-1">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-sky-300 block">
+            Esè 30 Jou / Revoke
+          </span>
+          <span className="text-2xl font-black text-sky-300 font-mono mt-1 block">
+            {stats.trial} <span className="text-xs text-slate-500">/ {stats.revokedOrExpired}</span>
+          </span>
+          <span className="text-[10px] text-slate-400 mt-0.5 block">
+            Esè aktif / Sispann
+          </span>
+        </div>
+      </div>
+
+      {/* 2. License Generator & Direct Activation Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Key Generator + 1-Click Activate */}
+        <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-amber-400" />
+              <h4 className="font-bold text-sm text-white">
+                Jeneratè & Aktivasyon Lisans (1-Click)
+              </h4>
+            </div>
+            <span className="text-[10px] font-mono text-amber-300 bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
+              OMNI-PRO ENGINE
+            </span>
           </div>
 
-          <div className="space-y-3.5">
+          <div className="space-y-3 text-xs">
             <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Chwazi Legliz la:
+              <label className="text-slate-400 block mb-1 font-medium">
+                Chwazi Legliz Sib la
               </label>
               <select
-                value={selectedChurchForLicense}
-                onChange={(e) => setSelectedChurchForLicense(e.target.value)}
-                className="w-full py-2.5 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-amber-400"
+                value={targetChurchId}
+                onChange={(e) => {
+                  setTargetChurchId(e.target.value);
+                  setActivateChurchId(e.target.value);
+                }}
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-amber-400"
               >
-                <option value="GLOBAL">★ Lisans Global (Nenpòt Nouvo Legliz)</option>
-                {allChurches.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} ({c.id})
+                <option value="GLOBAL">🌍 GLOBAL (Valab pou nenpòt legliz)</option>
+                {allChurches.map((ch) => (
+                  <option key={ch.id} value={ch.id}>
+                    ⛪ {ch.name} ({ch.id})
                   </option>
                 ))}
               </select>
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Nivo Lisans (License Tier):
+              <label className="text-slate-400 block mb-1 font-medium">
+                Nivo Lisans (License Tier)
               </label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { id: 'enterprise_lifetime', label: 'Pou Tout Tan', tag: 'Lifetime' },
-                  { id: 'pro_annual', label: 'Pro Anyèl', tag: '1 Ane' },
-                  { id: 'trial', label: 'Esè (Trial)', tag: '30 Jou' },
-                ].map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setSelectedTier(t.id as LicenseTier)}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      selectedTier === t.id
-                        ? 'bg-amber-400/10 border-amber-400 text-amber-300 font-bold shadow-sm'
-                        : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <span className="block text-xs font-extrabold">{t.label}</span>
-                    <span className="text-[10px] text-slate-500 font-mono">{t.tag}</span>
-                  </button>
-                ))}
-              </div>
+              <select
+                value={selectedTier}
+                onChange={(e) => setSelectedTier(e.target.value as LicenseTier)}
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-amber-400"
+              >
+                <option value="enterprise_lifetime">
+                  👑 Enterprise Pou Tout Tan (Lifetime - San Limit)
+                </option>
+                <option value="pro_annual">⭐ Pro Anyèl (365 Jou - 2,500 Manm)</option>
+                <option value="trial">⏱️ Esè 30 Jou (Trial - 200 Manm)</option>
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                {getTierDetails(selectedTier).desc}
+              </p>
             </div>
 
-            <button
-              type="button"
-              id="btn-generate-license-key"
-              onClick={handleGenerateLicense}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-400/20 flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-95"
-            >
-              <KeyRound className="w-4 h-4" />
-              <span>Jenere Nouvo Kle Lisans</span>
-            </button>
+            <div>
+              <label className="text-slate-400 block mb-1 font-medium">
+                Nòt Referans sou Lisans lan (Opsyonèl)
+              </label>
+              <input
+                type="text"
+                value={customNotes}
+                onChange={(e) => setCustomNotes(e.target.value)}
+                placeholder="Egz: Peye pa MonCash / Pastè Jean / Kontra 2026..."
+                className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-amber-400"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={handleGenerateOnly}
+                className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+              >
+                <Key className="w-4 h-4" />
+                <span>Jenere Kle Sèlman</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isGeneratingAndActivating}
+                onClick={handleGenerateAndActivateNow}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-amber-400/20 cursor-pointer transition-all disabled:opacity-50"
+              >
+                <Zap className="w-4 h-4" />
+                <span>
+                  {isGeneratingAndActivating
+                    ? 'Ap Aktive...'
+                    : 'Jenere & Aktive Dirèkteman'}
+                </span>
+              </button>
+            </div>
 
             {generatedKey && (
-              <div className="p-4 bg-slate-950 border border-amber-500/40 rounded-2xl space-y-2.5">
-                <span className="text-[10px] text-amber-400 font-mono font-bold uppercase block tracking-wider">
-                  Kle Jenere ak Siksè:
-                </span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={generatedKey}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-900 border border-slate-700 text-amber-300 font-mono text-xs font-bold"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleCopyKey}
-                    className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center gap-1 shrink-0 cursor-pointer"
-                  >
-                    {copiedKey ? <Check className="w-4 h-4" /> : <Layers className="w-4 h-4" />}
-                    <span>{copiedKey ? 'Kopye!' : 'Kopye'}</span>
-                  </button>
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-amber-400/40 flex items-center justify-between gap-2 mt-3">
+                <div className="truncate">
+                  <span className="text-[10px] text-slate-400 block">
+                    Dènye Kle ki Jenere:
+                  </span>
+                  <span className="font-mono text-sm font-black text-amber-300 tracking-wider">
+                    {generatedKey}
+                  </span>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => handleCopy(generatedKey)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-white flex items-center gap-1.5 shrink-0 cursor-pointer"
+                >
+                  {copiedKey === generatedKey ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-emerald-400">Kopye!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Kopye</span>
+                    </>
+                  )}
+                </button>
               </div>
             )}
           </div>
         </div>
 
-        {/* 2. Quick Activation Box */}
-        <div className="p-6 rounded-3xl bg-[#0B1120] border border-slate-800 space-y-4 shadow-xl">
-          <div className="flex items-center gap-3 border-b border-slate-800 pb-3.5">
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <CheckCircle2 className="w-5 h-5" />
+        {/* Manual Activation & Direct Removal */}
+        <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-5">
+          <form onSubmit={handleActivateManual} className="space-y-3 text-xs">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-emerald-400" />
+              <h4 className="font-bold text-sm text-white">
+                Aktive yon Kle Lisans sou yon Legliz
+              </h4>
             </div>
-            <div>
-              <h3 className="font-extrabold text-sm text-white">
-                Aktivasyon Rapid (Quick Activation)
-              </h3>
-              <p className="text-[11px] text-slate-400">
-                Antre yon kle pou aktive lisans lan imedyatman sou yon legliz
-              </p>
-            </div>
-          </div>
 
-          <div className="space-y-3.5">
             <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Chwazi Legliz pou Aktive a:
+              <label className="text-slate-400 block mb-1 font-medium">
+                Legliz pou Resevwa oswa Jere Lisans lan
               </label>
-              <select
-                value={activationChurchId}
-                onChange={(e) => setActivationChurchId(e.target.value)}
-                className="w-full py-2.5 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-emerald-400"
-              >
-                {allChurches.length === 0 ? (
-                  <option value="">★ Lisans Global (Okenn legliz anrejistre poko)</option>
-                ) : (
-                  allChurches.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.id})
+              <div className="flex gap-2">
+                <select
+                  value={activateChurchId}
+                  onChange={(e) => setActivateChurchId(e.target.value)}
+                  className="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-emerald-400"
+                >
+                  <option value="GLOBAL">🌍 GLOBAL (Tout Legliz)</option>
+                  {allChurches.map((ch) => (
+                    <option key={ch.id} value={ch.id}>
+                      ⛪ {ch.name} ({ch.id})
                     </option>
-                  ))
-                )}
-              </select>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={handleDeleteForSelectedChurch}
+                  title="Efase lisans ki aktif sou legliz sa a"
+                  className="px-3 py-2.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer transition-all"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span className="hidden sm:inline">Retire Lisans Legliz</span>
+                </button>
+              </div>
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Antre Kle Lisans (eg. OMNI-CH001-LIFE-...):
+              <label className="text-slate-400 block mb-1 font-medium">
+                Kole Kle Lisans lan (OMNI-...)
               </label>
               <input
                 type="text"
-                value={activationKeyInput}
-                onChange={(e) => setActivationKeyInput(e.target.value.toUpperCase())}
-                placeholder="OMNI-CH001-PRO-XXXX-YYYY"
-                className="w-full py-2.5 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:outline-none focus:border-emerald-400 placeholder:text-slate-600"
+                required
+                value={activateKeyInput}
+                onChange={(e) => setActivateKeyInput(e.target.value)}
+                placeholder="OMNI-CH001-PRO-8492-7210"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono uppercase focus:outline-none focus:border-emerald-400"
               />
             </div>
 
             <button
-              type="button"
-              id="btn-activate-church-license"
-              onClick={handleActivateLicense}
-              disabled={isActivating || !activationKeyInput.trim()}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-slate-950 font-black text-xs shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 active:scale-95"
+              type="submit"
+              className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer transition-all"
             >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>{isActivating ? 'W ap verifye...' : 'Aktive Lisans lan Kounye a'}</span>
+              <Plus className="w-4 h-4" />
+              <span>Valide & Aktive Kle Lisans</span>
             </button>
+          </form>
 
-            <div className="pt-2 flex items-center justify-between p-3 rounded-2xl bg-slate-950 border border-slate-800">
-              <div>
-                <span className="text-xs font-bold text-slate-200 block">
-                  Mete Restriksyon si Lisans Ekspire
-                </span>
-                <span className="text-[10px] text-slate-400 block">
-                  Bloke aksè nan sèvis si legliz la pa gen lisans aktif
-                </span>
+          {/* Direct Delete by License Key or Church ID */}
+          <div className="pt-4 border-t border-slate-800">
+            <form onSubmit={handleDirectDeleteSubmit} className="space-y-2.5 text-xs">
+              <label className="text-rose-300 font-bold flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                <span>Efase Definitivman pa Kle Lisans oswa ID Legliz</span>
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={directTargetInput}
+                  onChange={(e) => setDirectTargetInput(e.target.value)}
+                  placeholder="Antre OMNI-... oswa ID Legliz"
+                  className="flex-1 px-3.5 py-2 rounded-xl bg-slate-950 border border-rose-500/30 text-white font-mono text-xs focus:outline-none focus:border-rose-400"
+                />
+                <button
+                  type="submit"
+                  disabled={!directTargetInput.trim()}
+                  className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer transition-all"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Efase nan Baz Done</span>
+                </button>
               </div>
-              <input
-                type="checkbox"
-                checked={settings.enforceLicenseLockout}
-                onChange={(e) =>
-                  onUpdateSettings({ enforceLicenseLockout: e.target.checked })
-                }
-                className="w-4 h-4 accent-amber-400 rounded cursor-pointer"
-              />
-            </div>
+            </form>
           </div>
         </div>
       </div>
 
-      {/* ACTIVE LICENSES TABLE */}
-      <div className="p-6 rounded-3xl bg-[#0B1120] border border-slate-800 space-y-4 shadow-xl">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      {/* 3. Active & Registered Licenses Table */}
+      <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div>
-            <h3 className="font-extrabold text-sm text-white flex items-center gap-2">
-              <Layers className="w-4 h-4 text-amber-400" />
-              <span>Jesyon & Lis Tout Lisans ki Anrejistre ({settings.licenses.length})</span>
-            </h3>
+            <h4 className="font-bold text-sm text-white flex items-center gap-2">
+              <Building2 className="w-4 h-4 text-amber-400" />
+              <span>Lisans Anrejistre nan Sistèm nan ({filteredLicenses.length})</span>
+            </h4>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              Ou gen kontwòl total: chanje estati (Aktif, Revoke, Ekspire), efase nenpòt lisans definitif, oswa netwaye baz done a.
+              Jere tout lisans legliz yo an tan reyèl: pwolonje +1 ane, pase an Pou Tout Tan, sispann oswa ekspòte rapò ofisyèl.
             </p>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={handlePurgeAllDemoLicenses}
-              className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
-              title="Efase tout kle demo nan baz done a"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>Efase Kle Demo</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={handlePurgeAllLicensesPermanently}
-              className="px-3.5 py-1.5 rounded-xl bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-sm hover:shadow-rose-900/20"
-              title="Efase tout lisans ki egziste nan baz done a definitivman"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-              <span>Efase TOUT Lisans Nèt (Reset)</span>
-            </button>
-          </div>
-        </div>
-
-        {/* SEARCH & MANUAL DIRECT DELETE TOOLBAR */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-2">
-          <div className="lg:col-span-7 flex flex-col sm:flex-row gap-2">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Search Input */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
-                value={licenseSearchQuery}
-                onChange={(e) => setLicenseSearchQuery(e.target.value)}
-                placeholder="Chèche pa Legliz, ID, oswa Kle Lisans..."
-                className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-white text-xs placeholder-slate-500 focus:outline-none focus:border-amber-400 font-mono"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Chèche kle oswa legliz..."
+                className="pl-8 pr-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-amber-400"
               />
-              {licenseSearchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setLicenseSearchQuery('')}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
             </div>
 
-            <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800 shrink-0">
-              {(['all', 'active', 'revoked', 'expired'] as const).map((st) => (
-                <button
-                  key={st}
-                  type="button"
-                  onClick={() => setLicenseStatusFilter(st)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold capitalize transition cursor-pointer ${
-                    licenseStatusFilter === st
-                      ? 'bg-amber-400 text-slate-950 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {st === 'all' ? 'Tout' : st === 'active' ? 'Aktif' : st === 'revoked' ? 'Revoke' : 'Ekspire'}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="lg:col-span-5 flex gap-2">
-            <input
-              type="text"
-              value={manualDeleteKeyOrId}
-              onChange={(e) => setManualDeleteKeyOrId(e.target.value)}
-              placeholder="Kole nenpòt Kle oswa ID Legliz..."
-              className="flex-1 px-3 py-2 rounded-xl bg-rose-950/20 border border-rose-800/40 text-white font-mono text-xs placeholder-slate-500 focus:outline-none focus:border-rose-500"
-            />
-            <button
-              type="button"
-              onClick={handleManualDeleteLicense}
-              disabled={isManualDeleting || !manualDeleteKeyOrId.trim()}
-              className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 shrink-0 shadow-sm"
-              title="Efase kle sa a dirèkteman depi nan baz done a"
+            {/* Status Filter */}
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as any)}
+              className="px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-amber-400"
             >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>{isManualDeleting ? 'Ap efase...' : 'Efase'}</span>
-            </button>
+              <option value="all">Tout Estati ({licenses.length})</option>
+              <option value="active">Aktif Sèlman ({stats.active})</option>
+              <option value="revoked">Revoke / Sispann</option>
+              <option value="expired">Ekspire</option>
+            </select>
+
+            {/* Export CSV Report Button (Production Replacement) */}
+            {licenses.length > 0 && (
+              <button
+                type="button"
+                onClick={handleExportLicensesCsv}
+                className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+                title="Telechaje rapò tout lisans yo an fòma CSV (Excel)"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Ekspòte Rapò (.CSV)</span>
+              </button>
+            )}
+
+            {/* Purge ALL Licenses Button */}
+            {licenses.length > 0 && (
+              <button
+                type="button"
+                onClick={handlePurgeAllLicenses}
+                className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+                title="Efase tout lisans ki nan baz done a"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Efase Tout ({licenses.length})</span>
+              </button>
+            )}
           </div>
         </div>
 
-        {/* TABLE */}
-        <div className="overflow-x-auto rounded-2xl border border-slate-800/80">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead>
-              <tr className="border-b border-slate-800 bg-slate-900/60 text-slate-400 text-[11px] uppercase tracking-wider font-mono">
-                <th className="p-3.5 font-bold">Legliz & ID</th>
-                <th className="p-3.5 font-bold">Kle Lisans</th>
-                <th className="p-3.5 font-bold">Nivo (Tier)</th>
-                <th className="p-3.5 font-bold">Ekspirasyon</th>
-                <th className="p-3.5 font-bold">Estati</th>
-                <th className="p-3.5 font-bold text-right">Aksyon Devlopè</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60 bg-slate-950/40">
-              {filteredLicenses.length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="py-10 text-center text-slate-400 font-mono text-xs">
-                    <CheckCircle2 className="w-7 h-7 text-emerald-400/60 mx-auto mb-2" />
-                    {settings.licenses.length === 0
-                      ? 'Okenn lisans pa anrejistre nan baz done a kounye a.'
-                      : 'Okenn lisans pa koresponn ak filtè rechèch sa a.'}
-                  </td>
+        {filteredLicenses.length === 0 ? (
+          <div className="p-8 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl">
+            Okenn lisans pa koresponn ak rechèch la nan baz done a kounye a. Sèvi ak jeneratè anlè a pou kreye epi aktive yon lisans pou yon legliz.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-800 text-slate-400 text-[11px] uppercase">
+                  <th className="py-2.5 px-3">Kle Lisans</th>
+                  <th className="py-2.5 px-3">Legliz</th>
+                  <th className="py-2.5 px-3">Nivo (Tier)</th>
+                  <th className="py-2.5 px-3">Ekspirasyon & Piblisite</th>
+                  <th className="py-2.5 px-3">Estati</th>
+                  <th className="py-2.5 px-3 text-right">Aksyon Pwodiksyon</th>
                 </tr>
-              ) : (
-                filteredLicenses.map((lic) => (
-                  <tr key={lic.key} className="hover:bg-slate-900/60 transition-colors">
-                    <td className="p-3.5 font-semibold text-white">
-                      <div className="font-bold text-slate-100">{lic.churchName || lic.churchId}</div>
-                      <span className="block text-[10px] text-slate-500 font-mono mt-0.5">
-                        ID: {lic.churchId}
-                      </span>
-                    </td>
-                    <td className="p-3.5">
-                      <div className="flex items-center gap-1.5">
-                        <code className="text-[11px] font-mono text-amber-300 bg-slate-950 px-2 py-0.5 rounded-md border border-slate-800 font-bold select-all">
-                          {lic.key}
-                        </code>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(lic.key);
-                            toast.success('Kopye!', `Kle ${lic.key} kopye.`);
-                          }}
-                          className="p-1 rounded text-slate-500 hover:text-amber-400 hover:bg-slate-800 transition"
-                          title="Kopye kle lisans"
-                        >
-                          <Check className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </td>
-                    <td className="p-3.5">
-                      <span
-                        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase font-mono ${
-                          lic.tier === 'enterprise_lifetime'
-                            ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                            : lic.tier === 'pro_annual'
-                            ? 'bg-amber-400/20 text-amber-300 border border-amber-400/30'
-                            : 'bg-slate-700 text-slate-300'
-                        }`}
-                      >
-                        {lic.tier.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="p-3.5 text-slate-300 font-mono text-[11px]">
-                      {lic.expiresAt === 'never' ? 'Pou Tout Tan (Illimité)' : lic.expiresAt}
-                    </td>
-                    <td className="p-3.5">
-                      <div className="flex items-center gap-1.5">
+              </thead>
+              <tbody className="divide-y divide-slate-800/60">
+                {filteredLicenses.map((lic) => {
+                  const tierInfo = getTierDetails(lic.tier);
+                  const isLifetime = lic.tier === 'enterprise_lifetime' || lic.expiresAt === 'never';
+                  return (
+                    <tr key={lic.key} className="hover:bg-slate-800/30 transition-colors">
+                      <td className="py-3 px-3 font-mono font-bold text-amber-300">
+                        <div className="flex items-center gap-1.5">
+                          <span>{lic.key}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopy(lic.key)}
+                            className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                            title="Kopye kle lisans lan"
+                          >
+                            {copiedKey === lic.key ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                        {lic.notes && (
+                          <span className="block text-[10px] font-sans font-normal text-slate-400 mt-0.5 max-w-xs truncate">
+                            {lic.notes}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3 text-slate-200 font-semibold">
+                        <div>{lic.churchName || lic.churchId}</div>
+                        <div className="text-[10px] font-mono text-slate-400">
+                          ID: {lic.churchId}
+                        </div>
+                      </td>
+                      <td className="py-3 px-3">
                         <span
-                          className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase font-mono ${
+                          className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${tierInfo.badge}`}
+                        >
+                          {tierInfo.label}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-slate-300 font-mono">
+                        <div>
+                          {lic.expiresAt === 'never' ? (
+                            <span className="text-purple-300 font-bold">Pou Tout Tan ( ∞ )</span>
+                          ) : (
+                            <span>Jiska {lic.expiresAt}</span>
+                          )}
+                        </div>
+                        {lic.allowAdFree && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-sans font-bold text-emerald-400 mt-0.5">
+                            <CheckCircle2 className="w-3 h-3" /> San Piblisite (Ad-Free)
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-3">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
                             lic.status === 'active'
-                              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                               : lic.status === 'revoked'
-                              ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                              : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                              : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                           }`}
                         >
-                          {lic.status}
+                          {lic.status === 'active'
+                            ? 'AKTIF'
+                            : lic.status === 'revoked'
+                            ? 'REVOKE'
+                            : 'EKSPIRE'}
                         </span>
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          {!isLifetime && (
+                            <button
+                              type="button"
+                              onClick={() => handleExtendOrUpgrade(lic.key, 'extend_1_year')}
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                              title="Pwolonje dat ekspirasyon lisans sa a pou +1 ane (365 jou)"
+                            >
+                              <CalendarPlus className="w-3.5 h-3.5" />
+                              <span>+1 Ane</span>
+                            </button>
+                          )}
 
-                        <select
-                          value={lic.status}
-                          onChange={(e) =>
-                            handleUpdateLicenseStatus(lic.key, e.target.value as LicenseStatus, lic.churchName)
-                          }
-                          className="bg-slate-900 text-[10px] text-slate-300 border border-slate-700 rounded px-1.5 py-0.5 focus:outline-none cursor-pointer"
-                        >
-                          <option value="active">Aktif</option>
-                          <option value="revoked">Revoke</option>
-                          <option value="expired">Ekspire</option>
-                        </select>
-                      </div>
-                    </td>
-                    <td className="p-3.5 text-right">
-                      <div className="inline-flex items-center gap-1.5 justify-end">
-                        {lic.status === 'active' ? (
+                          {!isLifetime && (
+                            <button
+                              type="button"
+                              onClick={() => handleExtendOrUpgrade(lic.key, 'upgrade_lifetime')}
+                              className="px-2.5 py-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/30 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                              title="Pase lisans sa a an Enterprise Pou Tout Tan (Lifetime)"
+                            >
+                              <Crown className="w-3.5 h-3.5" />
+                              <span>Lifetime</span>
+                            </button>
+                          )}
+
                           <button
                             type="button"
-                            onClick={() => handleUpdateLicenseStatus(lic.key, 'revoked', lic.churchName)}
-                            className="px-2.5 py-1 rounded-lg text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-600 border border-amber-500/30 transition-all cursor-pointer text-[10px] font-bold inline-flex items-center gap-1"
-                            title="Revoke lisans sa a pou tanporèman san w pa efase done li"
+                            onClick={() => handleToggleLicenseStatus(lic)}
+                            className={`px-2.5 py-1.5 rounded-lg border text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                              lic.status === 'active'
+                                ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                            }`}
+                            title={
+                              lic.status === 'active'
+                                ? 'Revoke / Sispann lisans sa a'
+                                : 'Reyaktive lisans sa a'
+                            }
                           >
-                            <span>Revoke</span>
+                            {lic.status === 'active' ? (
+                              <>
+                                <Ban className="w-3.5 h-3.5" />
+                                <span>Sispann</span>
+                              </>
+                            ) : (
+                              <>
+                                <RefreshCw className="w-3.5 h-3.5" />
+                                <span>Aktive</span>
+                              </>
+                            )}
                           </button>
-                        ) : (
+
                           <button
                             type="button"
-                            onClick={() => handleUpdateLicenseStatus(lic.key, 'active', lic.churchName)}
-                            className="px-2.5 py-1 rounded-lg text-emerald-300 hover:text-white bg-emerald-500/10 hover:bg-emerald-600 border border-emerald-500/30 transition-all cursor-pointer text-[10px] font-bold inline-flex items-center gap-1"
-                            title="Retabli lisans sa a kòm Aktif"
+                            onClick={() => handleDeleteLicense(lic.key, lic.churchName)}
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
+                            title="Efase lisans sa a definitivman nan baz done a"
                           >
-                            <span>Retabli</span>
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Efase</span>
                           </button>
-                        )}
-
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteLicensePermanently(lic.key, lic.churchName)}
-                          className="px-2.5 py-1 rounded-lg text-rose-300 hover:text-white bg-rose-950/40 hover:bg-rose-600 border border-rose-800/60 transition-all cursor-pointer text-[10px] font-bold inline-flex items-center gap-1 shadow-sm active:scale-95"
-                          title="Efase lisans sa a definitivman nan baz done a"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                          <span>Efase Definitif</span>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
+
+      {/* Confirmation Modal */}
+      <ConfirmDeleteModal
+        isOpen={confirmModal.isOpen}
+        onClose={() => setConfirmModal((prev) => ({ ...prev, isOpen: false }))}
+        onConfirm={async () => {
+          await confirmModal.onConfirm();
+          setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+        }}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        confirmButtonText={confirmModal.confirmText}
+      />
     </div>
   );
 };

@@ -1,476 +1,736 @@
-import React, { useState } from 'react';
-import { motion } from 'motion/react';
+import React, { useState, useMemo } from 'react';
 import {
   DeveloperSettings,
   SponsorItem,
+  SponsorTier,
   Language,
 } from '../../types';
-import {
-  purgeDemoSponsors,
-} from '../../utils/developerStorage';
 import { useToast } from '../../context/ToastContext';
+import { ConfirmDeleteModal } from '../common/ConfirmDeleteModal';
 import {
   HeartHandshake,
   Plus,
   Trash2,
-  Edit2,
   ExternalLink,
-  Sparkles,
-  X,
-  Radio,
+  Eye,
+  EyeOff,
+  Edit3,
+  CheckCircle2,
+  Image as ImageIcon,
+  Award,
+  ArrowUp,
+  ArrowDown,
+  Download,
+  Gauge,
+  ShieldCheck,
+  Power,
 } from 'lucide-react';
 
 export interface DevSponsorsTabProps {
   settings: DeveloperSettings;
-  onUpdateSettings: (updated: Partial<DeveloperSettings>) => Promise<void>;
+  onUpdateSettings: (partial: Partial<DeveloperSettings>) => Promise<void>;
+  onRefreshSettings?: () => void;
   language?: Language;
 }
 
 export const DevSponsorsTab: React.FC<DevSponsorsTabProps> = ({
   settings,
   onUpdateSettings,
-  language = 'ht',
 }) => {
   const toast = useToast();
 
-  // Sponsor Modal State
-  const [isSponsorModalOpen, setIsSponsorModalOpen] = useState<boolean>(false);
-  const [editingSponsor, setEditingSponsor] = useState<SponsorItem | null>(null);
-  const [sponsorName, setSponsorName] = useState<string>('');
-  const [sponsorLogoUrl, setSponsorLogoUrl] = useState<string>('');
-  const [sponsorTagline, setSponsorTagline] = useState<string>('');
-  const [sponsorCategory, setSponsorCategory] = useState<SponsorItem['category']>('telecom');
-  const [sponsorTier, setSponsorTier] = useState<SponsorItem['tier']>('gold');
-  const [sponsorTargetUrl, setSponsorTargetUrl] = useState<string>('');
-  const [sponsorActive, setSponsorActive] = useState<boolean>(true);
+  // Sponsor Form State
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const [tagline, setTagline] = useState('');
+  const [logoUrl, setLogoUrl] = useState('');
+  const [targetUrl, setTargetUrl] = useState('');
+  const [tier, setTier] = useState<SponsorTier>('gold');
+  const [category, setCategory] = useState<SponsorItem['category']>('general');
+  const [active, setActive] = useState(true);
 
-  // Open Add Sponsor
-  const handleOpenAddSponsor = () => {
-    setEditingSponsor(null);
-    setSponsorName('');
-    setSponsorLogoUrl('');
-    setSponsorTagline('');
-    setSponsorCategory('telecom');
-    setSponsorTier('gold');
-    setSponsorTargetUrl('');
-    setSponsorActive(true);
-    setIsSponsorModalOpen(true);
+  // Confirmation Modal State
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: async () => {},
+  });
+
+  const sponsors = useMemo(() => {
+    const raw = settings.sponsors || [];
+    return [...raw].sort((a, b) => (a.displayOrder ?? 1) - (b.displayOrder ?? 1));
+  }, [settings.sponsors]);
+
+  const activeSponsors = useMemo(() => sponsors.filter((s) => s.active), [sponsors]);
+  const isFooterBannerVisible = Boolean(
+    settings.showSponsorsInFooter ?? settings.sponsorsEnabled ?? true
+  );
+  const marqueeSpeed = settings.sponsorMarqueeSpeed || 26;
+
+  const resetForm = () => {
+    setEditingId(null);
+    setName('');
+    setTagline('');
+    setLogoUrl('');
+    setTargetUrl('');
+    setTier('gold');
+    setCategory('general');
+    setActive(true);
   };
 
-  // Open Edit Sponsor
-  const handleOpenEditSponsor = (s: SponsorItem) => {
-    setEditingSponsor(s);
-    setSponsorName(s.name);
-    setSponsorLogoUrl(s.logoUrl);
-    setSponsorTagline(s.tagline || '');
-    setSponsorCategory(s.category);
-    setSponsorTier(s.tier);
-    setSponsorTargetUrl(s.targetUrl);
-    setSponsorActive(s.active);
-    setIsSponsorModalOpen(true);
+  const handleEditSponsor = (sponsor: SponsorItem) => {
+    setEditingId(sponsor.id);
+    setName(sponsor.name);
+    setTagline(sponsor.tagline || '');
+    setLogoUrl(sponsor.logoUrl);
+    setTargetUrl(sponsor.targetUrl);
+    setTier(sponsor.tier);
+    setCategory(sponsor.category || 'general');
+    setActive(sponsor.active);
   };
 
-  // Save Sponsor
   const handleSaveSponsor = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!sponsorName.trim() || !sponsorTargetUrl.trim()) {
-      toast.error('Enfòmasyon Manke', 'Tanpri mete non ak lyen sit sponsor la.');
-      return;
+    if (!name.trim() || !targetUrl.trim()) return;
+
+    let normalizedUrl = targetUrl.trim();
+    if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
+      normalizedUrl = `https://${normalizedUrl}`;
     }
 
-    const currentList = settings.sponsors || [];
-    let updatedList: SponsorItem[];
+    const fallbackLogo =
+      logoUrl.trim() ||
+      `https://ui-avatars.com/api/?name=${encodeURIComponent(
+        name.trim()
+      )}&background=0D1527&color=F59E0B&bold=true&size=128`;
 
-    if (editingSponsor) {
-      updatedList = currentList.map((s) =>
-        s.id === editingSponsor.id
+    if (editingId) {
+      const updatedList = sponsors.map((item) =>
+        item.id === editingId
           ? {
-              ...s,
-              name: sponsorName.trim(),
-              logoUrl: sponsorLogoUrl.trim() || 'https://images.unsplash.com/photo-1557804506-669a67965ba0?auto=format&fit=crop&w=400&q=80',
-              tagline: sponsorTagline.trim(),
-              category: sponsorCategory,
-              tier: sponsorTier,
-              targetUrl: sponsorTargetUrl.trim(),
-              active: sponsorActive,
+              ...item,
+              name: name.trim(),
+              tagline: tagline.trim(),
+              logoUrl: fallbackLogo,
+              targetUrl: normalizedUrl,
+              tier,
+              category,
+              active,
             }
-          : s
+          : item
+      );
+      await onUpdateSettings({ sponsors: updatedList });
+      toast.success(
+        'Patnè Modifye!',
+        `Enfòmasyon pou "${name.trim()}" mete ajou avèk siksè.`
       );
     } else {
       const newSponsor: SponsorItem = {
-        id: `sp_${Date.now()}`,
-        name: sponsorName.trim(),
-        logoUrl: sponsorLogoUrl.trim() || 'https://images.unsplash.com/photo-1557804506-669a67965ba0?auto=format&fit=crop&w=400&q=80',
-        tagline: sponsorTagline.trim(),
-        category: sponsorCategory,
-        tier: sponsorTier,
-        targetUrl: sponsorTargetUrl.trim(),
-        active: sponsorActive,
-        displayOrder: currentList.length + 1,
+        id: `spon_${Date.now()}`,
+        name: name.trim(),
+        tagline: tagline.trim() || 'Patnè Ofisyèl OmniChurch',
+        logoUrl: fallbackLogo,
+        targetUrl: normalizedUrl,
+        tier,
+        category,
+        active,
+        displayOrder: sponsors.length + 1,
         createdAt: new Date().toISOString(),
       };
-      updatedList = [newSponsor, ...currentList];
-    }
-
-    await onUpdateSettings({ sponsors: updatedList });
-    setIsSponsorModalOpen(false);
-    toast.success(
-      editingSponsor ? 'Sponsor Modifye' : 'Sponsor Ajoute',
-      `Sponsor "${sponsorName}" anrejistre avèk siksè.`
-    );
-  };
-
-  // Delete Sponsor
-  const handleDeleteSponsor = async (id: string, name: string) => {
-    if (confirm(`Èske w vle retire sponsor "${name}" la nan lis la?`)) {
-      const updatedList = (settings.sponsors || []).filter((s) => s.id !== id);
-      await onUpdateSettings({ sponsors: updatedList });
-      toast.info('Sponsor Retire', `Sponsor "${name}" pa nan lis la ankò.`);
-    }
-  };
-
-  // Toggle Sponsor Active
-  const handleToggleSponsorActive = async (id: string) => {
-    const updatedList = (settings.sponsors || []).map((s) =>
-      s.id === id ? { ...s, active: !s.active } : s
-    );
-    await onUpdateSettings({ sponsors: updatedList });
-  };
-
-  // Purge Demo Sponsors
-  const handlePurgeDemoSponsors = async () => {
-    if (confirm('Èske w vle retire tout sponsor demo nan lis la?')) {
-      const res = await purgeDemoSponsors();
+      await onUpdateSettings({ sponsors: [...sponsors, newSponsor] });
       toast.success(
-        'Sponsò Demo Netwaye!',
-        `${res.purgedCount} sponsò demo retire nan sistèm nan.`
+        'Nouvo Patnè Ajoute!',
+        `"${name.trim()}" ajoute nan lis patnè ofisyèl yo.`
       );
+    }
+
+    resetForm();
+  };
+
+  const handleToggleActive = async (id: string) => {
+    const target = sponsors.find((s) => s.id === id);
+    const updatedList = sponsors.map((item) =>
+      item.id === id ? { ...item, active: !item.active } : item
+    );
+    await onUpdateSettings({ sponsors: updatedList });
+    if (target) {
+      toast.info(
+        target.active ? 'Patnè Mete an Poz' : 'Patnè Aktive',
+        `"${target.name}" ${target.active ? 'kache nan' : 'ap parèt nan'} pye paj aplikasyon an kounye a.`
+      );
+    }
+  };
+
+  const handleMoveSponsorOrder = async (index: number, direction: 'up' | 'down') => {
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= sponsors.length) return;
+
+    const reordered = [...sponsors];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(targetIndex, 0, moved);
+
+    const withUpdatedOrder = reordered.map((item, idx) => ({
+      ...item,
+      displayOrder: idx + 1,
+    }));
+
+    await onUpdateSettings({ sponsors: withUpdatedOrder });
+    toast.info('Lòd Afichaj Mete Ajou', `"${moved.name}" deplase nan pozisyon #${targetIndex + 1}.`);
+  };
+
+  const handleToggleAllSponsorsActive = async () => {
+    if (sponsors.length === 0) return;
+    const allCurrentlyActive = sponsors.every((s) => s.active);
+    const nextState = !allCurrentlyActive;
+    const updatedList = sponsors.map((s) => ({ ...s, active: nextState }));
+    await onUpdateSettings({ sponsors: updatedList });
+    toast.success(
+      nextState ? 'Tout Patnè Aktive' : 'Tout Patnè Mete an Poz',
+      nextState
+        ? `Tout ${sponsors.length} patnè yo aktif nan banyè pye paj la kounye a.`
+        : `Tout ${sponsors.length} patnè yo mete an poz tanporèman.`
+    );
+  };
+
+  const handleExportSponsorsJson = () => {
+    if (sponsors.length === 0) {
+      toast.warning('Okenn Patnè', 'Pa gen okenn patnè pou ekspòte.');
+      return;
+    }
+    const dataStr =
+      'data:text/json;charset=utf-8,' +
+      encodeURIComponent(JSON.stringify(sponsors, null, 2));
+    const link = document.createElement('a');
+    link.setAttribute('href', dataStr);
+    link.setAttribute(
+      'download',
+      `omnichurch-sponsors-${new Date().toISOString().split('T')[0]}.json`
+    );
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    toast.success(
+      'Lis Patnè Ekspòte (.JSON)',
+      `${sponsors.length} patnè ekspòte avèk siksè.`
+    );
+  };
+
+  const handleDeleteSponsor = (id: string, sponsorName: string) => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Efase Patnè Definitivman',
+      message: `Èske w sèten ou vle efase patnè "${sponsorName}" definitivman nan baz done a?`,
+      confirmText: 'Wi, Efase Patnè a',
+      variant: 'danger',
+      onConfirm: async () => {
+        const updatedList = sponsors.filter((item) => item.id !== id);
+        await onUpdateSettings({ sponsors: updatedList });
+        toast.success('Patnè Efase!', `"${sponsorName}" efase definitivman nan baz done a.`);
+        if (editingId === id) resetForm();
+      },
+    });
+  };
+
+  // Purge ALL Sponsors
+  const handlePurgeAllSponsors = () => {
+    setConfirmModal({
+      isOpen: true,
+      title: 'Efase TOUT Patnè yo',
+      message: `ATANSYON: Èske w sèten ou vle efase TOUT (${sponsors.length}) patnè yo definitivman nan baz done a?`,
+      confirmText: 'Wi, Efase Tout',
+      variant: 'danger',
+      onConfirm: async () => {
+        await onUpdateSettings({ sponsors: [] });
+        resetForm();
+        toast.success('Tout Patnè Efase!', 'Lis patnè a vid kounye a.');
+      },
+    });
+  };
+
+  const getTierStyle = (t: SponsorTier) => {
+    switch (t) {
+      case 'platinum':
+        return 'bg-purple-500/20 text-purple-300 border-purple-500/40';
+      case 'gold':
+        return 'bg-amber-500/20 text-amber-300 border-amber-500/40';
+      case 'silver':
+        return 'bg-slate-400/20 text-slate-200 border-slate-400/40';
+      case 'bronze':
+        return 'bg-orange-500/20 text-orange-300 border-orange-500/40';
+      default:
+        return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* SPONSOR ENGINE SETTINGS & CONTROLS */}
-      <div className="p-6 rounded-3xl bg-[#0B1120] border border-slate-800 space-y-4 shadow-xl">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
-              <HeartHandshake className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="font-black text-base text-white">
-                Sponsor & Corporate Partners Engine
+    <div className="space-y-6 animate-in fade-in duration-200">
+      {/* 1. Sponsor Global Footer Bar Controls */}
+      <div className="p-6 rounded-3xl bg-slate-900/90 border border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-xl">
+        <div className="flex items-start gap-4">
+          <div className="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shrink-0">
+            <HeartHandshake className="w-6 h-6" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-extrabold text-white">
+                Banyè Patnè & Sponsò Ofisyèl (Footer Banner)
               </h3>
-              <p className="text-xs text-slate-400">
-                Pèmèt konpayi ak antrepriz afiche mak yo nan footer app la pou tout legliz
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={handlePurgeDemoSponsors}
-              className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
-              title="Efase tout sponsò demo ki te vin padefo yo"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>Efase Sponsò Demo</span>
-            </button>
-
-            <button
-              type="button"
-              id="btn-add-new-sponsor"
-              onClick={handleOpenAddSponsor}
-              className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-lg shadow-amber-400/20 transition-all cursor-pointer"
-            >
-              <Plus className="w-4 h-4 text-slate-950 stroke-[3]" />
-              <span>Ajoute yon Sponsor</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Global Footer Banner Display Settings */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <label className="flex items-center justify-between p-4 rounded-2xl bg-slate-950 border border-slate-800 text-xs cursor-pointer">
-            <div>
-              <span className="text-white font-bold block">Montre Bannè Sponsò nan Footer</span>
-              <span className="text-[11px] text-slate-400 block">Afiche logo patnè yo anba chak paj</span>
-            </div>
-            <input
-              type="checkbox"
-              checked={settings.sponsorsEnabled}
-              onChange={(e) => onUpdateSettings({ sponsorsEnabled: e.target.checked })}
-              className="w-5 h-5 accent-amber-400 rounded cursor-pointer"
-            />
-          </label>
-
-          <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 text-xs flex items-center justify-between">
-            <div>
-              <span className="text-white font-bold block">Total Patnè Anrejistre</span>
-              <span className="text-[11px] text-slate-400 block">
-                {(settings.sponsors || []).filter((s) => s.active).length} aktif sou {(settings.sponsors || []).length} total
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase ${
+                  isFooterBannerVisible
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-slate-800 text-slate-400 border border-slate-700'
+                }`}
+              >
+                {isFooterBannerVisible
+                  ? `${activeSponsors.length} PATNÈ AKTIF NAN PYE PAJ`
+                  : 'BANYÈ KACHE'}
               </span>
             </div>
-            <span className="px-3 py-1 rounded-xl bg-amber-400/10 text-amber-300 border border-amber-400/20 font-mono font-black text-sm">
-              {(settings.sponsors || []).length}
-            </span>
+            <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+              Jere konpayi, medya, ak enstitisyon patnè k ap parèt anba aplikasyon an. Chak patnè gen logo, slogan, ak lyen dirèk ki ouvri sit ofisyèl li lè itilizatè klike sou li.
+            </p>
           </div>
         </div>
-      </div>
 
-      {/* SPONSOR LIST */}
-      <div className="p-6 rounded-3xl bg-[#0B1120] border border-slate-800 space-y-4 shadow-xl">
-        <h3 className="font-extrabold text-sm text-white flex items-center gap-2">
-          <HeartHandshake className="w-4 h-4 text-amber-400" />
-          <span>Lis Konpayi & Mak Patnè ({ (settings.sponsors || []).length })</span>
-        </h3>
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {/* Marquee Speed Selector */}
+          <div className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+            <Gauge className="w-3.5 h-3.5 text-amber-400" />
+            <span className="text-slate-400 font-medium">Vitès:</span>
+            <select
+              value={marqueeSpeed}
+              onChange={(e) =>
+                onUpdateSettings({ sponsorMarqueeSpeed: Number(e.target.value) })
+              }
+              className="bg-transparent text-amber-300 font-bold focus:outline-none cursor-pointer"
+              title="Chwazi vitès defilman banyè patnè yo nan pye paj la"
+            >
+              <option value={16} className="bg-slate-900 text-white">
+                Rapid (16s)
+              </option>
+              <option value={26} className="bg-slate-900 text-white">
+                Nòmal (26s)
+              </option>
+              <option value={40} className="bg-slate-900 text-white">
+                Dous (40s)
+              </option>
+            </select>
+          </div>
 
-        {(settings.sponsors || []).length === 0 ? (
-          <div className="p-8 text-center bg-slate-950/60 rounded-2xl border border-slate-800 space-y-2">
-            <HeartHandshake className="w-8 h-8 text-slate-600 mx-auto" />
-            <p className="text-xs text-slate-400 font-medium">
-              Okenn patnè pa anrejistre pou kounye a.
-            </p>
+          {/* Toggle All Active/Pause */}
+          {sponsors.length > 0 && (
             <button
               type="button"
-              onClick={handleOpenAddSponsor}
-              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-bold"
+              onClick={handleToggleAllSponsorsActive}
+              className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+              title="Aktive oswa mete tout patnè yo an poz nan yon sèl klik"
             >
-              + Ajoute Premye Patnè a
+              <Power className="w-3.5 h-3.5" />
+              <span>
+                {sponsors.every((s) => s.active) ? 'Mete Tout an Poz' : 'Aktive Tout Patnè'}
+              </span>
             </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {(settings.sponsors || []).map((sponsor) => (
-              <div
-                key={sponsor.id}
-                className="p-4 rounded-2xl bg-slate-950 border border-slate-800 flex flex-col justify-between gap-3 shadow-md"
-              >
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span
-                      className={`px-2 py-0.5 rounded-md text-[9px] font-mono font-bold uppercase ${
-                        sponsor.tier === 'platinum'
-                          ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
-                          : sponsor.tier === 'gold'
-                          ? 'bg-amber-400/20 text-amber-300 border border-amber-400/30'
-                          : sponsor.tier === 'silver'
-                          ? 'bg-slate-300/20 text-slate-200 border border-slate-300/30'
-                          : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                      }`}
-                    >
-                      {sponsor.tier}
-                    </span>
+          )}
 
-                    <button
-                      type="button"
-                      onClick={() => handleToggleSponsorActive(sponsor.id)}
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full cursor-pointer transition ${
-                        sponsor.active
-                          ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                          : 'bg-slate-800 text-slate-500'
-                      }`}
-                    >
-                      {sponsor.active ? 'Aktif' : 'Inaktif'}
-                    </button>
-                  </div>
+          {/* Export JSON */}
+          {sponsors.length > 0 && (
+            <button
+              type="button"
+              onClick={handleExportSponsorsJson}
+              className="px-3.5 py-2.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+              title="Ekspòte lis patnè yo an fòma JSON"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Ekspòte (.JSON)</span>
+            </button>
+          )}
 
-                  <div className="flex items-center gap-3">
-                    <img
-                      src={sponsor.logoUrl}
-                      alt={sponsor.name}
-                      referrerPolicy="no-referrer"
-                      className="w-12 h-12 rounded-xl object-contain bg-slate-900 border border-slate-800 p-1 shrink-0"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).src =
-                          'https://images.unsplash.com/photo-1557804506-669a67965ba0?auto=format&fit=crop&w=400&q=80';
-                      }}
-                    />
-                    <div className="min-w-0">
-                      <h4 className="text-xs font-bold text-white truncate">{sponsor.name}</h4>
-                      {sponsor.tagline && (
-                        <p className="text-[10px] text-slate-400 truncate">{sponsor.tagline}</p>
-                      )}
-                      <span className="text-[9px] font-mono text-amber-400/80 block uppercase">
-                        {sponsor.category}
-                      </span>
-                    </div>
-                  </div>
-                </div>
+          {sponsors.length > 0 && (
+            <button
+              type="button"
+              onClick={handlePurgeAllSponsors}
+              className="px-3.5 py-2.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+              title="Efase tout patnè nan baz done a"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Efase Tout ({sponsors.length})</span>
+            </button>
+          )}
 
-                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
-                  <a
-                    href={sponsor.targetUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[10px] text-slate-400 hover:text-amber-400 flex items-center gap-1 truncate max-w-[150px]"
-                  >
-                    <ExternalLink className="w-3 h-3 shrink-0" />
-                    <span className="truncate">{sponsor.targetUrl}</span>
-                  </a>
-
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => handleOpenEditSponsor(sponsor)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
-                      title="Modifye"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteSponsor(sponsor.id, sponsor.name)}
-                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 transition cursor-pointer"
-                      title="Efase"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+          <label className="flex items-center gap-2.5 px-4 py-2.5 rounded-2xl bg-slate-950 border border-slate-800 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={isFooterBannerVisible}
+              onChange={(e) =>
+                onUpdateSettings({
+                  showSponsorsInFooter: e.target.checked,
+                  sponsorsEnabled: e.target.checked,
+                })
+              }
+              className="rounded bg-slate-900 border-slate-700 text-amber-400 focus:ring-amber-400 w-4 h-4 cursor-pointer"
+            />
+            <span className="text-xs font-bold text-white">
+              {isFooterBannerVisible ? 'Banyè Pye Paj Aktif' : 'Banyè Pye Paj Kache'}
+            </span>
+          </label>
+        </div>
       </div>
 
-      {/* SPONSOR CREATE / EDIT MODAL */}
-      {isSponsorModalOpen && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="w-full max-w-lg rounded-3xl bg-slate-900 border border-amber-400/40 p-6 text-white shadow-2xl space-y-4"
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h4 className="font-black text-sm flex items-center gap-2">
-                <HeartHandshake className="w-4 h-4 text-amber-400" />
-                <span>{editingSponsor ? 'Modifye Sponsor' : 'Ajoute yon Nouvo Sponsor'}</span>
-              </h4>
-              <button
-                type="button"
-                onClick={() => setIsSponsorModalOpen(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+      {/* Live Preview of Footer Banner */}
+      {isFooterBannerVisible && activeSponsors.length > 0 && (
+        <div className="p-4 rounded-2xl bg-[#090D16] border border-slate-800 space-y-2.5">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="font-extrabold uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+              <Eye className="w-3.5 h-3.5" /> Previzyalizasyon an Dirèk Banyè Pye Paj la ({activeSponsors.length} Patnè Aktif)
+            </span>
+            <span className="text-slate-400 font-mono text-[10px]">
+              Vitès defilman: {marqueeSpeed}s
+            </span>
+          </div>
+          <div className="flex items-center gap-3 overflow-x-auto pb-1">
+            {activeSponsors.map((spon) => (
+              <a
+                key={spon.id}
+                href={spon.targetUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-amber-400/50 shrink-0 transition-all group"
               >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleSaveSponsor} className="space-y-3.5 text-xs">
-              <div>
-                <label className="block font-bold text-slate-300 mb-1">Non Sponsor / Patnè:</label>
-                <input
-                  type="text"
-                  required
-                  value={sponsorName}
-                  onChange={(e) => setSponsorName(e.target.value)}
-                  placeholder="eg. Digicel Business"
-                  className="w-full py-2 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-300 mb-1">Logo URL (Imaj):</label>
-                <input
-                  type="url"
-                  value={sponsorLogoUrl}
-                  onChange={(e) => setSponsorLogoUrl(e.target.value)}
-                  placeholder="https://images.unsplash.com/..."
-                  className="w-full py-2 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-300 mb-1">Slogan / Deskripsyon Kout:</label>
-                <input
-                  type="text"
-                  value={sponsorTagline}
-                  onChange={(e) => setSponsorTagline(e.target.value)}
-                  placeholder="eg. Solisyon Kominikasyon & Entènèt"
-                  className="w-full py-2 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-300 mb-1">Kategori:</label>
-                  <select
-                    value={sponsorCategory}
-                    onChange={(e) => setSponsorCategory(e.target.value as any)}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-amber-400 cursor-pointer"
-                  >
-                    <option value="telecom">Telekominikasyon</option>
-                    <option value="finance">Finans & Bank</option>
-                    <option value="technology">Teknoloji & Cloud</option>
-                    <option value="media">Medya & Radyo</option>
-                    <option value="education">Edikasyon</option>
-                    <option value="general">Jeneral</option>
-                  </select>
+                <div className="w-7 h-7 rounded-lg overflow-hidden bg-slate-950 border border-slate-700 flex items-center justify-center shrink-0">
+                  {spon.logoUrl ? (
+                    <img
+                      src={spon.logoUrl}
+                      alt={spon.name}
+                      className="w-full h-full object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                  ) : (
+                    <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                  )}
                 </div>
-
                 <div>
-                  <label className="block font-bold text-slate-300 mb-1">Nivo / Tier:</label>
-                  <select
-                    value={sponsorTier}
-                    onChange={(e) => setSponsorTier(e.target.value as any)}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-amber-400 cursor-pointer"
-                  >
-                    <option value="platinum">Platinum (Pi Wo)</option>
-                    <option value="gold">Gold</option>
-                    <option value="silver">Silver</option>
-                    <option value="bronze">Bronze</option>
-                    <option value="partner">Partner</option>
-                  </select>
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs font-bold text-white group-hover:text-amber-300">
+                      {spon.name}
+                    </span>
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                  </div>
+                  {spon.tagline && (
+                    <span className="text-[10px] text-slate-400 block max-w-[180px] truncate">
+                      {spon.tagline}
+                    </span>
+                  )}
                 </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-300 mb-1">
-                  Lyen Sit Wèb oswa Rezo Sosyal (URL klikeb):
-                </label>
-                <input
-                  type="url"
-                  required
-                  value={sponsorTargetUrl}
-                  onChange={(e) => setSponsorTargetUrl(e.target.value)}
-                  placeholder="https://www.digicelgroup.com oswa https://instagram.com/..."
-                  className="w-full py-2 px-3 rounded-xl bg-slate-950 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="chk-sponsor-active"
-                  checked={sponsorActive}
-                  onChange={(e) => setSponsorActive(e.target.checked)}
-                  className="w-4 h-4 accent-amber-400 rounded cursor-pointer"
-                />
-                <label htmlFor="chk-sponsor-active" className="text-slate-300 cursor-pointer font-bold">
-                  Aktive sponsor sa a nan footer la
-                </label>
-              </div>
-
-              <div className="pt-3 flex justify-end gap-2 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setIsSponsorModalOpen(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-700 text-slate-400 hover:text-white cursor-pointer"
-                >
-                  Anile
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-xl bg-amber-400 text-slate-950 font-black shadow-md shadow-amber-400/20 cursor-pointer"
-                >
-                  {editingSponsor ? 'Sove Modifikasyon' : 'Ajoute Sponsor'}
-                </button>
-              </div>
-            </form>
-          </motion.div>
+                <ExternalLink className="w-3 h-3 text-slate-500 group-hover:text-amber-400 ml-1" />
+              </a>
+            ))}
+          </div>
         </div>
       )}
+
+      {/* 2. Add / Edit Sponsor Form & Sponsors List */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        {/* Form (5 cols) */}
+        <form
+          onSubmit={handleSaveSponsor}
+          className="lg:col-span-5 p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4 h-fit"
+        >
+          <div className="flex items-center justify-between">
+            <h4 className="font-bold text-sm text-white flex items-center gap-2">
+              <Plus className="w-4 h-4 text-amber-400" />
+              <span>{editingId ? 'Modifye Patnè a' : 'Ajoute Nouvo Patnè / Sponsò'}</span>
+            </h4>
+            {editingId && (
+              <button
+                type="button"
+                onClick={resetForm}
+                className="text-xs text-slate-400 hover:text-white underline cursor-pointer"
+              >
+                Anile Modifikasyon
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-3 text-xs">
+            <div>
+              <label className="text-slate-400 block mb-1 font-medium">
+                Non Konpayi / Sponsò a *
+              </label>
+              <input
+                type="text"
+                required
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Egz: Sogebank / Radio Lumière / Konpayi..."
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-amber-400"
+              />
+            </div>
+
+            <div>
+              <label className="text-slate-400 block mb-1 font-medium">
+                Slogan / Deskripsyon Kout
+              </label>
+              <input
+                type="text"
+                value={tagline}
+                onChange={(e) => setTagline(e.target.value)}
+                placeholder="Egz: Patnè Finansye & Teknoloji Legliz yo"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-amber-400"
+              />
+            </div>
+
+            <div>
+              <label className="text-slate-400 block mb-1 font-medium">
+                Lyen Sit Web oswa Paj Rezo Sosyal (Target URL) *
+              </label>
+              <input
+                type="text"
+                required
+                value={targetUrl}
+                onChange={(e) => setTargetUrl(e.target.value)}
+                placeholder="https://www.example.com"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-amber-400"
+              />
+            </div>
+
+            <div>
+              <label className="text-slate-400 block mb-1 font-medium">
+                URL Logo / Imaj Patnè a (Opsyonèl)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  value={logoUrl}
+                  onChange={(e) => setLogoUrl(e.target.value)}
+                  placeholder="https://.../logo.png (Oswa kite vid pou logo otomatik)"
+                  className="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono focus:outline-none focus:border-amber-400"
+                />
+                {logoUrl && (
+                  <img
+                    src={logoUrl}
+                    alt="Preview"
+                    className="w-10 h-10 rounded-xl object-cover border border-slate-700 shrink-0"
+                    referrerPolicy="no-referrer"
+                  />
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-slate-400 block mb-1 font-medium">Nivo (Tier)</label>
+                <select
+                  value={tier}
+                  onChange={(e) => setTier(e.target.value as SponsorTier)}
+                  className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-amber-400"
+                >
+                  <option value="platinum">💎 Platinum</option>
+                  <option value="gold">🥇 Gold</option>
+                  <option value="silver">🥈 Silver</option>
+                  <option value="bronze">🥉 Bronze</option>
+                  <option value="partner">🤝 Partner</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1 font-medium">Kategori</label>
+                <select
+                  value={category}
+                  onChange={(e) =>
+                    setCategory(e.target.value as SponsorItem['category'])
+                  }
+                  className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white focus:outline-none focus:border-amber-400"
+                >
+                  <option value="telecom">Telekominikasyon</option>
+                  <option value="finance">Bank & Finans</option>
+                  <option value="media">Medya & Radyo</option>
+                  <option value="technology">Teknoloji</option>
+                  <option value="education">Edikasyon / Biblik</option>
+                  <option value="general">Jeneral</option>
+                </select>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 pt-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={active}
+                onChange={(e) => setActive(e.target.checked)}
+                className="rounded bg-slate-900 border-slate-700 text-amber-400 focus:ring-amber-400"
+              />
+              <span className="text-slate-300 font-medium">
+                Aktive patnè sa a imedyatman nan banyè pye paj la
+              </span>
+            </label>
+
+            <button
+              type="submit"
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-400/20 cursor-pointer transition-all"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>{editingId ? 'Sove Modifikasyon an' : 'Ajoute nan Lis Patnè yo'}</span>
+            </button>
+          </div>
+        </form>
+
+        {/* Sponsors List (7 cols) */}
+        <div className="lg:col-span-7 p-6 rounded-3xl bg-slate-900/90 border border-slate-800 space-y-4">
+          <div className="flex items-center justify-between">
+            <h4 className="font-bold text-sm text-white flex items-center gap-2">
+              <Award className="w-4 h-4 text-amber-400" />
+              <span>Lis Patnè & Sponsò yo ({sponsors.length})</span>
+            </h4>
+            <span className="text-xs text-emerald-400 font-mono">
+              {activeSponsors.length} Aktif kounye a
+            </span>
+          </div>
+
+          {sponsors.length === 0 ? (
+            <div className="p-8 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-2xl">
+              Okenn patnè pa anrejistre pou kounye a. Sèvi ak fòm agoch la pou ajoute yon patnè ofisyèl.
+            </div>
+          ) : (
+            <div className="space-y-2.5 max-h-[520px] overflow-y-auto pr-1">
+              {sponsors.map((spon, idx) => (
+                <div
+                  key={spon.id}
+                  className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+                    spon.active
+                      ? 'bg-slate-950/90 border-slate-800 hover:border-slate-700'
+                      : 'bg-slate-950/40 border-slate-900 opacity-60'
+                  }`}
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-11 h-11 rounded-xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0">
+                      {spon.logoUrl ? (
+                        <img
+                          src={spon.logoUrl}
+                          alt={spon.name}
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <ImageIcon className="w-5 h-5 text-slate-500" />
+                      )}
+                    </div>
+
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[10px] font-mono text-slate-500">
+                          #{idx + 1}
+                        </span>
+                        <span className="font-bold text-sm text-white truncate">
+                          {spon.name}
+                        </span>
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase border ${getTierStyle(
+                            spon.tier
+                          )}`}
+                        >
+                          {spon.tier}
+                        </span>
+                      </div>
+                      {spon.tagline && (
+                        <p className="text-xs text-slate-400 truncate mt-0.5">
+                          {spon.tagline}
+                        </p>
+                      )}
+                      <a
+                        href={spon.targetUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:underline mt-0.5 font-mono truncate max-w-xs"
+                      >
+                        <span>{spon.targetUrl}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    {/* Reorder Up / Down */}
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => handleMoveSponsorOrder(idx, 'up')}
+                      title="Monte patnè sa a nan lòd afichaj la"
+                      className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 disabled:opacity-30 cursor-pointer transition-colors"
+                    >
+                      <ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === sponsors.length - 1}
+                      onClick={() => handleMoveSponsorOrder(idx, 'down')}
+                      title="Desann patnè sa a nan lòd afichaj la"
+                      className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 disabled:opacity-30 cursor-pointer transition-colors"
+                    >
+                      <ArrowDown className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleToggleActive(spon.id)}
+                      title={spon.active ? 'Kache nan pye paj' : 'Afiche nan pye paj'}
+                      className={`p-2 rounded-xl border transition-colors cursor-pointer ${
+                        spon.active
+                          ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                          : 'bg-slate-800 border-slate-700 text-slate-400'
+                      }`}
+                    >
+                      {spon.active ? (
+                        <Eye className="w-4 h-4" />
+                      ) : (
+                        <EyeOff className="w-4 h-4" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleEditSponsor(spon)}
+                      title="Modifye"
+                      className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 cursor-pointer"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSponsor(spon.id, spon.name)}
+                      title="Efase"
+                      className="p-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 cursor-pointer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Confirmation Modal */}
+      <ConfirmDeleteModal
+        isOpen={confirmModal.isOpen}
+        onClose={() => setConfirmModal((prev) => ({ ...prev, isOpen: false }))}
+        onConfirm={async () => {
+          await confirmModal.onConfirm();
+          setConfirmModal((prev) => ({ ...prev, isOpen: false }));
+        }}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        confirmButtonText={confirmModal.confirmText}
+      />
     </div>
   );
 };

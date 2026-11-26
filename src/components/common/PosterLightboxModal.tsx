@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, Download, ZoomIn, Image as ImageIcon } from 'lucide-react';
 import { Language } from '../../types';
+import { openExternalUrlSafely } from '../../utils/safeExternalLink';
 
 interface PosterLightboxModalProps {
   isOpen: boolean;
@@ -34,7 +35,7 @@ export const PosterLightboxModal: React.FC<PosterLightboxModalProps> = ({
       link.click();
       document.body.removeChild(link);
     } catch {
-      window.open(imageUrl, '_blank');
+      openExternalUrlSafely(imageUrl);
     }
   };
 

@@ -1,24 +1,42 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions for hardened security and schema validation
-    function isAuthenticated() {
+    // =========================================================================
+    // BRANCH 1: DEFAULT DENY, GLOBAL PRIMITIVES, IDENTITY, RBAC & JWT CLAIMS
+    // =========================================================================
+
+    // 0. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 1. Authentication & Core Primitives
+    function isSignedIn() {
       return request.auth != null;
     }
 
-    function isSuperDeveloper() {
-      return isAuthenticated()
-        && request.auth.token.email == "charlesjj3186@gmail.com"
+    function isVerifiedEmail() {
+      return isSignedIn()
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string
+        && ('email_verified' in request.auth.token)
         && request.auth.token.email_verified == true;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() > 0 && id.size() <= 128;
+    function isSuperAdmin() {
+      return isSignedIn()
+        && ('super_admin' in request.auth.token)
+        && request.auth.token.super_admin == true;
     }
 
-    function isValidChurchId(cid) {
-      return cid is string && cid.size() >= 2 && cid.size() <= 64;
+    function isSuperDeveloper() {
+      return isSuperAdmin()
+        || (
+          isVerifiedEmail()
+          && request.auth.token.email.lower() == 'charlesjj3186@gmail.com'
+        );
     }
 
     function incoming() {
@@ -29,108 +47,1094 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // 0. Connection health check path
-    match /test/{docId} {
-      allow read: if true;
-      allow write: if false;
+    // 2. Path & Primitive Field Validators (lean to stay far under Firestore's 1,000-expression limit)
+    function isValidId(id) {
+      return id is string
+        && id.size() >= 1
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // 1. Global Application & Developer Engine Config
-    match /app_config/{configId} {
-      allow read: if true;
-      allow create, update: if isValidId(configId)
-        && (isSuperDeveloper() || isAuthenticated() || configId == "developer_engine");
-      allow delete: if isSuperDeveloper();
+    function isValidChurchId(id) {
+      return id is string
+        && id.size() >= 2
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // 2. Churches collection (multi-tenant root)
+    function isOptionalString(data, key, maxLen) {
+      return !(key in data)
+        || data[key] == null
+        || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptionalBool(data, key) {
+      return !(key in data) || data[key] == null || data[key] is bool;
+    }
+
+    function isOptionalNumber(data, key, minVal, maxVal) {
+      return !(key in data)
+        || data[key] == null
+        || (
+          (data[key] is int || data[key] is float)
+          && data[key] >= minVal
+          && data[key] <= maxVal
+        );
+    }
+
+    function isOptionalTimestampOrString(data, key) {
+      return !(key in data)
+        || data[key] == null
+        || data[key] is timestamp
+        || (data[key] is string && data[key].size() <= 100)
+        || ((data[key] is int || data[key] is float) && data[key] >= 0);
+    }
+
+    function isOptionalCounter(data, key) {
+      return !(key in data)
+        || data[key] == null
+        || ((data[key] is int || data[key] is float) && data[key] >= 0);
+    }
+
+    // 3. Direct Inline Database Lookups (no indirect path helpers)
+    function churchExists(churchId) {
+      return isValidChurchId(churchId)
+        && exists(/databases/$(database)/documents/churches/$(churchId));
+    }
+
+    function hasUserProfile() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUserProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // 4. Church Ownership, Multi-Tenant RBAC & Custom JWT Claims
+    function isChurchOwner(churchData) {
+      return isSignedIn() && (
+        (('ownerId' in churchData) && churchData.ownerId is string && churchData.ownerId == request.auth.uid)
+        || (('adminGoogleUid' in churchData) && churchData.adminGoogleUid is string && churchData.adminGoogleUid == request.auth.uid)
+        || (
+          ('adminGoogleEmail' in churchData)
+          && churchData.adminGoogleEmail is string
+          && ('email' in request.auth.token)
+          && request.auth.token.email is string
+          && churchData.adminGoogleEmail.lower() == request.auth.token.email.lower()
+          && (
+            isVerifiedEmail()
+            || (('adminVerified' in churchData) && churchData.adminVerified == true)
+          )
+        )
+      );
+    }
+
+    function hasAdminAuthorizedClaim(churchId) {
+      return isSignedIn()
+        && isValidChurchId(churchId)
+        && (
+          isSuperAdmin()
+          || (
+            ('adminChurchIds' in request.auth.token)
+            && request.auth.token.adminChurchIds is list
+            && churchId in request.auth.token.adminChurchIds
+          )
+          || (
+            ('churchId' in request.auth.token)
+            && request.auth.token.churchId is string
+            && request.auth.token.churchId == churchId
+            && ('role' in request.auth.token)
+            && request.auth.token.role is string
+            && request.auth.token.role in ['admin', 'super_admin']
+          )
+        );
+    }
+
+    function hasAuthorizedChurchClaim(churchId) {
+      return isSignedIn()
+        && isValidChurchId(churchId)
+        && (
+          (('churchId' in request.auth.token) && request.auth.token.churchId is string && request.auth.token.churchId == churchId)
+          || hasAdminAuthorizedClaim(churchId)
+        );
+    }
+
+    function isChurchAdminOrDev(churchId) {
+      return isSignedIn()
+        && isValidChurchId(churchId)
+        && (
+          isSuperDeveloper()
+          || (
+            churchExists(churchId)
+            && isChurchOwner(get(/databases/$(database)/documents/churches/$(churchId)).data)
+          )
+          || hasAdminAuthorizedClaim(churchId)
+          || (
+            churchExists(churchId)
+            && hasUserProfile()
+            && ('churchId' in currentUserProfile())
+            && currentUserProfile().churchId == churchId
+            && ('role' in currentUserProfile())
+            && currentUserProfile().role in ['admin', 'super_admin']
+          )
+        );
+    }
+
+    function isStaffOfChurch(churchId) {
+      return isChurchAdminOrDev(churchId)
+        || (
+          isSignedIn()
+          && isValidChurchId(churchId)
+          && churchExists(churchId)
+          && hasUserProfile()
+          && ('churchId' in currentUserProfile())
+          && currentUserProfile().churchId == churchId
+          && ('role' in currentUserProfile())
+          && currentUserProfile().role in ['admin', 'usher', 'super_admin']
+        );
+    }
+
+    function canClaimAdminRole(churchId) {
+      return isSignedIn()
+        && churchExists(churchId)
+        && (
+          isSuperDeveloper()
+          || isChurchOwner(get(/databases/$(database)/documents/churches/$(churchId)).data)
+        );
+    }
+
+    function isDeaconRoleValue(role) {
+      return role is string
+        && (
+          role in [
+            'Dyak', 'dyak', 'Dyakonès', 'dyakones', 'Dyakones', 'Dyak / Dyakonès',
+            'Diacre', 'diacre', 'Diaconesse', 'diaconesse', 'Diacre / Diaconesse',
+            'Diácono', 'diácono', 'Diacono', 'diacono', 'Diaconisa', 'diaconisa', 'Diácono / Diaconisa',
+            'Deacon', 'deacon', 'Deaconess', 'deaconess', 'Deacon / Deaconess', 'deacon_ministry'
+          ]
+          || role.lower().matches('.*(^|[\\s/&,()-])(dyak|dyakon[eè]s|diacre|diaconesse|di[aá]cono|diaconisa|deacon|deaconess)($|[\\s/&,()-]).*')
+        );
+    }
+
+    function isActiveDeaconMemberData(memberData) {
+      return ('role' in memberData)
+        && isDeaconRoleValue(memberData.role)
+        && (!('memberType' in memberData) || memberData.memberType == null || memberData.memberType == 'member')
+        && (!('status' in memberData) || memberData.status == null || memberData.status == 'active');
+    }
+
+    function isDeaconMemberDocValid(churchId, memberDocId) {
+      return isValidId(memberDocId)
+        && exists(/databases/$(database)/documents/members/$(memberDocId))
+        && get(/databases/$(database)/documents/members/$(memberDocId)).data.churchId == churchId
+        && isMemberSelf(get(/databases/$(database)/documents/members/$(memberDocId)).data)
+        && isActiveDeaconMemberData(get(/databases/$(database)/documents/members/$(memberDocId)).data);
+    }
+
+    function canClaimDeaconRole(churchId, memberDocId) {
+      return isSignedIn()
+        && isValidChurchId(churchId)
+        && churchExists(churchId)
+        && isDeaconMemberDocValid(churchId, memberDocId);
+    }
+
+    function isDeaconOfChurch(churchId) {
+      return isSignedIn()
+        && isValidChurchId(churchId)
+        && churchExists(churchId)
+        && hasUserProfile()
+        && ('churchId' in currentUserProfile())
+        && currentUserProfile().churchId == churchId
+        && ('role' in currentUserProfile())
+        && currentUserProfile().role == 'deacon'
+        && ('memberId' in currentUserProfile())
+        && isDeaconMemberDocValid(churchId, currentUserProfile().memberId);
+    }
+
+    // =========================================================================
+    // BRANCH 2: USERS & CHURCHES (OWNERSHIP ON CREATE + ADMIN VERIFICATION LOCK)
+    // =========================================================================
+
+    function userProfileKeys() {
+      return [
+        'userId', 'email', 'displayName', 'photoUrl',
+        'churchId', 'churchName', 'role', 'memberId',
+        'language', 'createdAt', 'updatedAt'
+      ];
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['userId', 'email', 'displayName', 'role', 'createdAt'])
+        && data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.role is string && data.role in ['member', 'deacon', 'usher', 'admin', 'super_admin']
+        && isOptionalString(data, 'churchId', 128)
+        && isOptionalString(data, 'memberId', 128)
+        && (!('language' in data) || data.language == null || (data.language is string && data.language in ['ht', 'fr', 'en', 'es']))
+        && isOptionalTimestampOrString(data, 'createdAt')
+        && isOptionalTimestampOrString(data, 'updatedAt');
+    }
+
+    function churchProfileKeys() {
+      return [
+        'id', 'code', 'name', 'ownerId', 'pastor', 'address', 'city',
+        'country', 'phone', 'email', 'motto', 'themeColor', 'logoIcon',
+        'logoUrl', 'bannerUrl', 'tagline', 'createdAt', 'updatedAt',
+        'rnc', 'rncNumber', 'rncDocumentPhoto', 'rncDocumentUploadedAt',
+        'rncVerificationStatus', 'rncVerifiedAt', 'rncLegalName',
+        'rncDocumentType', 'rncNotes', 'adminGoogleEmail', 'adminGoogleUid',
+        'adminGoogleName', 'adminGooglePhoto', 'adminAuthMethod',
+        'adminPasscode', 'adminPasscodeUpdatedAt', 'quickPinEnabled',
+        'autoLockMinutes', 'customCardTitle', 'signatureUrl', 'website',
+        'windowsExeDownloadUrl', 'desktopAppVersion', 'donationInfo',
+        'churchRules', 'status', 'archivedAt', 'isLegacy'
+      ];
+    }
+
+    function churchVerificationKeys() {
+      return ['adminVerified', 'adminVerifiedAt', 'adminVerifiedBy'];
+    }
+
+    function isValidChurch(data) {
+      return data.keys().hasAll(['name'])
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 200
+        && isOptionalString(data, 'id', 128)
+        && isOptionalString(data, 'ownerId', 128)
+        && isOptionalString(data, 'adminGoogleUid', 128)
+        && isOptionalString(data, 'adminGoogleEmail', 200)
+        && isOptionalBool(data, 'adminVerified')
+        && (!('adminAuthMethod' in data) || data.adminAuthMethod == null || (data.adminAuthMethod is string && data.adminAuthMethod in ['email_password', 'google', 'both', 'legacy_pin']))
+        && (!('status' in data) || data.status == null || (data.status is string && data.status in ['active', 'archived']))
+        && isOptionalString(data, 'logoUrl', 600000)
+        && isOptionalString(data, 'signatureUrl', 600000)
+        && isOptionalNumber(data, 'autoLockMinutes', 0, 120);
+    }
+
+    function isUnclaimedLegacyChurch(data) {
+      return (!('ownerId' in data) || data.ownerId == null || data.ownerId == '')
+        && (!('adminGoogleUid' in data) || data.adminGoogleUid == null || data.adminGoogleUid == '')
+        && (!('adminGoogleEmail' in data) || data.adminGoogleEmail == null || data.adminGoogleEmail == '');
+    }
+
+    function isCreatorClaimingOwnChurch(data) {
+      return isSignedIn()
+        && (
+          (('adminGoogleUid' in data) && data.adminGoogleUid is string && data.adminGoogleUid == request.auth.uid)
+          || (('ownerId' in data) && data.ownerId is string && data.ownerId == request.auth.uid)
+        )
+        && (
+          !('adminGoogleEmail' in data)
+          || data.adminGoogleEmail == null
+          || data.adminGoogleEmail == ''
+          || (
+            ('email' in request.auth.token)
+            && request.auth.token.email is string
+            && data.adminGoogleEmail.lower() == request.auth.token.email.lower()
+          )
+        );
+    }
+
+    // Collection: users (mobile/unified user profiles; strict self + anti-escalation)
+    match /users/{userId} {
+      allow get: if isSignedIn()
+        && isValidId(userId)
+        && (request.auth.uid == userId || isSuperDeveloper());
+
+      allow list: if isSignedIn()
+        && (isSuperDeveloper() || resource.data.userId == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming())
+        && incoming().keys().hasOnly(userProfileKeys())
+        && incoming().userId == request.auth.uid
+        && (
+          incoming().role == 'member'
+          || (
+            incoming().role == 'deacon'
+            && ('churchId' in incoming())
+            && ('memberId' in incoming())
+            && canClaimDeaconRole(incoming().churchId, incoming().memberId)
+          )
+          || (
+            incoming().role == 'admin'
+            && ('churchId' in incoming())
+            && canClaimAdminRole(incoming().churchId)
+          )
+          || isSuperDeveloper()
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(userProfileKeys())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && (
+          isSuperDeveloper()
+          || (
+            request.auth.uid == userId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'photoUrl', 'language', 'updatedAt'
+            ])
+          )
+          || (
+            request.auth.uid == userId
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'photoUrl', 'churchId', 'churchName',
+              'memberId', 'language', 'role', 'updatedAt'
+            ])
+            && incoming().role == existing().role
+            && incoming().churchId == existing().churchId
+            && incoming().memberId == existing().memberId
+          )
+          || (
+            request.auth.uid == userId
+            && incoming().role == 'deacon'
+            && ('churchId' in incoming())
+            && ('memberId' in incoming())
+            && canClaimDeaconRole(incoming().churchId, incoming().memberId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'role', 'churchId', 'churchName', 'memberId', 'displayName', 'photoUrl', 'updatedAt'
+            ])
+          )
+          || (
+            request.auth.uid == userId
+            && incoming().role == 'admin'
+            && ('churchId' in incoming())
+            && canClaimAdminRole(incoming().churchId)
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'role', 'churchId', 'churchName', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSignedIn()
+        && isValidId(userId)
+        && (request.auth.uid == userId || isSuperDeveloper());
+    }
+
+    // Collection: churches (creator immediately becomes owner; adminVerified locked to Super Developer)
     match /churches/{churchId} {
-      allow read: if true;
-      allow create: if isValidId(churchId)
-        && incoming().id == churchId
-        && incoming().name is string && incoming().name.size() >= 2 && incoming().name.size() <= 200
-        && incoming().pastor is string && incoming().pastor.size() <= 200;
-      allow update: if isValidId(churchId)
-        && incoming().id == churchId
-        && incoming().name is string && incoming().name.size() >= 2 && incoming().name.size() <= 200;
-      allow delete: if isAuthenticated();
+      allow get: if isValidId(churchId);
+
+      // Public church directory (Web + Android pre-login picker) & authenticated admin/dev queries
+      allow list: if isSignedIn() || request.time != null;
+
+      allow create: if isSignedIn()
+        && isValidChurchId(churchId)
+        && isValidChurch(incoming())
+        && incoming().keys().hasOnly(churchProfileKeys().concat(churchVerificationKeys()))
+        && (
+          isSuperDeveloper()
+          || (
+            isCreatorClaimingOwnChurch(incoming())
+            && (!('adminVerified' in incoming()) || incoming().adminVerified == false || incoming().adminVerified == null)
+            && (!('adminVerifiedAt' in incoming()) || incoming().adminVerifiedAt == null)
+            && (!('adminVerifiedBy' in incoming()) || incoming().adminVerifiedBy == null)
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidChurchId(churchId)
+        && incoming().diff(existing()).affectedKeys().hasOnly(
+          churchProfileKeys().concat(churchVerificationKeys())
+        )
+        && (
+          (
+            isSuperDeveloper()
+            && isOptionalBool(incoming(), 'adminVerified')
+            && isOptionalTimestampOrString(incoming(), 'adminVerifiedAt')
+            && isOptionalString(incoming(), 'adminVerifiedBy', 200)
+          )
+          || (
+            isValidChurch(incoming())
+            && (
+              (
+                (
+                  isChurchOwner(existing())
+                  || (
+                    isUnclaimedLegacyChurch(existing())
+                    && isCreatorClaimingOwnChurch(incoming())
+                  )
+                )
+                && !incoming().diff(existing()).affectedKeys().hasAny(['adminVerified', 'adminVerifiedAt', 'adminVerifiedBy'])
+              )
+              || (
+                hasUserProfile()
+                && ('churchId' in currentUserProfile())
+                && currentUserProfile().churchId == churchId
+                && ('role' in currentUserProfile())
+                && currentUserProfile().role == 'admin'
+                && !incoming().diff(existing()).affectedKeys().hasAny([
+                  'ownerId', 'adminGoogleUid', 'adminGoogleEmail',
+                  'adminVerified', 'adminVerifiedAt', 'adminVerifiedBy'
+                ])
+              )
+            )
+          )
+        );
+
+      allow delete: if isSignedIn()
+        && isValidChurchId(churchId)
+        && (isChurchOwner(existing()) || isSuperDeveloper());
     }
 
-    // 3. Members collection (scoped to churchId)
+    // =========================================================================
+    // BRANCH 3: MEMBERS (MANDATORY/IMMUTABLE CHURCHID, PUBLIC QR, SELF-LINK)
+    // =========================================================================
+
+    function isMemberSelf(memberData) {
+      return isSignedIn() && (
+        (('googleUid' in memberData) && memberData.googleUid is string && memberData.googleUid == request.auth.uid)
+        || (('userId' in memberData) && memberData.userId is string && memberData.userId == request.auth.uid)
+        || (
+          isVerifiedEmail()
+          && ('googleEmail' in memberData)
+          && memberData.googleEmail is string
+          && memberData.googleEmail.lower() == request.auth.token.email.lower()
+        )
+        || (
+          isVerifiedEmail()
+          && ('email' in memberData)
+          && memberData.email is string
+          && memberData.email.lower() == request.auth.token.email.lower()
+        )
+      );
+    }
+
+    function isValidMember(data, memberDocId) {
+      return data.keys().hasAll(['churchId', 'fullName'])
+        && isValidChurchId(data.churchId)
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 200
+        && (!('id' in data) || data.id == null || data.id == '' || data.id == memberDocId)
+        && (!('status' in data) || data.status == null || (data.status is string && data.status in ['active', 'inactive', 'pending', 'suspended']))
+        && isOptionalString(data, 'email', 200)
+        && isOptionalString(data, 'phone', 64)
+        && isOptionalString(data, 'avatarUrl', 600000)
+        && isOptionalString(data, 'photoUrl', 600000)
+        && isOptionalCounter(data, 'attendanceStreak')
+        && isOptionalCounter(data, 'totalAttendances')
+        && data.keys().hasOnly([
+          'id', 'userId', 'churchId', 'churchName', 'churchLogoUrl',
+          'memberId', 'memberCode', 'pin', 'securityPin', 'titlePrefix',
+          'fullName', 'gender', 'civilStatus', 'maritalStatus', 'profession',
+          'dateOfBirth', 'birthDate', 'baptismDate', 'joinedDate', 'joinedAt',
+          'joinDateFormatted', 'phone', 'emergencyContact',
+          'emergencyContactName', 'email', 'googleEmail', 'googleUid',
+          'googlePhoto', 'avatarUrl', 'photoUrl', 'avatar', 'photo',
+          'address', 'city', 'zone', 'department', 'ministry', 'role',
+          'memberType', 'cellGroup', 'status', 'legalDocumentType',
+          'legalDocumentNumber', 'barcodeToken', 'nfcCardUid', 'qrCode',
+          'notes', 'createdBy', 'updatedBy', 'fcmToken', 'language',
+          'attendanceStreak', 'totalAttendances', 'isActive', 'isDemo',
+          'createdAt', 'updatedAt'
+        ]);
+    }
+
+    // Collection: members (mandatory & immutable churchId; supports public QR verify, PIN login & Google link)
     match /members/{memberId} {
-      allow read: if true;
+      allow get: if isValidId(memberId);
+
+      // Query-prover-safe: signed-in users OR filtered tenant/member lookups (no regex in list)
+      allow list: if isSignedIn()
+        || resource.data.churchId is string
+        || resource.data.memberId is string
+        || resource.data.barcodeToken is string
+        || resource.data.userId is string
+        || resource.data.phone is string
+        || resource.data.email is string
+        || resource.data.googleEmail is string;
+
       allow create: if isValidId(memberId)
-        && isValidChurchId(incoming().churchId)
-        && incoming().fullName is string && incoming().fullName.size() >= 2 && incoming().fullName.size() <= 200;
+        && isValidMember(request.resource.data, memberId)
+        && churchExists(request.resource.data.churchId)
+        && (
+          isChurchAdminOrDev(request.resource.data.churchId)
+          || (
+            hasAuthorizedChurchClaim(request.resource.data.churchId)
+            && hasAdminAuthorizedClaim(request.resource.data.churchId)
+          )
+          || (
+            isVerifiedEmail()
+            && (!('googleUid' in request.resource.data) || request.resource.data.googleUid == null || request.resource.data.googleUid == request.auth.uid)
+            && ('email' in request.resource.data)
+            && request.resource.data.email is string
+            && request.resource.data.email.lower() == request.auth.token.email.lower()
+            && (!('role' in request.resource.data) || request.resource.data.role == null || request.resource.data.role in ['Manm', 'Miembro', 'Member', 'Membre'])
+            && (!('memberType' in request.resource.data) || request.resource.data.memberType == null || request.resource.data.memberType == 'member')
+          )
+        );
+
       allow update: if isValidId(memberId)
-        && incoming().churchId == existing().churchId
-        && incoming().fullName is string && incoming().fullName.size() >= 2 && incoming().fullName.size() <= 200;
-      allow delete: if isAuthenticated();
+        && isValidMember(request.resource.data, memberId)
+        && request.resource.data.churchId == resource.data.churchId
+        && (
+          isChurchAdminOrDev(resource.data.churchId)
+          || (churchExists(resource.data.churchId) && hasAdminAuthorizedClaim(resource.data.churchId))
+          || (
+            isMemberSelf(resource.data)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'fullName', 'googleUid', 'googleEmail', 'googlePhoto',
+              'avatarUrl', 'photoUrl', 'avatar', 'photo', 'phone',
+              'emergencyContact', 'emergencyContactName', 'email',
+              'address', 'city', 'zone', 'pin', 'securityPin',
+              'userId', 'barcodeToken', 'notes', 'updatedAt'
+            ])
+          )
+          || (
+            isVerifiedEmail()
+            && (!('googleUid' in resource.data) || resource.data.googleUid == null || resource.data.googleUid == '')
+            && ('googleUid' in request.resource.data)
+            && request.resource.data.googleUid is string
+            && request.resource.data.googleUid == request.auth.uid
+            && ('googleEmail' in request.resource.data)
+            && request.resource.data.googleEmail is string
+            && request.resource.data.googleEmail.lower() == request.auth.token.email.lower()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'googleUid', 'googleEmail', 'googlePhoto', 'avatarUrl',
+              'photoUrl', 'userId', 'barcodeToken', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(memberId)
+        && (
+          isChurchAdminOrDev(resource.data.churchId)
+          || (churchExists(resource.data.churchId) && hasAdminAuthorizedClaim(resource.data.churchId))
+        );
     }
 
-    // 4. Service sessions collection
+    // =========================================================================
+    // BRANCH 4: SERVICES (TERMINAL STATE LOCK + UNIFIED WEB & MOBILE SCHEMA)
+    // =========================================================================
+
+    function isServicePermanentlyLocked(data) {
+      return 'isPermanentlyEnded' in data && data.isPermanentlyEnded == true;
+    }
+
+    function isServiceOpenFlag(data) {
+      return 'isOpenForAttendance' in data && data.isOpenForAttendance == true;
+    }
+
+    function isServiceAcceptingAttendance(serviceData, expectedChurchId) {
+      return serviceData.churchId == expectedChurchId
+        && isServiceOpenFlag(serviceData)
+        && !isServicePermanentlyLocked(serviceData)
+        && (
+          !('status' in serviceData)
+          || serviceData.status == null
+          || !(serviceData.status in ['completed', 'closed', 'ended', 'fini'])
+        );
+    }
+
+    function serviceAllowedKeys() {
+      return [
+        'id', 'serviceId', 'churchId', 'churchName', 'category', 'type',
+        'name', 'title', 'serviceTitle', 'serviceName', 'description',
+        'imageUrl', 'posterUrl', 'bannerUrl', 'date', 'serviceDate',
+        'dateFormatted', 'time', 'startTime', 'endTime', 'preacherOrLeader',
+        'leader', 'preacher', 'reader', 'musicians', 'ushers', 'department',
+        'authorId', 'authorName', 'createdBy', 'updatedBy', 'theme',
+        'passage', 'notes', 'status', 'location', 'address', 'qrCode',
+        'recurrence', 'usherMemberIds', 'usherUserIds',
+        'isOpenForAttendance', 'wasOpenedForAttendance', 'isPermanentlyEnded',
+        'isLive', 'isActive', 'recurring', 'endedAt', 'sendReminder24h',
+        'reminderSentAt', 'startTimeEpochMillis', 'endTimeEpochMillis',
+        'lateToleranceMinutes', 'lateThresholdMinutes', 'capacity',
+        'durationMinutes', 'attendanceCount', 'reactionsCount',
+        'commentsCount', 'createdAt', 'updatedAt', 'isDemo'
+      ];
+    }
+
+    function isValidService(data, serviceDocId) {
+      return data.keys().hasAll(['churchId', 'title'])
+        && isValidChurchId(data.churchId)
+        && (!('id' in data) || data.id == null || data.id == '' || data.id == serviceDocId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 200
+        && isOptionalString(data, 'category', 64)
+        && isOptionalTimestampOrString(data, 'date')
+        && isOptionalString(data, 'startTime', 32)
+        && isOptionalString(data, 'endTime', 32)
+        && isOptionalBool(data, 'isOpenForAttendance')
+        && isOptionalBool(data, 'isPermanentlyEnded')
+        && !(isServicePermanentlyLocked(data) && isServiceOpenFlag(data))
+        && isOptionalNumber(data, 'lateToleranceMinutes', 0, 360)
+        && isOptionalString(data, 'imageUrl', 600000)
+        && isOptionalCounter(data, 'attendanceCount');
+    }
+
+    // Collection: services (immutable schedule & non-reopenable once permanently ended)
     match /services/{serviceId} {
-      allow read: if true;
+      allow get: if isValidId(serviceId);
+
+      // Query-prover-safe: signed-in users OR tenant-scoped churchId query
+      allow list: if isSignedIn()
+        || resource.data.churchId is string;
+
       allow create: if isValidId(serviceId)
-        && isValidChurchId(incoming().churchId)
-        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
+        && isValidService(incoming(), serviceId)
+        && incoming().keys().hasOnly(serviceAllowedKeys())
+        && churchExists(incoming().churchId)
+        && (
+          isChurchAdminOrDev(incoming().churchId)
+          || isDeaconOfChurch(incoming().churchId)
+        );
+
       allow update: if isValidId(serviceId)
+        && isValidService(incoming(), serviceId)
+        && incoming().diff(existing()).affectedKeys().hasOnly(serviceAllowedKeys())
         && incoming().churchId == existing().churchId
-        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
-      allow delete: if isAuthenticated();
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || isDeaconOfChurch(existing().churchId)
+        )
+        && (
+          !isServicePermanentlyLocked(existing())
+          || (
+            isServicePermanentlyLocked(incoming())
+            && !isServiceOpenFlag(incoming())
+            && incoming().diff(existing()).affectedKeys().hasOnly(['notes', 'reminderSentAt', 'sendReminder24h', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(serviceId)
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (
+            isDeaconOfChurch(existing().churchId)
+            && !isServicePermanentlyLocked(existing())
+            && ('authorId' in existing())
+            && existing().authorId is string
+            && existing().authorId == request.auth.uid
+          )
+        );
     }
 
-    // 5. Announcements collection
-    match /announcements/{announcementId} {
-      allow read: if true;
-      allow create: if isValidId(announcementId)
-        && isValidChurchId(incoming().churchId)
-        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
-      allow update: if isValidId(announcementId)
-        && incoming().churchId == existing().churchId
-        && incoming().title is string && incoming().title.size() >= 1 && incoming().title.size() <= 200;
-      allow delete: if isAuthenticated();
+    // =========================================================================
+    // BRANCH 5: ATTENDANCES (ACTIVE SERVICE ONLY + WEB, VISITOR & MOBILE SYNC)
+    // =========================================================================
+
+    function canProfileRecordForService(churchId, serviceData, profile) {
+      return ('churchId' in profile)
+        && profile.churchId == churchId
+        && (
+          (('role' in profile) && profile.role in ['admin', 'super_admin'])
+          || (
+            serviceData.churchId == churchId
+            && !isServicePermanentlyLocked(serviceData)
+            && (
+              (
+                ('usherUserIds' in serviceData)
+                && serviceData.usherUserIds is list
+                && request.auth.uid in serviceData.usherUserIds
+              )
+              || (
+                ('memberId' in profile)
+                && ('usherMemberIds' in serviceData)
+                && serviceData.usherMemberIds is list
+                && profile.memberId in serviceData.usherMemberIds
+              )
+            )
+          )
+        );
     }
 
-    // 6. Attendance collection
+    function canRecordForService(churchId, serviceData) {
+      return isSignedIn()
+        && isServiceAcceptingAttendance(serviceData, churchId)
+        && (
+          isChurchAdminOrDev(churchId)
+          || hasAdminAuthorizedClaim(churchId)
+          || (
+            hasUserProfile()
+            && canProfileRecordForService(churchId, serviceData, currentUserProfile())
+          )
+        );
+    }
+
+    function verifyRegularHostMember(data, memberData) {
+      return memberData.churchId == data.churchId
+        && (
+          !('barcodeToken' in data)
+          || data.barcodeToken == null
+          || !('barcodeToken' in memberData)
+          || memberData.barcodeToken == null
+          || memberData.barcodeToken == data.barcodeToken
+        )
+        && (!('status' in memberData) || memberData.status == null || memberData.status == 'active');
+    }
+
+    function isValidAttendance(data, attDocId) {
+      return data.keys().hasAll(['churchId', 'serviceId'])
+        && isValidChurchId(data.churchId)
+        && isValidId(data.serviceId)
+        && (!('id' in data) || data.id == null || data.id == '' || data.id == attDocId)
+        && (
+          (('memberId' in data) && data.memberId is string && data.memberId.size() >= 1 && data.memberId.size() <= 128)
+          || (('memberCode' in data) && data.memberCode is string && data.memberCode.size() >= 1 && data.memberCode.size() <= 128)
+        )
+        && (!('checkInMethod' in data) || data.checkInMethod == null || (data.checkInMethod is string && data.checkInMethod in ['qr_scan', 'qr_scanner', 'nfc_scan', 'barcode', 'manual', 'kiosk']))
+        && (!('attendanceStatus' in data) || data.attendanceStatus == null || (data.attendanceStatus is string && data.attendanceStatus in ['on_time', 'late', 'excused']))
+        && (!('status' in data) || data.status == null || (data.status is string && data.status in ['on_time', 'late', 'excused']))
+        && (!('attendanceRole' in data) || data.attendanceRole == null || (data.attendanceRole is string && data.attendanceRole in ['member', 'visitor']))
+        && isOptionalNumber(data, 'lateMinutes', 0, 1440)
+        && isOptionalNumber(data, 'lateToleranceMinutes', 0, 360)
+        && data.keys().hasOnly([
+          'id', 'churchId', 'serviceId', 'serviceCategory', 'serviceTitle',
+          'serviceName', 'serviceDate', 'memberId', 'memberCode', 'memberDbId',
+          'memberDocId', 'userId', 'memberName', 'memberPhone',
+          'memberDepartment', 'memberPhotoUrl', 'barcodeToken', 'timestamp',
+          'createdAt', 'checkInMethod', 'recordedBy', 'recordedByUid',
+          'attendanceStatus', 'status', 'lateMinutes', 'lateToleranceMinutes',
+          'attendanceRole', 'isVisitor', 'homeChurchId', 'homeChurchName',
+          'hostChurchName', 'isDemo'
+        ]);
+    }
+
+    // Collection: attendances (immutable audit log; strictly requires an open, non-ended service)
     match /attendances/{attendanceId} {
-      allow read: if true;
+      allow get: if isValidId(attendanceId);
+
+      // Query-prover-safe: signed-in users OR filtered church/member/service queries
+      allow list: if isSignedIn()
+        || resource.data.churchId is string
+        || resource.data.memberDbId is string
+        || resource.data.memberId is string
+        || resource.data.serviceId is string;
+
       allow create: if isValidId(attendanceId)
-        && isValidChurchId(incoming().churchId)
-        && incoming().serviceId is string && incoming().serviceId.size() > 0 && incoming().serviceId.size() <= 128
-        && incoming().memberId is string && incoming().memberId.size() > 0 && incoming().memberId.size() <= 128;
-      allow update: if isValidId(attendanceId)
-        && incoming().churchId == existing().churchId;
-      allow delete: if isAuthenticated();
+        && isValidAttendance(incoming(), attendanceId)
+        && churchExists(incoming().churchId)
+        && exists(/databases/$(database)/documents/services/$(incoming().serviceId))
+        && isServiceAcceptingAttendance(get(/databases/$(database)/documents/services/$(incoming().serviceId)).data, incoming().churchId)
+        && (
+          (
+            ('recordedByUid' in incoming())
+            && incoming().recordedByUid is string
+            && incoming().recordedByUid == request.auth.uid
+            && canRecordForService(
+              incoming().churchId,
+              get(/databases/$(database)/documents/services/$(incoming().serviceId)).data
+            )
+            && ('memberDocId' in incoming())
+            && isValidId(incoming().memberDocId)
+            && exists(/databases/$(database)/documents/members/$(incoming().memberDocId))
+            && verifyRegularHostMember(
+              incoming(),
+              get(/databases/$(database)/documents/members/$(incoming().memberDocId)).data
+            )
+          )
+          || (
+            !('recordedByUid' in incoming())
+            && (!('homeChurchId' in incoming()) || incoming().homeChurchId == null || incoming().homeChurchId == incoming().churchId)
+            && (
+              !('memberDbId' in incoming())
+              || incoming().memberDbId == null
+              || (
+                isValidId(incoming().memberDbId)
+                && exists(/databases/$(database)/documents/members/$(incoming().memberDbId))
+                && get(/databases/$(database)/documents/members/$(incoming().memberDbId)).data.churchId == incoming().churchId
+              )
+            )
+          )
+          || (
+            ('homeChurchId' in incoming())
+            && isValidChurchId(incoming().homeChurchId)
+            && incoming().homeChurchId != incoming().churchId
+            && churchExists(incoming().homeChurchId)
+            && ('isVisitor' in incoming()) && incoming().isVisitor == true
+            && ('attendanceRole' in incoming()) && incoming().attendanceRole == 'visitor'
+            && ('memberDbId' in incoming())
+            && isValidId(incoming().memberDbId)
+            && exists(/databases/$(database)/documents/members/$(incoming().memberDbId))
+            && get(/databases/$(database)/documents/members/$(incoming().memberDbId)).data.churchId == incoming().homeChurchId
+          )
+        );
+
+      allow update: if false;
+
+      allow delete: if isValidId(attendanceId)
+        && isChurchAdminOrDev(existing().churchId);
     }
 
-    // 7. Announcement comments collection
+    // =========================================================================
+    // BRANCH 6: ANNOUNCEMENTS, COMMENTS, REACTIONS, NOTIFICATIONS & APP CONFIG
+    // =========================================================================
+
+    function announcementAllowedKeys() {
+      return [
+        'id', 'churchId', 'title', 'content', 'department', 'category',
+        'date', 'time', 'targetAudience', 'audience', 'priority', 'expiresAt',
+        'authorPhotoUrl', 'isPinned', 'pinned', 'showToastOnLogin',
+        'toastAlertLevel', 'isScheduledNotification', 'isPublished',
+        'scheduledNotificationDate', 'scheduledNotificationEndDate',
+        'scheduledTargetAudience', 'posterUrl', 'imageUrl', 'imageCaption',
+        'serviceId', 'authorId', 'authorName', 'author', 'authorType',
+        'leader', 'preacher', 'reader', 'musicians', 'ushers',
+        'title_ht', 'title_fr', 'title_en', 'title_es',
+        'content_ht', 'content_fr', 'content_en', 'content_es',
+        'reactionsCount', 'commentsCount', 'createdBy', 'updatedBy',
+        'isDemo', 'createdAt', 'updatedAt'
+      ];
+    }
+
+    function isValidAnnouncement(data) {
+      return data.keys().hasAll(['churchId', 'title', 'content'])
+        && isValidChurchId(data.churchId)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 300
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 5000
+        && isOptionalString(data, 'posterUrl', 1048576)
+        && isOptionalString(data, 'imageUrl', 1048576)
+        && isOptionalBool(data, 'isPinned')
+        && isOptionalCounter(data, 'reactionsCount')
+        && isOptionalCounter(data, 'commentsCount')
+        && isOptionalTimestampOrString(data, 'createdAt')
+        && isOptionalTimestampOrString(data, 'updatedAt');
+    }
+
+    function commentAllowedKeys() {
+      return [
+        'id', 'targetId', 'churchId', 'userId', 'userName', 'userPhotoUrl',
+        'content', 'createdAt', 'announcementId', 'announcementTitle',
+        'churchName', 'author', 'authorMemberId', 'memberId', 'text',
+        'time', 'avatarInitials', 'isDemo'
+      ];
+    }
+
+    function isValidComment(data) {
+      return isValidChurchId(data.churchId)
+        && (
+          (('targetId' in data) && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128)
+          || (('announcementId' in data) && data.announcementId is string && data.announcementId.size() >= 1 && data.announcementId.size() <= 128)
+        )
+        && (
+          (('userName' in data) && data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 150)
+          || (('author' in data) && data.author is string && data.author.size() >= 1 && data.author.size() <= 150)
+        )
+        && (
+          (('content' in data) && data.content is string && data.content.size() >= 1 && data.content.size() <= 2000)
+          || (('text' in data) && data.text is string && data.text.size() >= 1 && data.text.size() <= 2000)
+        )
+        && isOptionalString(data, 'userPhotoUrl', 600000);
+    }
+
+    function reactionAllowedKeys() {
+      return [
+        'id', 'targetId', 'announcementId', 'churchId', 'userId',
+        'userName', 'memberId', 'reactionType', 'reaction',
+        'createdAt', 'updatedAt'
+      ];
+    }
+
+    function isValidReaction(data) {
+      return isValidChurchId(data.churchId)
+        && data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128
+        && (
+          (('targetId' in data) && data.targetId is string && data.targetId.size() >= 1 && data.targetId.size() <= 128)
+          || (('announcementId' in data) && data.announcementId is string && data.announcementId.size() >= 1 && data.announcementId.size() <= 128)
+        )
+        && (!('reactionType' in data) || data.reactionType == null || (data.reactionType is string && data.reactionType in ['like', 'love', 'pray', 'haha', 'wow', 'sad', 'clap', 'amen']));
+    }
+
+    function notificationAllowedKeys() {
+      return [
+        'id', 'userId', 'churchId', 'title', 'message', 'type',
+        'isRead', 'read', 'createdAt', 'updatedAt'
+      ];
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'churchId', 'title', 'message', 'type', 'isRead'])
+        && isValidChurchId(data.churchId)
+        && data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 350
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 5000
+        && data.type is string && data.type in ['service', 'announcement', 'attendance', 'system']
+        && data.isRead is bool;
+    }
+
+    // Collection: announcements
+    match /announcements/{announcementId} {
+      allow get: if isValidId(announcementId);
+
+      // Query-prover-safe: signed-in users OR tenant-scoped churchId query
+      allow list: if isSignedIn()
+        || resource.data.churchId is string;
+
+      allow create: if isValidId(announcementId)
+        && isValidAnnouncement(incoming())
+        && incoming().keys().hasOnly(announcementAllowedKeys())
+        && churchExists(incoming().churchId)
+        && (
+          isChurchAdminOrDev(incoming().churchId)
+          || (
+            isDeaconOfChurch(incoming().churchId)
+            && ('authorId' in incoming())
+            && incoming().authorId is string
+            && incoming().authorId == request.auth.uid
+          )
+        );
+
+      allow update: if isValidId(announcementId)
+        && isValidAnnouncement(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(announcementAllowedKeys())
+        && incoming().churchId == existing().churchId
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (
+            isDeaconOfChurch(existing().churchId)
+            && ('authorId' in existing())
+            && existing().authorId is string
+            && existing().authorId == request.auth.uid
+            && incoming().authorId == existing().authorId
+          )
+          || incoming().diff(existing()).affectedKeys().hasOnly(['reactionsCount', 'commentsCount', 'updatedAt'])
+        );
+
+      allow delete: if isValidId(announcementId)
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (
+            isDeaconOfChurch(existing().churchId)
+            && ('authorId' in existing())
+            && existing().authorId is string
+            && existing().authorId == request.auth.uid
+          )
+        );
+    }
+
+    // Collection: announcement_comments
     match /announcement_comments/{commentId} {
-      allow read: if true;
+      allow get: if isValidId(commentId);
+
+      // Query-prover-safe: signed-in users OR filtered church/target queries
+      allow list: if isSignedIn()
+        || resource.data.churchId is string
+        || resource.data.targetId is string
+        || resource.data.announcementId is string;
+
       allow create: if isValidId(commentId)
-        && isValidChurchId(incoming().churchId)
-        && incoming().text is string && incoming().text.size() >= 1 && incoming().text.size() <= 2000;
+        && isValidComment(incoming())
+        && incoming().keys().hasOnly(commentAllowedKeys())
+        && churchExists(incoming().churchId);
+
       allow update: if isValidId(commentId)
+        && isValidComment(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(commentAllowedKeys())
         && incoming().churchId == existing().churchId
-        && incoming().text is string && incoming().text.size() >= 1 && incoming().text.size() <= 2000;
-      allow delete: if isAuthenticated();
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (
+            isSignedIn()
+            && ('userId' in existing())
+            && existing().userId == request.auth.uid
+            && ('userId' in incoming())
+            && incoming().userId == existing().userId
+            && incoming().diff(existing()).affectedKeys().hasOnly(['content', 'text'])
+          )
+        );
+
+      allow delete: if isValidId(commentId)
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (isSignedIn() && ('userId' in existing()) && existing().userId == request.auth.uid)
+        );
     }
 
-    // 8. Announcement reactions collection
+    // Collection: announcement_reactions
     match /announcement_reactions/{reactionId} {
-      allow read: if true;
+      allow get: if isValidId(reactionId);
+
+      // Query-prover-safe: signed-in users OR filtered church/target queries
+      allow list: if isSignedIn()
+        || resource.data.churchId is string
+        || resource.data.targetId is string
+        || resource.data.announcementId is string;
+
       allow create: if isValidId(reactionId)
-        && isValidChurchId(incoming().churchId)
-        && incoming().reaction is string && incoming().reaction.size() >= 1 && incoming().reaction.size() <= 32;
+        && isValidReaction(incoming())
+        && incoming().keys().hasOnly(reactionAllowedKeys())
+        && churchExists(incoming().churchId);
+
       allow update: if isValidId(reactionId)
+        && isValidReaction(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'reactionType', 'reaction', 'userName', 'createdAt', 'updatedAt'
+        ])
         && incoming().churchId == existing().churchId
-        && incoming().reaction is string && incoming().reaction.size() >= 1 && incoming().reaction.size() <= 32;
-      allow delete: if isAuthenticated();
+        && incoming().userId == existing().userId;
+
+      allow delete: if isValidId(reactionId)
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (isSignedIn() && existing().userId == request.auth.uid)
+          || (
+            ('targetId' in existing())
+            && existing().targetId is string
+            && existing().userId is string
+            && reactionId == (existing().targetId + '_' + existing().userId)
+          )
+        );
     }
 
-    // 9. Catch-all fallback default-deny (Zero-Trust)
-    match /{document=**} {
-      allow read, write: if false;
+    // Collection: notifications
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId);
+
+      // Query-prover-safe: signed-in users OR filtered church/user queries
+      allow list: if isSignedIn()
+        || resource.data.churchId is string
+        || resource.data.userId is string;
+
+      allow create: if isValidId(notificationId)
+        && isValidNotification(incoming())
+        && incoming().keys().hasOnly(notificationAllowedKeys())
+        && churchExists(incoming().churchId)
+        && (
+          isStaffOfChurch(incoming().churchId)
+          || (
+            isDeaconOfChurch(incoming().churchId)
+            && incoming().type in ['service', 'announcement']
+          )
+        );
+
+      allow update: if isValidId(notificationId)
+        && isValidNotification(incoming())
+        && incoming().diff(existing()).affectedKeys().hasOnly(notificationAllowedKeys())
+        && incoming().userId == existing().userId
+        && incoming().churchId == existing().churchId
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'read', 'updatedAt'])
+        );
+
+      allow delete: if isValidId(notificationId)
+        && (
+          isChurchAdminOrDev(existing().churchId)
+          || (isSignedIn() && ('userId' in existing()) && existing().userId == request.auth.uid)
+        );
     }
+
+    // Collection: app_config (public read for developer_engine policy/AdMob; writes locked to Super Developer)
+    match /app_config/{configId} {
+      allow get: if isValidId(configId)
+        && (configId == 'developer_engine' || isSuperDeveloper());
+
+      allow list: if isSuperDeveloper();
+
+      allow create, update, delete: if isValidId(configId)
+        && isSuperDeveloper();
+    }
+
+    // Collection: test (startup connection health check only)
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+      allow list, write: if false;
+    }
+
   }
 }

@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Church, Member, AttendanceRecord } from '../../types';
 import { DigitalIdCard } from '../DigitalIdCard';
 import { ProfilePhotoCaptureModal } from '../common/ProfilePhotoCaptureModal';
-import { updateMember } from '../../utils/storage';
+import { updateMember, updateMemberProfilePhoto, unifyMemberProfile, isCustomMemberPhoto } from '../../utils/storage';
+import { firestoreFindMemberByCredential } from '../../services/firestoreService';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -37,6 +38,8 @@ import {
   ShieldAlert,
   HelpCircle,
   FileText,
+  Camera,
+  Trash2,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ChurchTermsModal } from '../common/ChurchTermsModal';
@@ -84,6 +87,33 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({
   const [isBioRegistering, setIsBioRegistering] = useState<boolean>(false);
   const [isTermsModalOpen, setIsTermsModalOpen] = useState<boolean>(false);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState<boolean>(false);
+  const [isRemovingPhoto, setIsRemovingPhoto] = useState<boolean>(false);
+  const resolvedMemberPhoto = member.avatarUrl || member.photoUrl || member.googlePhoto || '';
+
+  const handleQuickRemovePhoto = async () => {
+    setIsRemovingPhoto(true);
+    try {
+      const res = await updateMemberProfilePhoto(church.id, member, null);
+      onMemberUpdated(res.member);
+      toast.info(
+        isEs ? 'Foto Removida' : isFr ? 'Photo Retirée' : isEn ? 'Photo Removed' : 'Foto Retire',
+        isEs
+          ? 'Se ha restablecido el avatar por defecto.'
+          : isFr
+          ? 'L’avatar par défaut a été réinitialisé.'
+          : isEn
+          ? 'Default avatar has been restored.'
+          : 'Avatar pa defo a retabli.'
+      );
+    } catch (err: any) {
+      toast.error(
+        isEs ? 'Error' : isEn ? 'Error' : isFr ? 'Erreur' : 'Erè',
+        err?.message || (isEs ? 'No se pudo remover la foto.' : 'Pa ka retire foto a.')
+      );
+    } finally {
+      setIsRemovingPhoto(false);
+    }
+  };
 
   // Check if today is the member's birthday
   const isBirthdayToday = React.useMemo(() => {
@@ -185,23 +215,23 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({
       }
 
       if (gUser && gUser.email) {
+        // Also fetch remote member record if available so local + remote + Google fields are unified on the same pedestal
+        const remoteMember = await firestoreFindMemberByCredential(church.id, member.memberId).catch(
+          () => null
+        );
+        const unified = unifyMemberProfile(member, remoteMember, gUser);
+        updateMember(church.id, unified);
         linkMemberGoogleAccount(church.id, member.memberId, gUser);
-        const updated: Member = {
-          ...member,
-          googleEmail: gUser.email.toLowerCase(),
-          googleUid: gUser.uid,
-          googlePhoto: gUser.photoURL || member.avatarUrl,
-        };
-        onMemberUpdated(updated);
+        onMemberUpdated(unified);
         toast.success(
           isEs ? '¡Cuenta de Google Vinculada!' : isEn ? 'Google Account Linked!' : isFr ? 'Compte Google Lié !' : 'Kont Google Lye!',
           isEs
-            ? `Cuenta "${gUser.email}" vinculada al ID ${member.memberId}. Ahora puede iniciar sesión con 1 clic.`
+            ? `Cuenta "${gUser.email}" vinculada al ID ${member.memberId}. Su foto y datos están 100% sincronizados.`
             : isEn
-            ? `Account "${gUser.email}" linked to ID ${member.memberId}. You can now sign in with 1 click.`
+            ? `Account "${gUser.email}" linked to ID ${member.memberId}. Your photo and profile data are 100% synchronized.`
             : isFr
-            ? `Compte "${gUser.email}" lié avec l’ID ${member.memberId}. Vous pouvez vous connecter en 1 clic.`
-            : `Kont "${gUser.email}" lye avèk ID ${member.memberId}. Ou ka konekte ak 1 klik kounye a.`
+            ? `Compte "${gUser.email}" lié avec l’ID ${member.memberId}. Votre photo et vos données sont 100% synchronisées.`
+            : `Kont "${gUser.email}" lye avèk ID ${member.memberId}. Foto pwofil ou ak tout done ou yo senkronize sou menm nivo.`
         );
       }
     } catch (err: any) {
@@ -216,11 +246,16 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({
 
   const handleUnlinkGoogle = () => {
     unlinkMemberGoogleAccount(church.id, member.memberId);
+    const keepCustomPhoto = isCustomMemberPhoto(member.avatarUrl || member.photoUrl)
+      ? member.avatarUrl || member.photoUrl
+      : undefined;
     const updated: Member = {
       ...member,
       googleEmail: undefined,
       googleUid: undefined,
-      googlePhoto: undefined,
+      googlePhoto: keepCustomPhoto,
+      avatarUrl: keepCustomPhoto,
+      photoUrl: keepCustomPhoto,
     };
     onMemberUpdated(updated);
     toast.info(
@@ -439,8 +474,101 @@ export const MemberProfile: React.FC<MemberProfileProps> = ({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT: DIGITAL CARD PREVIEW & GOOGLE ACCOUNT */}
+        {/* LEFT: PROFILE PHOTO ACTION BAR, DIGITAL CARD PREVIEW & SECURITY CARDS */}
         <div className="lg:col-span-5 space-y-4">
+          {/* DEDICATED PROFILE PHOTO MANAGEMENT CARD */}
+          <div
+            id="member-profile-photo-card"
+            className="bg-[#1E293B] p-4 rounded-2xl border border-slate-700/80 space-y-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                <Camera className="w-4 h-4 text-amber-400" />
+                <span>
+                  {isEs
+                    ? 'Foto de Perfil del Miembro'
+                    : isEn
+                    ? 'Member Profile Photo'
+                    : isFr
+                    ? 'Photo de Profil du Membre'
+                    : 'Foto Pwofil Manm nan'}
+                </span>
+              </h4>
+              {resolvedMemberPhoto && (
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold">
+                  {isEs ? 'Activa' : isEn ? 'Active' : isFr ? 'Active' : 'Aktif'}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-3 p-3 bg-slate-900 rounded-xl border border-slate-700/80">
+              {resolvedMemberPhoto ? (
+                <img
+                  src={resolvedMemberPhoto}
+                  alt={member.fullName}
+                  referrerPolicy="no-referrer"
+                  className="w-14 h-14 rounded-2xl object-cover border-2 border-amber-400/70 shadow-md shrink-0"
+                />
+              ) : (
+                <div className="w-14 h-14 rounded-2xl bg-slate-800 border-2 border-slate-700 flex items-center justify-center text-slate-400 font-black text-lg shrink-0">
+                  {member.fullName?.[0]?.toUpperCase() || <User className="w-6 h-6" />}
+                </div>
+              )}
+              <div className="min-w-0 flex-1 space-y-2">
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  {isEs
+                    ? 'Cambia o sube tu foto oficial cuando quieras (se sincroniza en tu carnet y verificación).'
+                    : isEn
+                    ? 'Change or upload your official photo anytime (syncs across ID card and verification).'
+                    : isFr
+                    ? 'Modifiez ou téléversez votre photo officielle à tout moment (synchronisée partout).'
+                    : 'Chanje oswa telechaje foto pwofil ou nenpòt lè (li senkronize ak kat ou ak verifikasyon an).'}
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    id="btn-member-profile-change-photo"
+                    onClick={() => setIsPhotoModalOpen(true)}
+                    className="px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 cursor-pointer shadow transition-colors"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>
+                      {resolvedMemberPhoto
+                        ? isEs
+                          ? 'Cambiar Foto'
+                          : isEn
+                          ? 'Change Photo'
+                          : isFr
+                          ? 'Changer la Photo'
+                          : 'Chanje Foto'
+                        : isEs
+                        ? 'Subir Foto'
+                        : isEn
+                        ? 'Upload Photo'
+                        : isFr
+                        ? 'Ajouter Photo'
+                        : 'Mete Foto'}
+                    </span>
+                  </button>
+                  {resolvedMemberPhoto && (
+                    <button
+                      type="button"
+                      id="btn-member-profile-remove-photo"
+                      disabled={isRemovingPhoto}
+                      onClick={handleQuickRemovePhoto}
+                      className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-bold text-xs flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>
+                        {isEs ? 'Quitar' : isEn ? 'Remove' : isFr ? 'Supprimer' : 'Retire'}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div className="bg-[#1E293B] p-4 rounded-2xl border border-slate-700/80">
             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-3 flex items-center gap-1.5">
               <QrCode className="w-4 h-4 text-amber-400" />

@@ -141,8 +141,8 @@ function applySharpeningFilter(imageData: ImageData): ImageData {
   // [  0, -1,  0 ]
   // [ -1,  5, -1 ]
   // [  0, -1,  0 ]
-  for (let y = 1; y < height - 1; y += 2) {
-    for (let x = 1; x < width - 1; x += 2) {
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
       const idx = (y * width + x) * 4;
       const topIdx = ((y - 1) * width + x) * 4;
       const btmIdx = ((y + 1) * width + x) * 4;
@@ -195,6 +195,36 @@ function applyAdaptiveBinarization(imageData: ImageData): ImageData {
   return output;
 }
 
+let jsQrScratchCanvas: HTMLCanvasElement | null = null;
+
+function extractOptimizedJsQrImageData(
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  maxDim: number = 900
+): { imageData: ImageData; scale: number } {
+  const width = canvas.width;
+  const height = canvas.height;
+  if (width <= maxDim && height <= maxDim) {
+    return { imageData: ctx.getImageData(0, 0, width, height), scale: 1 };
+  }
+
+  const ratio = Math.min(maxDim / width, maxDim / height);
+  const targetW = Math.max(160, Math.round(width * ratio));
+  const targetH = Math.max(160, Math.round(height * ratio));
+
+  if (!jsQrScratchCanvas) {
+    jsQrScratchCanvas = document.createElement('canvas');
+  }
+  jsQrScratchCanvas.width = targetW;
+  jsQrScratchCanvas.height = targetH;
+  const sCtx = jsQrScratchCanvas.getContext('2d', { willReadFrequently: true });
+  if (!sCtx) {
+    return { imageData: ctx.getImageData(0, 0, width, height), scale: 1 };
+  }
+  sCtx.drawImage(canvas, 0, 0, width, height, 0, 0, targetW, targetH);
+  return { imageData: sCtx.getImageData(0, 0, targetW, targetH), scale: ratio };
+}
+
 /**
  * Multi-Stage Frame Decoding Pipeline.
  * Orchestrates native BarcodeDetector and multi-pass jsQR.
@@ -239,8 +269,8 @@ export async function decodeFrameMultiPass(
     }
   }
 
-  // Extract raw image data from canvas
-  const rawImageData = ctx.getImageData(0, 0, width, height);
+  // Extract optimized image data from canvas for fast high-precision jsQR passes
+  const { imageData: rawImageData } = extractOptimizedJsQrImageData(canvas, ctx, 900);
 
   // ----------------------------------------------------
   // PASS 2: Enhanced Direct jsQR (attemptBoth)
@@ -375,33 +405,31 @@ export async function decodeImageFile(file: File): Promise<ScanDetectionResult |
       const img = new Image();
       img.onload = async () => {
         const offscreenCanvas = document.createElement('canvas');
-        // Cap max size to 1600px for speed while retaining crisp QR resolution
-        const maxDim = 1600;
-        let w = img.naturalWidth || img.width;
-        let h = img.naturalHeight || img.height;
+        // Try decoding across multiple scales & filter passes (full-res up to 1600px, then downscaled ~720px for noisy photos)
+        const targetDims = [1600, 720];
+        for (const dim of targetDims) {
+          let w = img.naturalWidth || img.width;
+          let h = img.naturalHeight || img.height;
 
-        if (w > maxDim || h > maxDim) {
-          const ratio = Math.min(maxDim / w, maxDim / h);
-          w = Math.round(w * ratio);
-          h = Math.round(h * ratio);
-        }
+          if (w > dim || h > dim) {
+            const ratio = Math.min(dim / w, dim / h);
+            w = Math.max(120, Math.round(w * ratio));
+            h = Math.max(120, Math.round(h * ratio));
+          }
 
-        offscreenCanvas.width = w;
-        offscreenCanvas.height = h;
-        const ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) {
-          resolve(null);
-          return;
-        }
+          offscreenCanvas.width = w;
+          offscreenCanvas.height = h;
+          const ctx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) continue;
 
-        ctx.drawImage(img, 0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
 
-        // Try decoding with multi-pass engine
-        for (let pass = 0; pass < 4; pass++) {
-          const res = await decodeFrameMultiPass(offscreenCanvas, offscreenCanvas, pass);
-          if (res) {
-            resolve(res);
-            return;
+          for (let pass = 0; pass < 3; pass++) {
+            const res = await decodeFrameMultiPass(offscreenCanvas, offscreenCanvas, pass);
+            if (res) {
+              resolve(res);
+              return;
+            }
           }
         }
 

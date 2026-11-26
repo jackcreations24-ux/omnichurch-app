@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ResponsiveContainer,
   PieChart,
@@ -14,6 +14,11 @@ import {
   Calendar,
 } from 'lucide-react';
 import { Church, Member, AttendanceRecord, ServiceSession, Language } from '../../types';
+import {
+  getServiceEndTimestampMs,
+  isServiceEnded,
+  isServiceWithin24hReportWindow,
+} from '../../utils/storage';
 
 interface AdminAttendanceRatioPieChartProps {
   church: Church;
@@ -34,27 +39,57 @@ export const AdminAttendanceRatioPieChart: React.FC<AdminAttendanceRatioPieChart
   const isFr = language === 'fr';
   const isEn = language === 'en';
 
-  // 1. Identify past services (services held on or before today, or having attendance records)
-  const todayStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  // Auto-refresh clock every 60s so the report automatically resets when a service passes 24h after ending
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
 
-  const pastServices = useMemo(() => {
+  // 1. Only include services within the 24h report window that were actually opened or recorded attendance
+  const recentReportServices = useMemo(() => {
     return services
       .filter((s) => {
         if (s.churchId && s.churchId !== church.id) return false;
         const hasRecords = attendanceRecords.some(
-          (r) => r.serviceId === s.id || (r.serviceDate === s.date && r.churchId === church.id)
+          (r) =>
+            (!r.churchId || r.churchId === church.id) &&
+            r.serviceId === s.id
         );
-        return s.date <= todayStr || hasRecords;
+        const wasConducted =
+          Boolean(s.isOpenForAttendance) ||
+          Boolean(s.wasOpenedForAttendance) ||
+          hasRecords;
+        if (!wasConducted) return false;
+        return isServiceWithin24hReportWindow(s, nowMs);
       })
       .sort((a, b) => {
-        const dateA = a.date + (a.startTime || '00:00');
-        const dateB = b.date + (b.startTime || '00:00');
+        const aOpen = Boolean(a.isOpenForAttendance) && !isServiceEnded(a);
+        const bOpen = Boolean(b.isOpenForAttendance) && !isServiceEnded(b);
+        if (aOpen !== bOpen) return aOpen ? -1 : 1;
+
+        const aEnd = getServiceEndTimestampMs(a) ?? 0;
+        const bEnd = getServiceEndTimestampMs(b) ?? 0;
+        if (aEnd !== bEnd) return bEnd - aEnd;
+
+        const dateA = (a.date || '') + (a.startTime || '00:00');
+        const dateB = (b.date || '') + (b.startTime || '00:00');
         return dateB.localeCompare(dateA);
       });
-  }, [services, church.id, todayStr, attendanceRecords]);
+  }, [services, church.id, attendanceRecords, nowMs]);
 
-  // Selected service: 'all' for cumulative, or specific service id
-  const [selectedServiceId, setSelectedServiceId] = useState<string>('all');
+  // Single selected service ID (never cumulative across multiple services)
+  const [selectedServiceId, setSelectedServiceId] = useState<string>('');
+
+  const targetService = useMemo(() => {
+    if (recentReportServices.length === 0) return null;
+    return (
+      recentReportServices.find((s) => s.id === selectedServiceId) ||
+      recentReportServices[0]
+    );
+  }, [recentReportServices, selectedServiceId]);
 
   // Active members in the church
   const activeMembers = useMemo(() => {
@@ -64,130 +99,46 @@ export const AdminAttendanceRatioPieChart: React.FC<AdminAttendanceRatioPieChart
     });
   }, [members, church.id]);
 
-  const totalMembersCount = activeMembers.length || members.length || 1;
+  const totalMembersCount = activeMembers.length || members.length;
 
-  // 2. Compute attendance ratio (On-time Present, Late, Absent)
+  // 2. Single-service attendance & absence calculation:
+  //    - Resets to 0 automatically 24h after a service finishes.
+  //    - Absences are counted ONLY after the service has FINISHED and members verified attendance (QR/check-in).
   const attendanceBreakdown = useMemo(() => {
-    if (selectedServiceId !== 'all') {
-      // Single specific service calculation
-      const currentService = pastServices.find((s) => s.id === selectedServiceId);
-      const serviceDate = currentService?.date;
-
-      const recordsForService = attendanceRecords.filter((r) => {
-        if (r.churchId && r.churchId !== church.id) return false;
-        return r.serviceId === selectedServiceId || (serviceDate && r.serviceDate === serviceDate);
-      });
-
-      // Deduplicate by member ID
-      const presentMap = new Map<string, AttendanceRecord>();
-      recordsForService.forEach((r) => {
-        const key = r.memberDbId || r.memberId;
-        if (key && !presentMap.has(key)) {
-          presentMap.set(key, r);
-        }
-      });
-
-      let onTime = 0;
-      let late = 0;
-
-      presentMap.forEach((rec) => {
-        if (rec.attendanceStatus === 'late' || (rec.lateMinutes && rec.lateMinutes > 0)) {
-          late++;
-        } else {
-          onTime++;
-        }
-      });
-
-      const totalPresent = onTime + late;
-      const absent = Math.max(0, totalMembersCount - totalPresent);
-      const grandTotal = onTime + late + absent || 1;
-
+    if (!targetService) {
       return {
-        onTime,
-        late,
-        absent,
-        totalPresent,
-        onTimeRate: Math.round((onTime / grandTotal) * 100),
-        lateRate: Math.round((late / grandTotal) * 100),
-        absentRate: Math.max(0, 100 - Math.round((onTime / grandTotal) * 100) - Math.round((late / grandTotal) * 100)),
-        presentRate: Math.round((totalPresent / grandTotal) * 100),
-        evaluatedServicesCount: 1,
-        label: currentService?.title || (isEs ? 'Servicio Seleccionado' : isFr ? 'Service Sélectionné' : isEn ? 'Selected Service' : 'Sèvis Chwazi a'),
-      };
-    }
-
-    // Cumulative calculation across past services
-    if (pastServices.length > 0) {
-      let cumulativeOnTime = 0;
-      let cumulativeLate = 0;
-      let cumulativeAbsent = 0;
-
-      pastServices.forEach((svc) => {
-        const records = attendanceRecords.filter((r) => {
-          if (r.churchId && r.churchId !== church.id) return false;
-          return r.serviceId === svc.id || (r.serviceDate === svc.date && (!r.serviceId || r.serviceId === svc.id));
-        });
-
-        const presentMap = new Map<string, AttendanceRecord>();
-        records.forEach((r) => {
-          const key = r.memberDbId || r.memberId;
-          if (key && !presentMap.has(key)) {
-            presentMap.set(key, r);
-          }
-        });
-
-        let svcOnTime = 0;
-        let svcLate = 0;
-
-        presentMap.forEach((rec) => {
-          if (rec.attendanceStatus === 'late' || (rec.lateMinutes && rec.lateMinutes > 0)) {
-            svcLate++;
-          } else {
-            svcOnTime++;
-          }
-        });
-
-        const svcPresent = svcOnTime + svcLate;
-        const svcAbsent = Math.max(0, totalMembersCount - svcPresent);
-
-        cumulativeOnTime += svcOnTime;
-        cumulativeLate += svcLate;
-        cumulativeAbsent += svcAbsent;
-      });
-
-      const grandTotal = cumulativeOnTime + cumulativeLate + cumulativeAbsent || 1;
-      const totalPresent = cumulativeOnTime + cumulativeLate;
-
-      return {
-        onTime: cumulativeOnTime,
-        late: cumulativeLate,
-        absent: cumulativeAbsent,
-        totalPresent,
-        onTimeRate: Math.round((cumulativeOnTime / grandTotal) * 100),
-        lateRate: Math.round((cumulativeLate / grandTotal) * 100),
-        absentRate: Math.max(0, 100 - Math.round((cumulativeOnTime / grandTotal) * 100) - Math.round((cumulativeLate / grandTotal) * 100)),
-        presentRate: Math.round((totalPresent / grandTotal) * 100),
-        evaluatedServicesCount: pastServices.length,
+        onTime: 0,
+        late: 0,
+        absent: 0,
+        totalPresent: 0,
+        onTimeRate: 0,
+        lateRate: 0,
+        absentRate: 0,
+        presentRate: 0,
+        hasEvaluatedService: false,
+        hasCountedAbsences: false,
         label: isEs
-          ? `Todos los cultos pasados (${pastServices.length})`
+          ? 'Sin servicio activo (listo para el próximo)'
           : isFr
-          ? `Tous les cultes passés (${pastServices.length})`
+          ? 'Aucun culte actif (prêt pour le prochain)'
           : isEn
-          ? `All past services (${pastServices.length})`
-          : `Tout kilt ki pase yo (${pastServices.length})`,
+          ? 'No active service (ready for next service)'
+          : 'Pa gen sèvis (pare pou pwochen sèvis)',
       };
     }
 
-    // Fallback if no past services exist yet
+    const recordsForService = attendanceRecords.filter((r) => {
+      if (r.churchId && r.churchId !== church.id) return false;
+      return r.serviceId === targetService.id;
+    });
+
     const presentMap = new Map<string, AttendanceRecord>();
-    attendanceRecords
-      .filter((r) => !r.churchId || r.churchId === church.id)
-      .forEach((r) => {
-        const key = r.memberDbId || r.memberId;
-        if (key && !presentMap.has(key)) {
-          presentMap.set(key, r);
-        }
-      });
+    recordsForService.forEach((r) => {
+      const key = r.memberDbId || r.memberId;
+      if (key && !presentMap.has(key)) {
+        presentMap.set(key, r);
+      }
+    });
 
     let onTime = 0;
     let late = 0;
@@ -201,25 +152,50 @@ export const AdminAttendanceRatioPieChart: React.FC<AdminAttendanceRatioPieChart
     });
 
     const totalPresent = onTime + late;
-    const absent = Math.max(0, totalMembersCount - totalPresent);
-    const grandTotal = onTime + late + absent || 1;
+    const serviceFinished = isServiceEnded(targetService);
+    const hasCountedAbsences = serviceFinished && totalPresent > 0 && totalMembersCount > 0;
+    const absent = hasCountedAbsences ? Math.max(0, totalMembersCount - totalPresent) : 0;
+
+    const denominator = hasCountedAbsences
+      ? onTime + late + absent
+      : totalMembersCount;
+
+    const onTimeRate = denominator > 0 ? Math.round((onTime / denominator) * 100) : 0;
+    const lateRate = denominator > 0 ? Math.round((late / denominator) * 100) : 0;
+    const absentRate = hasCountedAbsences
+      ? Math.max(0, 100 - onTimeRate - lateRate)
+      : 0;
+    const presentRate =
+      totalMembersCount > 0 ? Math.round((totalPresent / totalMembersCount) * 100) : 0;
 
     return {
       onTime,
       late,
       absent,
       totalPresent,
-      onTimeRate: Math.round((onTime / grandTotal) * 100),
-      lateRate: Math.round((late / grandTotal) * 100),
-      absentRate: Math.max(0, 100 - Math.round((onTime / grandTotal) * 100) - Math.round((late / grandTotal) * 100)),
-      presentRate: Math.round((totalPresent / grandTotal) * 100),
-      evaluatedServicesCount: 1,
-      label: isEs ? 'Registros Generales' : isFr ? 'Données Générales' : isEn ? 'General Records' : 'Tout Done yo',
+      onTimeRate,
+      lateRate,
+      absentRate,
+      presentRate,
+      hasEvaluatedService: true,
+      hasCountedAbsences,
+      label: `${targetService.date} • ${targetService.title}`,
     };
-  }, [selectedServiceId, pastServices, attendanceRecords, church.id, totalMembersCount, isEs, isFr, isEn]);
+  }, [targetService, attendanceRecords, church.id, totalMembersCount, isEs, isFr, isEn]);
 
   // 3. Format data for Recharts Pie
   const pieData = useMemo(() => {
+    if (!attendanceBreakdown.hasEvaluatedService || attendanceBreakdown.totalPresent + attendanceBreakdown.absent === 0) {
+      return [
+        {
+          id: 'idle',
+          name: isEs ? 'Sin servicio activo' : isFr ? 'Aucun culte actif' : isEn ? 'No active service' : 'Pa gen sèvis aktif',
+          value: 1,
+          rate: 0,
+          color: '#334155',
+        },
+      ];
+    }
     return [
       {
         id: 'on_time',
@@ -280,7 +256,7 @@ export const AdminAttendanceRatioPieChart: React.FC<AdminAttendanceRatioPieChart
 
   return (
     <div className="bg-[#1E293B] rounded-3xl border border-slate-700/80 p-5 sm:p-6 shadow-xl flex flex-col justify-between space-y-4 h-full">
-      {/* HEADER WITH TITLE & SERVICE SELECTOR */}
+      {/* HEADER WITH TITLE & SINGLE-SERVICE SELECTOR */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-700/80 pb-4">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-9 h-9 rounded-xl bg-amber-400/20 text-amber-300 border border-amber-400/30 flex items-center justify-center shrink-0">
@@ -310,28 +286,31 @@ export const AdminAttendanceRatioPieChart: React.FC<AdminAttendanceRatioPieChart
           </div>
         </div>
 
-        {/* SERVICE SELECTOR DROPDOWN */}
+        {/* SINGLE-SERVICE 24H SELECTOR DROPDOWN */}
         <div className="w-full sm:w-auto shrink-0">
           <select
             id="select-attendance-pie-service"
-            value={selectedServiceId}
+            value={targetService?.id || ''}
             onChange={(e) => setSelectedServiceId(e.target.value)}
             className="w-full sm:w-auto px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-slate-200 text-xs font-bold focus:outline-none focus:border-amber-400 max-w-full sm:max-w-[240px] truncate cursor-pointer transition-colors"
           >
-            <option value="all">
-              {isEs
-                ? '★ Todos los cultos pasados'
-                : isFr
-                ? '★ Tous les cultes passés'
-                : isEn
-                ? '★ All past services'
-                : '★ Tout kilt ki pase yo'}
-            </option>
-            {pastServices.map((svc) => (
-              <option key={svc.id} value={svc.id}>
-                {svc.date} • {svc.title}
+            {recentReportServices.length === 0 ? (
+              <option value="">
+                {isEs
+                  ? 'Sin servicio activo (Reset 24h)'
+                  : isFr
+                  ? 'Aucun culte actif (Reset 24h)'
+                  : isEn
+                  ? 'No active service (24h Reset)'
+                  : 'Pa gen sèvis (Resèt 24h)'}
               </option>
-            ))}
+            ) : (
+              recentReportServices.map((svc) => (
+                <option key={svc.id} value={svc.id}>
+                  {svc.date} • {svc.title}
+                </option>
+              ))
+            )}
           </select>
         </div>
       </div>
@@ -446,7 +425,11 @@ export const AdminAttendanceRatioPieChart: React.FC<AdminAttendanceRatioPieChart
                 {attendanceBreakdown.absent}
               </div>
               <span className="text-[10px] font-bold text-slate-400 font-mono mt-0.5">
-                {attendanceBreakdown.absentRate}%
+                {attendanceBreakdown.hasCountedAbsences
+                  ? `${attendanceBreakdown.absentRate}%`
+                  : attendanceBreakdown.hasEvaluatedService
+                  ? '0%'
+                  : (isEs ? 'Sin servicio' : isFr ? 'Aucun culte' : isEn ? 'No service' : 'Pa gen sèvis')}
               </span>
             </div>
           </div>

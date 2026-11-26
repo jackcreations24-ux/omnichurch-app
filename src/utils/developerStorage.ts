@@ -2,11 +2,15 @@ import {
   DeveloperSettings,
   ChurchLicense,
   AdMobConfig,
+  RemoteCommentModerationConfig,
+  RemoteMemberVerificationConfig,
   SponsorItem,
   LicenseTier,
   LicenseStatus,
   AnnouncementComment,
   DeveloperDonationConfig,
+  LocalizedDonationCopy,
+  Language,
   DeveloperAuditLog,
   DeveloperBroadcast,
   DeveloperAppUpdateConfig,
@@ -18,8 +22,36 @@ import {
   AbsenceRecord,
 } from '../types';
 import { APP_BASE_VERSION } from '../version';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { doc, getDoc, setDoc, onSnapshot, Unsubscribe } from 'firebase/firestore';
+
+import {
+  hashAdminPasscodeSync,
+  isPasscodeHashed,
+  isSuperDeveloperEmail,
+  SUPER_DEVELOPER_EMAIL_HASH,
+} from './cryptoSecurity';
+import { DEFAULT_LEGAL_CONFIG, sanitizeLegalConfig } from './legalRoutes';
+import { DEFAULT_LANGUAGE_CONFIG, sanitizeLanguageConfig } from './languageDetection';
+
+export { isSuperDeveloperEmail, SUPER_DEVELOPER_EMAIL_HASH };
+export const SUPER_DEVELOPER_LABEL = 'Kont Administrasyon Jeneral Otorize';
+export const SUPER_DEVELOPER_EMAIL = SUPER_DEVELOPER_LABEL;
+
+export function getSuperDeveloperCloudAuthStatus(): {
+  isAuthorized: boolean;
+  email: string | null;
+  emailVerified: boolean;
+} {
+  const user = auth.currentUser;
+  const email = user?.email ? user.email.toLowerCase() : null;
+  const emailVerified = Boolean(user?.emailVerified);
+  return {
+    isAuthorized: Boolean(user && isSuperDeveloperEmail(email) && emailVerified),
+    email: user?.email || null,
+    emailVerified,
+  };
+}
 import {
   getAllStoredComments,
   deleteAnnouncementComment,
@@ -39,7 +71,6 @@ import {
   isAnnouncementMarkedDeleted,
   isAttendanceMarkedDeleted,
 } from './storage';
-import { hashAdminPasscodeSync, isPasscodeHashed } from './cryptoSecurity';
 
 const STORAGE_KEY = 'omnichurch_developer_settings_v1';
 const FIRESTORE_DEV_DOC = 'app_config';
@@ -61,38 +92,105 @@ export const DEFAULT_ADMOB_CONFIG: AdMobConfig = {
   enableInterstitialOnScan: true,
   interstitialScanFrequency: 4,
   adFreeForLicensedChurches: true,
+  mobileEnabled: true,
+  mobileForceTestIds: true,
+  mobileShowBannerHome: true,
+  mobileShowBannerAnnouncements: true,
+  mobileShowBannerServices: false,
+  mobileEnableInterstitialAfterScanClose: true,
+  mobileInterstitialCooldownSeconds: 180,
+  mobileRewardedEnabled: false,
+  mobileNativeFeedEnabled: true,
+};
+
+export const DEFAULT_DONATE_BUTTON_IMAGE =
+  '/assets/aistudio/cfacb6c8-980a-4a5b-abc8-b5cbb0440b26_ee08b207.png';
+
+export const DEFAULT_LOCALIZED_DONATION_COPY: Record<Language, LocalizedDonationCopy> = {
+  ht: {
+    screenTitle: 'Soutni Misyon Nimerik Legliz la',
+    screenSubtitle:
+      'Chak kontribisyon volontè ede kenbe sèvè yo aktif, devlope nouvo zouti modèn gratis pou legliz yo, epi akselere avansman travay Bondye a.',
+    developerRole: 'Achitèk Lojisyèl Prensipal & Teknològ Ministè',
+    developerBio:
+      'Objektif mwen se ede legliz la grandi sosyalman, espirityèlman ak nimerikman atravè zouti teknolojik modèn, efikas e transparan ki fasilite kominikasyon ak jesyon manm yo.',
+    customNote:
+      'Mèsi pou sipò w ak kontribisyon w nan avansman misyon nimerik legliz la!',
+  },
+  fr: {
+    screenTitle: 'Soutenez la Mission Numérique de l’Église',
+    screenSubtitle:
+      'Chaque contribution volontaire aide à maintenir les serveurs actifs, développer de nouveaux outils gratuits pour les églises et accélérer l’œuvre.',
+    developerRole: 'Architecte Logiciel Principal & Technologue Ministériel',
+    developerBio:
+      'Mon objectif principal est d’aider l’église à grandir socialement, spirituellement et technologiquement grâce à des outils numériques modernes, efficaces et transparents.',
+    customNote:
+      'Merci pour votre soutien et votre contribution à l’avancement de la mission numérique de l’église !',
+  },
+  en: {
+    screenTitle: 'Support the Church Digital Mission',
+    screenSubtitle:
+      'Every voluntary contribution helps keep servers online, build free modern tools for churches, and accelerate the advancement of the ministry.',
+    developerRole: 'Lead Software Architect & Ministry Technologist',
+    developerBio:
+      'My core objective is to empower the church to grow socially, spiritually, and technologically through modern, accessible, and transparent digital tools.',
+    customNote:
+      'Thank you for your support and contribution to advancing the digital mission of the church!',
+  },
+  es: {
+    screenTitle: 'Apoya la Misión Digital de la Iglesia',
+    screenSubtitle:
+      'Cada aporte voluntario ayuda a mantener los servidores activos, crear herramientas gratuitas y modernas para las iglesias e impulsar la obra.',
+    developerRole: 'Arquitecto de Software Principal y Tecnólogo Ministerial',
+    developerBio:
+      'Mi objetivo principal es ayudar a la iglesia a crecer social, espiritual y tecnológicamente mediante herramientas digitales modernas, accesibles y transparentes.',
+    customNote:
+      '¡Gracias por tu apoyo y contribución al avance de la misión digital de la iglesia!',
+  },
 };
 
 export const DEFAULT_DONATION_CONFIG: DeveloperDonationConfig = {
   enabled: true,
   developerName: 'Jackson Charles',
-  developerRole: 'Lead Software Architect & Ministry Technologist',
-  developerBio: 'Objektif mwen se ede legliz la grandi sosyalman, espirityèlman ak nimerikman atravè zouti teknolojik modèn, efikas e transparan ki fasilite kominikasyon ak jesyon manm yo.',
+  developerRole: DEFAULT_LOCALIZED_DONATION_COPY.ht.developerRole,
+  developerBio: DEFAULT_LOCALIZED_DONATION_COPY.ht.developerBio,
   developerEmail: '',
   developerPhone: '',
   
-  paypalEnabled: true,
+  paypalEnabled: false,
   paypalEmail: '',
   paypalMeUrl: '',
   
-  binanceEnabled: true,
+  binanceEnabled: false,
   binancePayId: '',
   binanceUsdtAddress: '',
   binanceNetwork: '',
   
-  wiseEnabled: true,
+  wiseEnabled: false,
   wiseEmail: '',
   wiseTag: '',
   wiseIban: '',
   
-  moncashEnabled: true,
+  moncashEnabled: false,
   moncashNumber: '',
   moncashName: '',
 
   zelleEnabled: false,
   zelleInfo: '',
 
-  customNote: 'Mèsi pou sipò w ak kontribisyon w nan avansman misyon nimerik legliz la!',
+  customNote: DEFAULT_LOCALIZED_DONATION_COPY.ht.customNote,
+  screenTitle: DEFAULT_LOCALIZED_DONATION_COPY.ht.screenTitle,
+  screenSubtitle: DEFAULT_LOCALIZED_DONATION_COPY.ht.screenSubtitle,
+  localizedCopy: {
+    ht: { ...DEFAULT_LOCALIZED_DONATION_COPY.ht },
+    fr: { ...DEFAULT_LOCALIZED_DONATION_COPY.fr },
+    en: { ...DEFAULT_LOCALIZED_DONATION_COPY.en },
+    es: { ...DEFAULT_LOCALIZED_DONATION_COPY.es },
+  },
+  buttonImageUrl: DEFAULT_DONATE_BUTTON_IMAGE,
+  enableShakeAnimation: true,
+  shakeIntervalSeconds: 6,
+  userCustomizedChannels: false,
 };
 
 export const DEFAULT_DEVELOPER_APP_UPDATE_CONFIG: DeveloperAppUpdateConfig = {
@@ -103,32 +201,32 @@ export const DEFAULT_DEVELOPER_APP_UPDATE_CONFIG: DeveloperAppUpdateConfig = {
   downloadUrl: 'https://omnichurch.download',
   channel: 'stable',
   isMandatory: false,
-  releaseDate: '2026-09-12',
+  releaseDate: '2026-11-13',
   targetPlatform: 'all',
   highlights: {
     ht: [
-      '5 nouvo fòma vizyèl pou domèn ak depatman manm yo sou badj yo (Pil Klasik, Riban Wayal, Kòd Modèn, Boukliye Sakre, Liksye Doré)',
-      'Sistèm prezèvasyon sesyon otomatik pou w pa janm pèdi koneksyon w lè w ap mete app la ajou',
-      'Akselerasyon eskanè kòd QR ak rechèch manm an tan reyèl',
-      'Amelyorasyon estabilite ak pèfòmans jeneral aplikasyon an',
+      'Rapò Absans 24h strik: sèlman dènye sèvis ki fini konte manm ki te verifye prezans ak QR epi reset chak 24 èdtan otomatikman',
+      'Wòl Resepsyon: aksè pou eskane prezans QR nan sèvis ki an kou a san dwa modifye oswa efase okenn manm ni chanje wòl',
+      'Pèfòmans & Sekirite Renfòse: chajman legliz sou demann, senkronizasyon selon wòl, ak izolasyon strik kont administrasyon sistèm nan',
+      'Estabilite & Entèfas Pwòp: tit pwofesyonèl e natirèl nan tout sistèm nan pou yon eksperyans klè e san erè',
     ],
     fr: [
-      '5 nouveaux formats visuels pour afficher les domaines et départements sur les badges membres',
-      'Système de préservation automatique de session : aucune perte de connexion lors de la mise à jour',
-      'Accélération du lecteur QR et recherche instantanée des membres',
-      'Amélioration globale de la fluidité et des performances',
+      'Rapport d’Absence 24h strict : seul le dernier culte terminé évalue les absences selon les présences QR et se réinitialise toutes les 24h',
+      'Rôle Réception : accès dédié au scan QR du culte en cours sans droit de modification ni suppression des membres ou rôles',
+      'Performance & Sécurité Renforcée : recherche à la demande, synchronisation par rôle et isolation stricte du compte d’administration générale',
+      'Stabilité & Interface Épurée : titres naturels et professionnels sur l’ensemble de la plateforme',
     ],
     en: [
-      '5 brand-new visual formats for member ministry domains on identification badges',
-      'Automatic session preservation engine: zero lost logins or sessions when updating',
-      'Accelerated QR scanner response and real-time attendance verification',
-      'General system stability and high-definition rendering enhancements',
+      'Strict 24h Absence Engine: only the latest completed service counts QR-verified attendance and resets every 24h automatically',
+      'Reception Role: dedicated active-service QR check-in access with strict read-only protection on member profiles and roles',
+      'Enhanced Performance & Security: bounded church loading with on-demand search, role-based sync, and strict system admin account isolation',
+      'Stability & Executive UI: natural, professional titles and messaging across the entire platform',
     ],
     es: [
-      '5 nuevos formatos visuales para dominios y departamentos en los carnets de miembros',
-      'Preservación automática de sesión: no perderá su inicio de sesión al actualizar la aplicación',
-      'Mayor velocidad en el escáner de códigos QR y búsqueda instantánea',
-      'Mejoras en el rendimiento general y estabilidad del sistema',
+      'Reporte de Ausencias 24h estricto: solo el último culto finalizado evalúa asistencias QR y se reinicia cada 24h automáticamente',
+      'Rol Recepción: acceso dedicado al escáner QR del culto activo sin permisos para modificar o eliminar miembros ni roles',
+      'Rendimiento y Seguridad Reforzada: carga rápida de iglesias bajo demanda, sincronización por rol y aislamiento del panel general',
+      'Estabilidad e Interfaz Ejecutiva: títulos claros y profesionales en toda la plataforma',
     ],
   },
   importantNotice: {
@@ -139,6 +237,276 @@ export const DEFAULT_DEVELOPER_APP_UPDATE_CONFIG: DeveloperAppUpdateConfig = {
   },
 };
 
+export const DEFAULT_COMMENT_MODERATION_CONFIG: RemoteCommentModerationConfig = {
+  enabled: true,
+  allowMemberCommentsGlobal: true,
+  allowServiceComments: true,
+  allowAnnouncementComments: true,
+  autoBlockProfanity: true,
+  blockExternalLinks: true,
+  maxCommentLength: 500,
+  slowModeCooldownSeconds: 15,
+  blockedKeywords: [
+    'spam',
+    'scam',
+    'casino',
+    'betting',
+    'crypto giveaway',
+    'whatsapp.com',
+    't.me/',
+    'bit.ly',
+    'makak',
+    'bouzin',
+    'salòp',
+    'fuck',
+    'shit',
+    'bitch',
+    'merde',
+    'putain',
+    'connard',
+  ],
+  mutedMemberIds: [],
+  disabledChurchIds: [],
+};
+
+export function sanitizeCommentModerationConfig(
+  raw?: Partial<RemoteCommentModerationConfig> | null
+): RemoteCommentModerationConfig {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      ...DEFAULT_COMMENT_MODERATION_CONFIG,
+      blockedKeywords: [...DEFAULT_COMMENT_MODERATION_CONFIG.blockedKeywords],
+      mutedMemberIds: [],
+      disabledChurchIds: [],
+    };
+  }
+
+  const maxLenRaw = Number(raw.maxCommentLength ?? DEFAULT_COMMENT_MODERATION_CONFIG.maxCommentLength);
+  const maxCommentLength = Number.isFinite(maxLenRaw)
+    ? Math.min(1000, Math.max(50, Math.round(maxLenRaw)))
+    : 500;
+
+  const slowRaw = Number(
+    raw.slowModeCooldownSeconds ?? DEFAULT_COMMENT_MODERATION_CONFIG.slowModeCooldownSeconds
+  );
+  const slowModeCooldownSeconds = Number.isFinite(slowRaw)
+    ? Math.min(300, Math.max(0, Math.round(slowRaw)))
+    : 15;
+
+  const blockedKeywords = Array.isArray(raw.blockedKeywords)
+    ? Array.from(
+        new Set(
+          raw.blockedKeywords
+            .map((w) => String(w || '').trim().toLowerCase())
+            .filter(Boolean)
+        )
+      )
+    : [...DEFAULT_COMMENT_MODERATION_CONFIG.blockedKeywords];
+
+  const dedupePreserveFirst = (items: unknown[]): string[] => {
+    const seen = new Map<string, string>();
+    for (const item of items) {
+      const trimmed = String(item || '').trim();
+      if (!trimmed) continue;
+      const key = trimmed.toUpperCase();
+      if (!seen.has(key)) {
+        seen.set(key, trimmed);
+      }
+    }
+    return Array.from(seen.values());
+  };
+
+  const mutedMemberIds = Array.isArray(raw.mutedMemberIds)
+    ? dedupePreserveFirst(raw.mutedMemberIds)
+    : [];
+
+  const disabledChurchIds = Array.isArray(raw.disabledChurchIds)
+    ? dedupePreserveFirst(raw.disabledChurchIds)
+    : [];
+
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : true,
+    allowMemberCommentsGlobal:
+      typeof raw.allowMemberCommentsGlobal === 'boolean' ? raw.allowMemberCommentsGlobal : true,
+    allowServiceComments:
+      typeof raw.allowServiceComments === 'boolean' ? raw.allowServiceComments : true,
+    allowAnnouncementComments:
+      typeof raw.allowAnnouncementComments === 'boolean' ? raw.allowAnnouncementComments : true,
+    autoBlockProfanity:
+      typeof raw.autoBlockProfanity === 'boolean' ? raw.autoBlockProfanity : true,
+    blockExternalLinks:
+      typeof raw.blockExternalLinks === 'boolean' ? raw.blockExternalLinks : true,
+    maxCommentLength,
+    slowModeCooldownSeconds,
+    blockedKeywords,
+    mutedMemberIds,
+    disabledChurchIds,
+    lastModerationPushAt: raw.lastModerationPushAt || undefined,
+  };
+}
+
+export const OFFICIAL_PLATFORM_VERIFICATION_URL = 'https://verify.omnichurch.download';
+
+export function sanitizeVerificationBaseUrl(rawUrl?: string | null): string {
+  const trimmed = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return OFFICIAL_PLATFORM_VERIFICATION_URL;
+  const candidate =
+    trimmed.startsWith('https://') || trimmed.startsWith('http://')
+      ? trimmed
+      : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return candidate.replace(/\/+$/, '');
+    }
+  } catch {
+  }
+  return OFFICIAL_PLATFORM_VERIFICATION_URL;
+}
+
+export const DEFAULT_MEMBER_VERIFICATION_CONFIG: RemoteMemberVerificationConfig = {
+  enabled: true,
+  verificationBaseUrl: OFFICIAL_PLATFORM_VERIFICATION_URL,
+  enforceActiveStatusCheck: true,
+  showMemberPhoto: true,
+  showLegalDocuments: true,
+  maskLegalDocumentNumber: false,
+  showChurchContactInfo: true,
+  showChurchRncBadge: true,
+  allowPrintAndShare: true,
+  disabledChurchIds: [],
+  customAuthorityNotice: '',
+};
+
+export function sanitizeMemberVerificationConfig(
+  raw?: Partial<RemoteMemberVerificationConfig> | null
+): RemoteMemberVerificationConfig {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      ...DEFAULT_MEMBER_VERIFICATION_CONFIG,
+      disabledChurchIds: [],
+    };
+  }
+
+  const seenChurches = new Map<string, string>();
+  if (Array.isArray(raw.disabledChurchIds)) {
+    for (const cid of raw.disabledChurchIds) {
+      const trimmed = String(cid || '').trim();
+      if (!trimmed) continue;
+      const upper = trimmed.toUpperCase();
+      if (!seenChurches.has(upper)) {
+        seenChurches.set(upper, trimmed);
+      }
+    }
+  }
+
+  return {
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : true,
+    verificationBaseUrl: sanitizeVerificationBaseUrl(raw.verificationBaseUrl),
+    enforceActiveStatusCheck:
+      typeof raw.enforceActiveStatusCheck === 'boolean' ? raw.enforceActiveStatusCheck : true,
+    showMemberPhoto: typeof raw.showMemberPhoto === 'boolean' ? raw.showMemberPhoto : true,
+    showLegalDocuments:
+      typeof raw.showLegalDocuments === 'boolean' ? raw.showLegalDocuments : true,
+    maskLegalDocumentNumber:
+      typeof raw.maskLegalDocumentNumber === 'boolean' ? raw.maskLegalDocumentNumber : false,
+    showChurchContactInfo:
+      typeof raw.showChurchContactInfo === 'boolean' ? raw.showChurchContactInfo : true,
+    showChurchRncBadge:
+      typeof raw.showChurchRncBadge === 'boolean' ? raw.showChurchRncBadge : true,
+    allowPrintAndShare:
+      typeof raw.allowPrintAndShare === 'boolean' ? raw.allowPrintAndShare : true,
+    disabledChurchIds: Array.from(seenChurches.values()),
+    customAuthorityNotice:
+      typeof raw.customAuthorityNotice === 'string'
+        ? raw.customAuthorityNotice.trim().slice(0, 600)
+        : '',
+    lastVerificationPushAt: raw.lastVerificationPushAt || undefined,
+  };
+}
+
+/**
+ * Masks sensitive legal document digits (CIN/NIF/Passport) while keeping the last 4 characters visible.
+ */
+export function maskLegalDocumentNumberValue(rawNumber?: string | null): string {
+  const clean = (rawNumber || '').trim();
+  if (!clean) return '';
+  if (clean.length <= 4) return '••••';
+  const visibleTail = clean.slice(-4);
+  const maskedPrefix = clean
+    .slice(0, -4)
+    .replace(/[a-zA-Z0-9]/g, '•');
+  return `${maskedPrefix}${visibleTail}`;
+}
+
+/**
+ * Parses any Member Verification lookup string:
+ * - Full verification URL (`https://verify.omnichurch.download/?verify=1&church=CH001&member=CH001-1234`)
+ * - Canonical QR payload (`CHURCH:CH001|MEMBER:CH001-1234`)
+ * - Raw Member ID / Doc ID / Barcode token (`CH001-1234`)
+ */
+export function parseMemberVerificationLookupInput(
+  rawInput: string,
+  fallbackChurchId?: string
+): { memberCode: string; churchId?: string } {
+  const clean = (rawInput || '').trim();
+  const fallbackChurch = (fallbackChurchId || '').trim() || undefined;
+  if (!clean) return { memberCode: '', churchId: fallbackChurch };
+
+  if (clean.startsWith('http://') || clean.startsWith('https://') || clean.includes('verify=')) {
+    try {
+      const normalized = clean.startsWith('http') ? clean : `https://verify.omnichurch.download/${clean.replace(/^\/+/, '')}`;
+      const url = new URL(normalized);
+      const hashQueryIdx = url.hash.indexOf('?');
+      const hashParams = hashQueryIdx >= 0 ? new URLSearchParams(url.hash.slice(hashQueryIdx + 1)) : null;
+      const mParam = (
+        url.searchParams.get('member') ||
+        url.searchParams.get('verify_member') ||
+        url.searchParams.get('m') ||
+        hashParams?.get('member') ||
+        hashParams?.get('verify_member') ||
+        hashParams?.get('m') ||
+        ''
+      ).trim();
+      const cParam = (
+        url.searchParams.get('church') ||
+        url.searchParams.get('c') ||
+        hashParams?.get('church') ||
+        hashParams?.get('c') ||
+        ''
+      ).trim();
+      if (mParam) {
+        return {
+          memberCode: mParam,
+          churchId: cParam || fallbackChurch,
+        };
+      }
+    } catch {
+      const mMatch = clean.match(/[?&](?:member|verify_member|m)=([^&#]+)/i);
+      const cMatch = clean.match(/[?&](?:church|c)=([^&#]+)/i);
+      if (mMatch?.[1]) {
+        return {
+          memberCode: decodeURIComponent(mMatch[1]).trim(),
+          churchId: cMatch?.[1] ? decodeURIComponent(cMatch[1]).trim() : fallbackChurch,
+        };
+      }
+    }
+  }
+
+  if (clean.toUpperCase().includes('MEMBER:')) {
+    const churchPart = clean.match(/CHURCH:([^|;\s]+)/i)?.[1]?.trim();
+    const memberPart = clean.match(/MEMBER:([^|;\s]+)/i)?.[1]?.trim();
+    if (memberPart) {
+      return {
+        memberCode: memberPart,
+        churchId: churchPart || fallbackChurch,
+      };
+    }
+  }
+
+  return { memberCode: clean, churchId: fallbackChurch };
+}
+
 export const DEFAULT_DEVELOPER_SETTINGS: DeveloperSettings = {
   masterPin: '7799', // Initial default code until developer sets custom PIN
   maintenanceMode: false,
@@ -147,6 +515,10 @@ export const DEFAULT_DEVELOPER_SETTINGS: DeveloperSettings = {
   sponsorMarqueeSpeed: 26,
   enforceLicenseLockout: false,
   adMob: DEFAULT_ADMOB_CONFIG,
+  commentModeration: DEFAULT_COMMENT_MODERATION_CONFIG,
+  memberVerification: DEFAULT_MEMBER_VERIFICATION_CONFIG,
+  legalConfig: DEFAULT_LEGAL_CONFIG,
+  languageConfig: DEFAULT_LANGUAGE_CONFIG,
   sponsors: [],
   licenses: [],
   donations: DEFAULT_DONATION_CONFIG,
@@ -189,11 +561,109 @@ export function cleanDonationConfig(rawDonations?: Partial<DeveloperDonationConf
   if (merged.moncashNumber === '+509 3700-0000' || merged.moncashNumber === '+509 37 00 0000') merged.moncashNumber = '';
   if (merged.developerPhone === '+509 3700-0000') merged.developerPhone = '';
 
+  // Ensure all channels are unselected (false) by default unless the developer has explicitly customized
+  // them OR already entered real payment account details for that channel.
+  if (!merged.userCustomizedChannels) {
+    const hasPaypalData = Boolean(merged.paypalEmail?.trim() || merged.paypalMeUrl?.trim());
+    const hasBinanceData = Boolean(merged.binancePayId?.trim() || merged.binanceUsdtAddress?.trim());
+    const hasWiseData = Boolean(merged.wiseEmail?.trim() || merged.wiseTag?.trim() || merged.wiseIban?.trim());
+    const hasMoncashData = Boolean(merged.moncashNumber?.trim() || merged.moncashName?.trim());
+    const hasZelleData = Boolean(merged.zelleInfo?.trim());
+
+    merged.paypalEnabled = hasPaypalData ? Boolean(merged.paypalEnabled) : false;
+    merged.binanceEnabled = hasBinanceData ? Boolean(merged.binanceEnabled) : false;
+    merged.wiseEnabled = hasWiseData ? Boolean(merged.wiseEnabled) : false;
+    merged.moncashEnabled = hasMoncashData ? Boolean(merged.moncashEnabled) : false;
+    merged.zelleEnabled = hasZelleData ? Boolean(merged.zelleEnabled) : false;
+  }
+
+  merged.enableShakeAnimation = merged.enableShakeAnimation !== false;
+  const rawShakeInterval = Number(merged.shakeIntervalSeconds ?? DEFAULT_DONATION_CONFIG.shakeIntervalSeconds ?? 6);
+  merged.shakeIntervalSeconds = Number.isFinite(rawShakeInterval)
+    ? Math.min(30, Math.max(3, Math.round(rawShakeInterval)))
+    : 6;
+  merged.buttonImageUrl =
+    typeof merged.buttonImageUrl === 'string' && merged.buttonImageUrl.trim().length > 0
+      ? merged.buttonImageUrl.trim()
+      : DEFAULT_DONATE_BUTTON_IMAGE;
+
+  const rawLocalized = (rawDonations?.localizedCopy || {}) as Partial<
+    Record<Language, Partial<LocalizedDonationCopy>>
+  >;
+  const pickString = (candidate: unknown, fallback: string): string =>
+    typeof candidate === 'string' && candidate.trim().length > 0 ? candidate.trim() : fallback;
+
+  const legacyHtTitle = pickString(rawDonations?.screenTitle, DEFAULT_LOCALIZED_DONATION_COPY.ht.screenTitle);
+  const legacyHtSubtitle = pickString(rawDonations?.screenSubtitle, DEFAULT_LOCALIZED_DONATION_COPY.ht.screenSubtitle);
+  const legacyHtRole = pickString(rawDonations?.developerRole, DEFAULT_LOCALIZED_DONATION_COPY.ht.developerRole);
+  const legacyHtBio = pickString(rawDonations?.developerBio, DEFAULT_LOCALIZED_DONATION_COPY.ht.developerBio);
+  const legacyHtNote = pickString(rawDonations?.customNote, DEFAULT_LOCALIZED_DONATION_COPY.ht.customNote);
+
+  const normalizedLocalizedCopy: Record<Language, LocalizedDonationCopy> = {
+    ht: {
+      screenTitle: pickString(rawLocalized.ht?.screenTitle, legacyHtTitle),
+      screenSubtitle: pickString(rawLocalized.ht?.screenSubtitle, legacyHtSubtitle),
+      developerRole: pickString(rawLocalized.ht?.developerRole, legacyHtRole),
+      developerBio: pickString(rawLocalized.ht?.developerBio, legacyHtBio),
+      customNote: pickString(rawLocalized.ht?.customNote, legacyHtNote),
+    },
+    fr: {
+      screenTitle: pickString(rawLocalized.fr?.screenTitle, DEFAULT_LOCALIZED_DONATION_COPY.fr.screenTitle),
+      screenSubtitle: pickString(rawLocalized.fr?.screenSubtitle, DEFAULT_LOCALIZED_DONATION_COPY.fr.screenSubtitle),
+      developerRole: pickString(rawLocalized.fr?.developerRole, DEFAULT_LOCALIZED_DONATION_COPY.fr.developerRole),
+      developerBio: pickString(rawLocalized.fr?.developerBio, DEFAULT_LOCALIZED_DONATION_COPY.fr.developerBio),
+      customNote: pickString(rawLocalized.fr?.customNote, DEFAULT_LOCALIZED_DONATION_COPY.fr.customNote),
+    },
+    en: {
+      screenTitle: pickString(rawLocalized.en?.screenTitle, DEFAULT_LOCALIZED_DONATION_COPY.en.screenTitle),
+      screenSubtitle: pickString(rawLocalized.en?.screenSubtitle, DEFAULT_LOCALIZED_DONATION_COPY.en.screenSubtitle),
+      developerRole: pickString(rawLocalized.en?.developerRole, DEFAULT_LOCALIZED_DONATION_COPY.en.developerRole),
+      developerBio: pickString(rawLocalized.en?.developerBio, DEFAULT_LOCALIZED_DONATION_COPY.en.developerBio),
+      customNote: pickString(rawLocalized.en?.customNote, DEFAULT_LOCALIZED_DONATION_COPY.en.customNote),
+    },
+    es: {
+      screenTitle: pickString(rawLocalized.es?.screenTitle, DEFAULT_LOCALIZED_DONATION_COPY.es.screenTitle),
+      screenSubtitle: pickString(rawLocalized.es?.screenSubtitle, DEFAULT_LOCALIZED_DONATION_COPY.es.screenSubtitle),
+      developerRole: pickString(rawLocalized.es?.developerRole, DEFAULT_LOCALIZED_DONATION_COPY.es.developerRole),
+      developerBio: pickString(rawLocalized.es?.developerBio, DEFAULT_LOCALIZED_DONATION_COPY.es.developerBio),
+      customNote: pickString(rawLocalized.es?.customNote, DEFAULT_LOCALIZED_DONATION_COPY.es.customNote),
+    },
+  };
+
+  merged.localizedCopy = normalizedLocalizedCopy;
+  merged.screenTitle = normalizedLocalizedCopy.ht.screenTitle;
+  merged.screenSubtitle = normalizedLocalizedCopy.ht.screenSubtitle;
+  merged.developerRole = normalizedLocalizedCopy.ht.developerRole;
+  merged.developerBio = normalizedLocalizedCopy.ht.developerBio;
+  merged.customNote = normalizedLocalizedCopy.ht.customNote;
+
   return merged;
 }
 
 /**
- * Sanitize Developer App Update Config to ensure a unified 1.0.0 baseline
+ * Resolves the Donate screen & profile copy strictly for the active app language
+ * (ht / fr / en / es), preventing Haitian Creole defaults from leaking into FR/EN/ES screens.
+ */
+export function resolveLocalizedDonationCopy(
+  config: DeveloperDonationConfig | undefined | null,
+  language: Language | string = 'ht'
+): LocalizedDonationCopy {
+  const safeLang: Language =
+    language === 'fr' || language === 'en' || language === 'es' ? language : 'ht';
+  const cleaned = cleanDonationConfig(config || undefined);
+  const langCopy = cleaned.localizedCopy?.[safeLang];
+  const fallback = DEFAULT_LOCALIZED_DONATION_COPY[safeLang];
+  return {
+    screenTitle: langCopy?.screenTitle?.trim() || fallback.screenTitle,
+    screenSubtitle: langCopy?.screenSubtitle?.trim() || fallback.screenSubtitle,
+    developerRole: langCopy?.developerRole?.trim() || fallback.developerRole,
+    developerBio: langCopy?.developerBio?.trim() || fallback.developerBio,
+    customNote: langCopy?.customNote?.trim() || fallback.customNote,
+  };
+}
+
+/**
+ * Sanitize Developer App Update Config to ensure a unified baseline (APP_BASE_VERSION)
  * and clean out any legacy uninitialized demo versions (e.g. 2.5.0, 2.4.0, 2.0.0).
  */
 export function sanitizeAppUpdateConfig(rawUpdate?: any): DeveloperAppUpdateConfig {
@@ -235,7 +705,11 @@ export function getDeveloperSettings(): DeveloperSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      saveDeveloperSettings(DEFAULT_DEVELOPER_SETTINGS);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(DEFAULT_DEVELOPER_SETTINGS));
+      } catch {
+        // Ignore storage quota/privacy errors
+      }
       return DEFAULT_DEVELOPER_SETTINGS;
     }
     const parsed = JSON.parse(raw) as Partial<DeveloperSettings>;
@@ -265,14 +739,27 @@ export function getDeveloperSettings(): DeveloperSettings {
       }
     }
 
+    const resolvedShowSponsors =
+      typeof parsed.showSponsorsInFooter === 'boolean'
+        ? parsed.showSponsorsInFooter
+        : typeof parsed.sponsorsEnabled === 'boolean'
+        ? parsed.sponsorsEnabled
+        : DEFAULT_DEVELOPER_SETTINGS.showSponsorsInFooter;
+
     return {
       ...DEFAULT_DEVELOPER_SETTINGS,
       ...parsed,
+      showSponsorsInFooter: resolvedShowSponsors,
+      sponsorsEnabled: resolvedShowSponsors,
       masterPin: parsed.masterPin && parsed.masterPin.trim().length >= 4 ? parsed.masterPin.trim() : '7799',
       adMob: {
         ...DEFAULT_ADMOB_CONFIG,
         ...(parsed.adMob || {}),
       },
+      commentModeration: sanitizeCommentModerationConfig(parsed.commentModeration),
+      memberVerification: sanitizeMemberVerificationConfig(parsed.memberVerification),
+      legalConfig: sanitizeLegalConfig(parsed.legalConfig),
+      languageConfig: sanitizeLanguageConfig(parsed.languageConfig),
       donations: cleanDonationConfig(parsed.donations),
       sponsors: cleanSponsors,
       licenses: cleanLicenses,
@@ -315,13 +802,26 @@ function sanitizeRemoteDeveloperSettings(data: any): DeveloperSettings {
   const rawLicenses = Array.isArray(data.licenses) ? data.licenses : [];
   const cleanLicenses = rawLicenses.filter((l: any) => !LEGACY_DEMO_LICENSE_KEYS.has(l.key));
 
+  const resolvedShowSponsors =
+    typeof data.showSponsorsInFooter === 'boolean'
+      ? data.showSponsorsInFooter
+      : typeof data.sponsorsEnabled === 'boolean'
+      ? data.sponsorsEnabled
+      : DEFAULT_DEVELOPER_SETTINGS.showSponsorsInFooter;
+
   return {
     ...DEFAULT_DEVELOPER_SETTINGS,
     ...data,
+    showSponsorsInFooter: resolvedShowSponsors,
+    sponsorsEnabled: resolvedShowSponsors,
     adMob: {
       ...DEFAULT_ADMOB_CONFIG,
       ...(data.adMob || {}),
     },
+    commentModeration: sanitizeCommentModerationConfig(data.commentModeration),
+    memberVerification: sanitizeMemberVerificationConfig(data.memberVerification),
+    legalConfig: sanitizeLegalConfig(data.legalConfig),
+    languageConfig: sanitizeLanguageConfig(data.languageConfig),
     donations: cleanDonationConfig(data.donations),
     sponsors: cleanSponsors,
     licenses: cleanLicenses,
@@ -332,7 +832,7 @@ function sanitizeRemoteDeveloperSettings(data: any): DeveloperSettings {
 }
 
 /**
- * Permanently resets app update configuration to baseline v1.0.0
+ * Permanently resets app update configuration to baseline APP_BASE_VERSION
  * across local storage and Cloud Firestore.
  */
 export async function resetDeveloperAppUpdateToBaseline(): Promise<DeveloperSettings> {
@@ -355,45 +855,144 @@ export async function resetDeveloperAppUpdateToBaseline(): Promise<DeveloperSett
   return updated;
 }
 
+export interface SaveDeveloperSettingsResult {
+  savedLocally: boolean;
+  syncedToCloud: boolean;
+  reason?: string;
+}
+
+const LOCAL_DEV_MODIFIED_TS_KEY = 'omnichurch_dev_local_modified_ts_v1';
+
 /**
- * Save Developer Settings to localStorage and Cloud Firestore
+ * Helper to determine if local developer settings were modified more recently than remote
  */
-export async function saveDeveloperSettings(settings: DeveloperSettings): Promise<void> {
-  if (typeof window === 'undefined') return;
+function isLocalDeveloperConfigNewer(local: DeveloperSettings, remote: DeveloperSettings): boolean {
+  if (typeof window === 'undefined') return false;
+  const localModMs = Number(localStorage.getItem(LOCAL_DEV_MODIFIED_TS_KEY) || '0');
+  const localTs = Date.parse(local.lastUpdated || '') || 0;
+  const remoteLastUpdated = Date.parse(remote.lastUpdated || '') || 0;
+  const remoteUpdatedAt = Date.parse((remote as any).updatedAt || '') || 0;
+  const remoteTs = Math.max(remoteLastUpdated, remoteUpdatedAt);
+  const effectiveLocalTs = Math.max(localTs, localModMs);
+  if (effectiveLocalTs > 0 && remoteTs > 0) {
+    return effectiveLocalTs > remoteTs + 1500;
+  }
+  return localModMs > 0 && remoteTs === 0;
+}
+
+/**
+ * Save Developer Settings to localStorage and (when authorized as Super Developer) Cloud Firestore
+ */
+export async function saveDeveloperSettings(
+  settings: DeveloperSettings
+): Promise<SaveDeveloperSettingsResult> {
+  if (typeof window === 'undefined') {
+    return { savedLocally: false, syncedToCloud: false, reason: 'no_window' };
+  }
+  const resolvedShowSponsors =
+    typeof settings.showSponsorsInFooter === 'boolean'
+      ? settings.showSponsorsInFooter
+      : typeof settings.sponsorsEnabled === 'boolean'
+      ? settings.sponsorsEnabled
+      : true;
+
+  const nowIso = new Date().toISOString();
+  const currentLocal = localStorage.getItem(STORAGE_KEY)
+    ? getDeveloperSettings()
+    : DEFAULT_DEVELOPER_SETTINGS;
   const updated: DeveloperSettings = {
+    ...currentLocal,
     ...settings,
-    lastUpdated: new Date().toISOString(),
+    adMob: {
+      ...DEFAULT_ADMOB_CONFIG,
+      ...(currentLocal.adMob || {}),
+      ...(settings.adMob || {}),
+    },
+    commentModeration: sanitizeCommentModerationConfig(
+      settings.commentModeration || currentLocal.commentModeration
+    ),
+    memberVerification: sanitizeMemberVerificationConfig(
+      settings.memberVerification || currentLocal.memberVerification
+    ),
+    legalConfig: sanitizeLegalConfig(settings.legalConfig || currentLocal.legalConfig),
+    languageConfig: sanitizeLanguageConfig(settings.languageConfig || currentLocal.languageConfig),
+    licenses: Array.isArray(settings.licenses) ? settings.licenses : currentLocal.licenses,
+    showSponsorsInFooter: resolvedShowSponsors,
+    sponsorsEnabled: resolvedShowSponsors,
+    lastUpdated: nowIso,
   };
 
+  let savedLocally = false;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+    localStorage.setItem(LOCAL_DEV_MODIFIED_TS_KEY, String(Date.now()));
     window.dispatchEvent(new CustomEvent('omnichurch_dev_settings_updated', { detail: updated }));
+    savedLocally = true;
   } catch (err) {
     console.error('Error saving developer settings to localStorage:', err);
   }
 
-  // Cloud Firestore sync
+  const cloudAuth = getSuperDeveloperCloudAuthStatus();
+  if (!cloudAuth.isAuthorized) {
+    return {
+      savedLocally,
+      syncedToCloud: false,
+      reason: 'requires_super_dev_google_auth',
+    };
+  }
+
+  // Cloud Firestore sync (merges commentModeration alongside adMob, licenses, and updatedAt into app_config/developer_engine)
   try {
     const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
-    const cleaned = cleanObjectForFirestore(updated);
+    const cleaned = cleanObjectForFirestore({
+      ...updated,
+      updatedAt: nowIso,
+    });
     await setDoc(devDocRef, cleaned, { merge: true });
-  } catch (err) {
-    // Gracefully handle offline or permission state without failing
-    console.warn('Developer settings saved locally; Firestore sync pending/offline:', err);
+    return { savedLocally, syncedToCloud: true };
+  } catch (err: any) {
+    console.warn('Developer settings saved locally; Firestore sync failed:', err);
+    return {
+      savedLocally,
+      syncedToCloud: false,
+      reason: err?.message || 'firestore_write_failed',
+    };
   }
 }
 
 /**
- * Pull Developer Settings from Cloud Firestore if available
+ * Pull Developer Settings from Cloud Firestore if available.
+ * Never overwrites newer locally-saved developer settings!
  */
 export async function fetchRemoteDeveloperSettings(): Promise<DeveloperSettings | null> {
   try {
+    const localCurrent = getDeveloperSettings();
     const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
     const snap = await getDoc(devDocRef);
     if (snap.exists()) {
       const data = snap.data();
-      if (data && data.masterPin) {
-        const sanitized = sanitizeRemoteDeveloperSettings(data);
+      if (
+        data &&
+        (data.masterPin ||
+          data.adMob ||
+          data.commentModeration ||
+          data.memberVerification ||
+          data.licenses ||
+          data.donations)
+      ) {
+        const mergedRemote = {
+          ...localCurrent,
+          ...data,
+          masterPin: data.masterPin || localCurrent.masterPin,
+        };
+        const sanitized = sanitizeRemoteDeveloperSettings(mergedRemote);
+        if (isLocalDeveloperConfigNewer(localCurrent, sanitized)) {
+          // Local developer configuration is newer than remote — keep local and push if authorized
+          if (getSuperDeveloperCloudAuthStatus().isAuthorized) {
+            await setDoc(devDocRef, cleanObjectForFirestore(localCurrent), { merge: true }).catch(() => {});
+          }
+          return localCurrent;
+        }
         localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
         window.dispatchEvent(new CustomEvent('omnichurch_dev_settings_updated', { detail: sanitized }));
         return sanitized;
@@ -406,7 +1005,8 @@ export async function fetchRemoteDeveloperSettings(): Promise<DeveloperSettings 
 }
 
 /**
- * Real-Time Firestore Subscription for Developer Settings across all devices
+ * Real-Time Firestore Subscription for Developer Settings across all devices.
+ * Respects newer local developer settings so nothing resets unexpectedly.
  */
 export function subscribeToDeveloperSettings(
   callback: (settings: DeveloperSettings) => void
@@ -418,8 +1018,26 @@ export function subscribeToDeveloperSettings(
       (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
-          if (data && data.masterPin) {
-            const sanitized = sanitizeRemoteDeveloperSettings(data);
+          if (
+            data &&
+            (data.masterPin ||
+              data.adMob ||
+              data.commentModeration ||
+              data.memberVerification ||
+              data.licenses ||
+              data.donations)
+          ) {
+            const localCurrent = getDeveloperSettings();
+            const mergedRemote = {
+              ...localCurrent,
+              ...data,
+              masterPin: data.masterPin || localCurrent.masterPin,
+            };
+            const sanitized = sanitizeRemoteDeveloperSettings(mergedRemote);
+            if (isLocalDeveloperConfigNewer(localCurrent, sanitized)) {
+              callback(localCurrent);
+              return;
+            }
             try {
               localStorage.setItem(STORAGE_KEY, JSON.stringify(sanitized));
             } catch (storageErr) {
@@ -664,13 +1282,15 @@ export async function updateMasterPasswordSecurely(
   }
 
   currentSettings.masterPin = cleanNew;
-  await saveDeveloperSettings(currentSettings);
+  const saveResult = await saveDeveloperSettings(currentSettings);
 
   try {
     await logDeveloperAction(
       'SECURITY_CREDENTIAL_UPDATED',
-      'Nouvo kòd sekirite devlopè a anrejistre avèk siksè nan baz done a.',
-      'success'
+      saveResult.syncedToCloud
+        ? 'Nouvo kòd sekirite administrasyon an anrejistre sou aparèy la ak sou sèvè santral la.'
+        : 'Nouvo kòd sekirite administrasyon an anrejistre sou aparèy la sèlman (konekte Kont Administrasyon Jeneral pou sèvè santral la).',
+      saveResult.syncedToCloud ? 'success' : 'warn'
     );
   } catch {
     // Non-blocking
@@ -678,7 +1298,9 @@ export async function updateMasterPasswordSecurely(
 
   return {
     success: true,
-    message: 'Nouvo kòd sekirite devlopè a anrejistre avèk siksè nan baz done nwaj la!',
+    message: saveResult.syncedToCloud
+      ? 'Nouvo kòd sekirite administrasyon an anrejistre sou aparèy la ak sou sèvè santral la!'
+      : 'Nouvo kòd la anrejistre sou aparèy sa a (pou sove l sou sèvè santral la tou, konekte ak Kont Administrasyon Jeneral Otorize a).',
   };
 }
 
@@ -828,19 +1450,115 @@ export async function toggleLicenseLockout(enforce: boolean): Promise<boolean> {
 
 /**
  * Update Donation Configuration
+ * Marks userCustomizedChannels = true so the developer's exact selection is remembered forever.
  */
 export async function updateDonationConfig(
   newConfig: Partial<DeveloperDonationConfig>
 ): Promise<DeveloperDonationConfig> {
   const current = getDeveloperSettings();
-  const updatedDonations: DeveloperDonationConfig = {
+  const updatedDonations = cleanDonationConfig({
     ...DEFAULT_DONATION_CONFIG,
     ...(current.donations || {}),
     ...newConfig,
-  };
+    userCustomizedChannels: true,
+  });
   current.donations = updatedDonations;
   await saveDeveloperSettings(current);
   return updatedDonations;
+}
+
+export interface DonationsCloudPushResult {
+  savedLocally: boolean;
+  syncedToCloud: boolean;
+  remoteVerified: boolean;
+  pushedAt: string;
+  reason?: string;
+  remoteDonations?: DeveloperDonationConfig;
+}
+
+/**
+ * Pushes `donations` alongside the rest of `DeveloperSettings` into
+ * `app_config/developer_engine` (`{ merge: true }`) and reads back from Firestore
+ * to verify 100% Web + Android Mobile parity.
+ */
+export async function verifyAndPushDonationsToCloud(
+  settings?: DeveloperSettings,
+  donationOverride?: Partial<DeveloperDonationConfig>
+): Promise<DonationsCloudPushResult> {
+  const pushedAt = new Date().toISOString();
+  const baseSettings = settings || getDeveloperSettings();
+  const mergedDonations = cleanDonationConfig({
+    ...DEFAULT_DONATION_CONFIG,
+    ...(baseSettings.donations || {}),
+    ...(donationOverride || {}),
+    userCustomizedChannels: true,
+    lastDonationsPushAt: pushedAt,
+  });
+
+  const nextSettings: DeveloperSettings = {
+    ...baseSettings,
+    donations: mergedDonations,
+  };
+
+  const saveRes = await saveDeveloperSettings(nextSettings);
+  if (!saveRes.syncedToCloud) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: false,
+      remoteVerified: false,
+      pushedAt,
+      reason: saveRes.reason || 'cloud_sync_skipped',
+      remoteDonations: mergedDonations,
+    };
+  }
+
+  try {
+    const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
+    const snap = await getDoc(devDocRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      const remoteDonations = cleanDonationConfig(data?.donations);
+      const remoteVerified =
+        remoteDonations.enabled === mergedDonations.enabled &&
+        remoteDonations.developerName === mergedDonations.developerName &&
+        remoteDonations.enableShakeAnimation === mergedDonations.enableShakeAnimation &&
+        remoteDonations.shakeIntervalSeconds === mergedDonations.shakeIntervalSeconds &&
+        remoteDonations.paypalEnabled === mergedDonations.paypalEnabled &&
+        remoteDonations.binanceEnabled === mergedDonations.binanceEnabled &&
+        remoteDonations.wiseEnabled === mergedDonations.wiseEnabled &&
+        remoteDonations.moncashEnabled === mergedDonations.moncashEnabled &&
+        remoteDonations.zelleEnabled === mergedDonations.zelleEnabled &&
+        remoteDonations.localizedCopy?.ht?.screenTitle === mergedDonations.localizedCopy?.ht?.screenTitle &&
+        remoteDonations.localizedCopy?.fr?.screenTitle === mergedDonations.localizedCopy?.fr?.screenTitle &&
+        remoteDonations.localizedCopy?.en?.screenTitle === mergedDonations.localizedCopy?.en?.screenTitle &&
+        remoteDonations.localizedCopy?.es?.screenTitle === mergedDonations.localizedCopy?.es?.screenTitle;
+      return {
+        savedLocally: saveRes.savedLocally,
+        syncedToCloud: true,
+        remoteVerified,
+        pushedAt,
+        remoteDonations,
+      };
+    }
+  } catch (err: any) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: true,
+      remoteVerified: false,
+      pushedAt,
+      reason: err?.message || 'remote_readback_failed',
+      remoteDonations: mergedDonations,
+    };
+  }
+
+  return {
+    savedLocally: saveRes.savedLocally,
+    syncedToCloud: true,
+    remoteVerified: false,
+    pushedAt,
+    reason: 'remote_doc_missing',
+    remoteDonations: mergedDonations,
+  };
 }
 
 /**
@@ -971,6 +1689,81 @@ export async function validateAndActivateLicense(
 }
 
 /**
+ * Generate AND Immediately Activate a License for a Target Church in 1 Step
+ */
+export async function generateAndActivateLicenseForChurch(
+  churchId: string,
+  churchName: string,
+  tier: LicenseTier,
+  customNotes?: string
+): Promise<{ success: boolean; message: string; license?: ChurchLicense }> {
+  const key = generateLicenseKey(churchId, tier);
+  const res = await validateAndActivateLicense(key, churchId, churchName);
+  if (res.success && res.license && customNotes?.trim()) {
+    const current = getDeveloperSettings();
+    const idx = current.licenses.findIndex((l) => l.key === key);
+    if (idx >= 0) {
+      current.licenses[idx].notes = customNotes.trim();
+      await saveDeveloperSettings(current);
+      res.license = current.licenses[idx];
+    }
+  }
+  return res;
+}
+
+/**
+ * Extend (+1 Year) or Upgrade an Existing License to Lifetime
+ */
+export async function extendOrUpgradeLicense(
+  licenseKey: string,
+  mode: 'extend_1_year' | 'upgrade_lifetime'
+): Promise<{ success: boolean; message: string; license?: ChurchLicense }> {
+  const current = getDeveloperSettings();
+  const cleanKey = (licenseKey || '').trim().toUpperCase();
+  const idx = current.licenses.findIndex((l) => l.key.toUpperCase() === cleanKey);
+  if (idx < 0) {
+    return { success: false, message: `Pa jwenn lisans ki gen kle "${licenseKey}".` };
+  }
+
+  const target = { ...current.licenses[idx] };
+  target.status = 'active';
+
+  if (mode === 'upgrade_lifetime') {
+    target.tier = 'enterprise_lifetime';
+    target.expiresAt = 'never';
+    target.maxMembers = 0;
+    target.allowAdFree = true;
+    target.allowCloudSync = true;
+    target.allowMultiChurch = true;
+    target.notes = `${target.notes || ''} [Pase an Pou Tout Tan nan ${new Date().toLocaleDateString()}]`.trim();
+  } else {
+    const baseTime =
+      target.expiresAt && target.expiresAt !== 'never' && Date.parse(target.expiresAt) > Date.now()
+        ? Date.parse(target.expiresAt)
+        : Date.now();
+    const newExp = new Date(baseTime + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    target.expiresAt = newExp;
+    if (target.tier === 'trial') {
+      target.tier = 'pro_annual';
+      target.maxMembers = 2500;
+    }
+    target.notes = `${target.notes || ''} [Pwolonje +1 Ane jiska ${newExp}]`.trim();
+  }
+
+  current.licenses[idx] = target;
+  await saveDeveloperSettings(current);
+
+  return {
+    success: true,
+    message:
+      mode === 'upgrade_lifetime'
+        ? `Lisans ${target.key} pase an "Pou Tout Tan (Lifetime)" avèk siksè!`
+        : `Lisans ${target.key} pwolonje pou +1 ane (jiska ${target.expiresAt})!`,
+    license: target,
+  };
+}
+
+/**
  * Get active license for a given church
  */
 export function getChurchLicense(churchId: string): ChurchLicense | null {
@@ -1009,6 +1802,630 @@ export function isChurchAdFree(churchId: string): boolean {
 
   const license = getChurchLicense(churchId);
   return !!(license && license.status === 'active' && license.allowAdFree);
+}
+
+export interface EffectiveMobileAdMobResolution {
+  shouldShowAds: boolean;
+  isTestMode: boolean;
+  adFreeReason: 'none' | 'master_disabled' | 'mobile_disabled' | 'pro_church_license';
+  effectiveAppId: string;
+  effectiveBannerId: string;
+  effectiveInterstitialId: string;
+  effectiveRewardedId: string;
+  effectiveNativeId: string;
+  placements: {
+    homeBanner: boolean;
+    announcementsBanner: boolean;
+    servicesBanner: boolean;
+    interstitialAfterScanClose: boolean;
+    interstitialScanFrequency: number;
+    interstitialCooldownSeconds: number;
+    rewardedVideo: boolean;
+    nativeFeed: boolean;
+  };
+}
+
+/**
+ * Resolves the exact effective AdMob configuration that the Android Kotlin app
+ * (com.zoutiw.omnichurch) applies from `app_config/developer_engine`.
+ * Automatically enforces Google Official Test IDs when `environment === 'test'`
+ * or `mobileForceTestIds === true`, and respects Pro church Ad-Free licenses.
+ */
+export function resolveEffectiveMobileAdMobConfig(
+  customAdMob?: Partial<AdMobConfig>,
+  churchId?: string,
+  customLicenses?: ChurchLicense[]
+): EffectiveMobileAdMobResolution {
+  const settings = getDeveloperSettings();
+  const cfg: AdMobConfig = {
+    ...DEFAULT_ADMOB_CONFIG,
+    ...settings.adMob,
+    ...(customAdMob || {}),
+  };
+
+  const TEST_APP_ID = 'ca-app-pub-3940256099942544~3347511713';
+  const TEST_BANNER = 'ca-app-pub-3940256099942544/6300978111';
+  const TEST_INTERSTITIAL = 'ca-app-pub-3940256099942544/1033173712';
+  const TEST_REWARDED = 'ca-app-pub-3940256099942544/5224354917';
+  const TEST_NATIVE = 'ca-app-pub-3940256099942544/2247696110';
+
+  const isTestMode = cfg.environment === 'test' || cfg.mobileForceTestIds === true;
+  const mobileEnabled = cfg.mobileEnabled !== false;
+
+  let churchHasAdFreeLicense = false;
+  if (churchId && cfg.adFreeForLicensedChurches) {
+    const licensesPool = Array.isArray(customLicenses) ? customLicenses : settings.licenses;
+    const matchedLicense = licensesPool.find(
+      (l) => l.churchId === churchId && l.status === 'active' && l.allowAdFree
+    );
+    if (matchedLicense) {
+      if (matchedLicense.expiresAt && matchedLicense.expiresAt !== 'never') {
+        churchHasAdFreeLicense = new Date(matchedLicense.expiresAt).getTime() >= Date.now();
+      } else {
+        churchHasAdFreeLicense = true;
+      }
+    }
+  }
+
+  let adFreeReason: EffectiveMobileAdMobResolution['adFreeReason'] = 'none';
+  if (!cfg.enabled) {
+    adFreeReason = 'master_disabled';
+  } else if (!mobileEnabled) {
+    adFreeReason = 'mobile_disabled';
+  } else if (churchHasAdFreeLicense) {
+    adFreeReason = 'pro_church_license';
+  }
+
+  const shouldShowAds = adFreeReason === 'none';
+
+  return {
+    shouldShowAds,
+    isTestMode,
+    adFreeReason,
+    effectiveAppId: isTestMode ? TEST_APP_ID : cfg.adMobAppId?.trim() || TEST_APP_ID,
+    effectiveBannerId: isTestMode ? TEST_BANNER : cfg.bannerAdUnitId?.trim() || TEST_BANNER,
+    effectiveInterstitialId: isTestMode
+      ? TEST_INTERSTITIAL
+      : cfg.interstitialAdUnitId?.trim() || TEST_INTERSTITIAL,
+    effectiveRewardedId: isTestMode ? TEST_REWARDED : cfg.rewardedAdUnitId?.trim() || TEST_REWARDED,
+    effectiveNativeId: isTestMode ? TEST_NATIVE : cfg.nativeAdUnitId?.trim() || TEST_NATIVE,
+    placements: {
+      homeBanner: shouldShowAds && cfg.mobileShowBannerHome !== false,
+      announcementsBanner: shouldShowAds && cfg.mobileShowBannerAnnouncements !== false,
+      servicesBanner: shouldShowAds && cfg.mobileShowBannerServices === true,
+      interstitialAfterScanClose:
+        shouldShowAds &&
+        cfg.enableInterstitialOnScan !== false &&
+        cfg.mobileEnableInterstitialAfterScanClose !== false,
+      interstitialScanFrequency: Math.max(1, Number(cfg.interstitialScanFrequency || 4)),
+      interstitialCooldownSeconds: Math.max(30, Number(cfg.mobileInterstitialCooldownSeconds || 180)),
+      rewardedVideo: shouldShowAds && cfg.mobileRewardedEnabled === true,
+      nativeFeed: shouldShowAds && cfg.mobileNativeFeedEnabled !== false,
+    },
+  };
+}
+
+export interface AdMobCloudPushVerificationResult {
+  savedLocally: boolean;
+  syncedToCloud: boolean;
+  remoteVerified: boolean;
+  pushedAt: string;
+  reason?: string;
+  remoteAdMob?: AdMobConfig;
+}
+
+/**
+ * Pushes the current DeveloperSettings (including AdMob mobile remote controls)
+ * to `app_config/developer_engine` in the named Firestore database and reads back
+ * the live remote snapshot to verify 100% parity for Android clients.
+ */
+export async function verifyAndPushAdMobConfigToCloud(
+  settings: DeveloperSettings
+): Promise<AdMobCloudPushVerificationResult> {
+  const pushedAt = new Date().toISOString();
+  const nextSettings: DeveloperSettings = {
+    ...settings,
+    adMob: {
+      ...DEFAULT_ADMOB_CONFIG,
+      ...settings.adMob,
+      lastCloudPushAt: pushedAt,
+    },
+  };
+
+  const saveRes = await saveDeveloperSettings(nextSettings);
+  if (!saveRes.syncedToCloud) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: false,
+      remoteVerified: false,
+      pushedAt,
+      reason: saveRes.reason || 'cloud_sync_skipped',
+    };
+  }
+
+  try {
+    const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
+    const snap = await getDoc(devDocRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      const remoteAdMob: AdMobConfig = {
+        ...DEFAULT_ADMOB_CONFIG,
+        ...(data?.adMob || {}),
+      };
+      const remoteVerified =
+        remoteAdMob.enabled === nextSettings.adMob.enabled &&
+        remoteAdMob.environment === nextSettings.adMob.environment &&
+        remoteAdMob.mobileEnabled === nextSettings.adMob.mobileEnabled;
+      return {
+        savedLocally: saveRes.savedLocally,
+        syncedToCloud: true,
+        remoteVerified,
+        pushedAt,
+        remoteAdMob,
+      };
+    }
+  } catch (err: any) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: true,
+      remoteVerified: false,
+      pushedAt,
+      reason: err?.message || 'remote_readback_failed',
+    };
+  }
+
+  return {
+    savedLocally: saveRes.savedLocally,
+    syncedToCloud: true,
+    remoteVerified: false,
+    pushedAt,
+    reason: 'remote_doc_missing',
+  };
+}
+
+export interface CommentModerationCloudPushResult {
+  savedLocally: boolean;
+  syncedToCloud: boolean;
+  remoteVerified: boolean;
+  pushedAt: string;
+  reason?: string;
+  remoteCommentModeration?: RemoteCommentModerationConfig;
+}
+
+/**
+ * Pushes `commentModeration` alongside `adMob`, `licenses`, and `updatedAt`
+ * to `app_config/developer_engine` using `{ merge: true }` so neither overwrites the other,
+ * and reads back the remote document to verify parity.
+ */
+export async function verifyAndPushCommentModerationToCloud(
+  settings: DeveloperSettings,
+  moderationOverride?: Partial<RemoteCommentModerationConfig>
+): Promise<CommentModerationCloudPushResult> {
+  const pushedAt = new Date().toISOString();
+  const mergedModeration = sanitizeCommentModerationConfig({
+    ...(settings.commentModeration || DEFAULT_COMMENT_MODERATION_CONFIG),
+    ...(moderationOverride || {}),
+    lastModerationPushAt: pushedAt,
+  });
+
+  const nextSettings: DeveloperSettings = {
+    ...settings,
+    commentModeration: mergedModeration,
+  };
+
+  const saveRes = await saveDeveloperSettings(nextSettings);
+  if (!saveRes.syncedToCloud) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: false,
+      remoteVerified: false,
+      pushedAt,
+      reason: saveRes.reason || 'cloud_sync_skipped',
+      remoteCommentModeration: mergedModeration,
+    };
+  }
+
+  try {
+    const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
+    const snap = await getDoc(devDocRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      const remoteCommentModeration = sanitizeCommentModerationConfig(data?.commentModeration);
+      const remoteVerified =
+        remoteCommentModeration.enabled === mergedModeration.enabled &&
+        remoteCommentModeration.allowMemberCommentsGlobal ===
+          mergedModeration.allowMemberCommentsGlobal &&
+        remoteCommentModeration.maxCommentLength === mergedModeration.maxCommentLength;
+      return {
+        savedLocally: saveRes.savedLocally,
+        syncedToCloud: true,
+        remoteVerified,
+        pushedAt,
+        remoteCommentModeration,
+      };
+    }
+  } catch (err: any) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: true,
+      remoteVerified: false,
+      pushedAt,
+      reason: err?.message || 'remote_readback_failed',
+      remoteCommentModeration: mergedModeration,
+    };
+  }
+
+  return {
+    savedLocally: saveRes.savedLocally,
+    syncedToCloud: true,
+    remoteVerified: false,
+    pushedAt,
+    reason: 'remote_doc_missing',
+    remoteCommentModeration: mergedModeration,
+  };
+}
+
+export interface MemberVerificationCloudPushResult {
+  savedLocally: boolean;
+  syncedToCloud: boolean;
+  remoteVerified: boolean;
+  pushedAt: string;
+  reason?: string;
+  remoteMemberVerification?: RemoteMemberVerificationConfig;
+}
+
+/**
+ * Pushes `memberVerification` alongside `adMob`, `licenses`, `commentModeration`, and `updatedAt`
+ * to `app_config/developer_engine` using `{ merge: true }` and reads back to verify server parity.
+ */
+export async function verifyAndPushMemberVerificationToCloud(
+  settings: DeveloperSettings,
+  verificationOverride?: Partial<RemoteMemberVerificationConfig>
+): Promise<MemberVerificationCloudPushResult> {
+  const pushedAt = new Date().toISOString();
+  const mergedVerification = sanitizeMemberVerificationConfig({
+    ...(settings.memberVerification || DEFAULT_MEMBER_VERIFICATION_CONFIG),
+    ...(verificationOverride || {}),
+    lastVerificationPushAt: pushedAt,
+  });
+
+  const nextSettings: DeveloperSettings = {
+    ...settings,
+    memberVerification: mergedVerification,
+  };
+
+  const saveRes = await saveDeveloperSettings(nextSettings);
+  if (!saveRes.syncedToCloud) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: false,
+      remoteVerified: false,
+      pushedAt,
+      reason: saveRes.reason || 'cloud_sync_skipped',
+      remoteMemberVerification: mergedVerification,
+    };
+  }
+
+  try {
+    const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
+    const snap = await getDoc(devDocRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      const remoteVerification = sanitizeMemberVerificationConfig(data?.memberVerification);
+      const remoteVerified =
+        remoteVerification.enabled === mergedVerification.enabled &&
+        remoteVerification.enforceActiveStatusCheck === mergedVerification.enforceActiveStatusCheck &&
+        remoteVerification.showLegalDocuments === mergedVerification.showLegalDocuments &&
+        remoteVerification.maskLegalDocumentNumber === mergedVerification.maskLegalDocumentNumber;
+      return {
+        savedLocally: saveRes.savedLocally,
+        syncedToCloud: true,
+        remoteVerified,
+        pushedAt,
+        remoteMemberVerification: remoteVerification,
+      };
+    }
+  } catch (err: any) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: true,
+      remoteVerified: false,
+      pushedAt,
+      reason: err?.message || 'remote_readback_failed',
+      remoteMemberVerification: mergedVerification,
+    };
+  }
+
+  return {
+    savedLocally: saveRes.savedLocally,
+    syncedToCloud: true,
+    remoteVerified: false,
+    pushedAt,
+    reason: 'remote_doc_missing',
+    remoteMemberVerification: mergedVerification,
+  };
+}
+
+export interface CommentModerationEvaluationResult {
+  allowed: boolean;
+  reasonCode?:
+    | 'empty'
+    | 'global_disabled'
+    | 'church_disabled'
+    | 'service_comments_disabled'
+    | 'announcement_comments_disabled'
+    | 'user_muted'
+    | 'slow_mode'
+    | 'too_long'
+    | 'external_link'
+    | 'profanity_keyword';
+  messageHt: string;
+  messageFr: string;
+  messageEn: string;
+  messageEs: string;
+  matchedKeyword?: string;
+  remainingCooldownSeconds?: number;
+}
+
+const EXTERNAL_LINK_REGEX = /(https?:\/\/|www\.[a-z0-9-]+|\b(?:bit\.ly|t\.me|wa\.me|tinyurl\.com)\/)/i;
+
+/**
+ * Evaluates a candidate comment against live `commentModeration` policy before posting.
+ */
+export function evaluateCommentAgainstModeration(params: {
+  content: string;
+  churchId?: string;
+  userIds?: Array<string | undefined | null>;
+  targetType?: 'service' | 'announcement';
+  lastCommentTimestampMs?: number;
+  nowMs?: number;
+  customConfig?: Partial<RemoteCommentModerationConfig>;
+}): CommentModerationEvaluationResult {
+  const settings = getDeveloperSettings();
+  const cfg = sanitizeCommentModerationConfig(
+    params.customConfig || settings.commentModeration || DEFAULT_COMMENT_MODERATION_CONFIG
+  );
+
+  const cleanText = (params.content || '').trim();
+  if (!cleanText) {
+    return {
+      allowed: false,
+      reasonCode: 'empty',
+      messageHt: 'Tanpri ekri yon mesaj anvan ou voye kòmantè a.',
+      messageFr: 'Veuillez saisir un message avant de publier.',
+      messageEn: 'Please enter a message before posting.',
+      messageEs: 'Por favor escriba un mensaje antes de publicar.',
+    };
+  }
+
+  const cleanChurchId = (params.churchId || '').trim().toUpperCase();
+  const isChurchDisabled =
+    Boolean(cleanChurchId) &&
+    cfg.disabledChurchIds.some((cid) => cid.trim().toUpperCase() === cleanChurchId);
+
+  // 1. Global kill-switch or per-church disable
+  if (!cfg.allowMemberCommentsGlobal || isChurchDisabled) {
+    return {
+      allowed: false,
+      reasonCode: !cfg.allowMemberCommentsGlobal ? 'global_disabled' : 'church_disabled',
+      messageHt: 'Kòmantè yo dezaktive tanporèman pa administrasyon an.',
+      messageFr: 'Les commentaires sont temporairement désactivés par l’administration.',
+      messageEn: 'Comments are temporarily disabled by administration.',
+      messageEs: 'Los comentarios están desactivados temporalmente por la administración.',
+    };
+  }
+
+  // 2. Target type switch (Service vs Announcement)
+  if (params.targetType === 'service' && !cfg.allowServiceComments) {
+    return {
+      allowed: false,
+      reasonCode: 'service_comments_disabled',
+      messageHt: 'Kòmantè yo dezaktive tanporèman pa administrasyon an.',
+      messageFr: 'Les commentaires sur les cultes sont temporairement désactivés.',
+      messageEn: 'Comments on worship services are temporarily disabled.',
+      messageEs: 'Los comentarios en los cultos están desactivados temporalmente.',
+    };
+  }
+  if (params.targetType === 'announcement' && !cfg.allowAnnouncementComments) {
+    return {
+      allowed: false,
+      reasonCode: 'announcement_comments_disabled',
+      messageHt: 'Kòmantè yo dezaktive tanporèman pa administrasyon an.',
+      messageFr: 'Les commentaires sur les annonces sont temporairement désactivés.',
+      messageEn: 'Comments on announcements are temporarily disabled.',
+      messageEs: 'Los comentarios en los anuncios están desactivados temporalmente.',
+    };
+  }
+
+  // 3. Muted member check
+  const normalizedMutedSet = new Set(
+    cfg.mutedMemberIds.map((id) => id.trim().toUpperCase()).filter(Boolean)
+  );
+  const candidateUserIds = (params.userIds || [])
+    .filter(Boolean)
+    .map((id) => String(id).trim().toUpperCase());
+
+  if (candidateUserIds.some((uid) => normalizedMutedSet.has(uid))) {
+    return {
+      allowed: false,
+      reasonCode: 'user_muted',
+      messageHt: 'Kont ou pa gen otorizasyon pou poste kòmantè kounye a.',
+      messageFr: 'Votre compte n’est pas autorisé à publier des commentaires pour le moment.',
+      messageEn: 'Your account is not authorized to post comments right now.',
+      messageEs: 'Su cuenta no tiene autorización para publicar comentarios en este momento.',
+    };
+  }
+
+  // 4. Max comment length check (always enforced)
+  const effectiveMaxLen = Math.min(1000, Math.max(50, cfg.maxCommentLength || 500));
+  if (cleanText.length > effectiveMaxLen) {
+    return {
+      allowed: false,
+      reasonCode: 'too_long',
+      messageHt: `Kòmantè a twò long (${cleanText.length}/${effectiveMaxLen} karaktè maksimòm).`,
+      messageFr: `Commentaire trop long (${cleanText.length}/${effectiveMaxLen} caractères max).`,
+      messageEn: `Comment is too long (${cleanText.length}/${effectiveMaxLen} max characters).`,
+      messageEs: `El comentario es demasiado largo (${cleanText.length}/${effectiveMaxLen} caracteres máx).`,
+    };
+  }
+
+  // 5. Slow Mode Cooldown check
+  if (cfg.slowModeCooldownSeconds > 0 && params.lastCommentTimestampMs) {
+    const now = params.nowMs ?? Date.now();
+    const elapsedSeconds = (now - params.lastCommentTimestampMs) / 1000;
+    if (elapsedSeconds >= 0 && elapsedSeconds < cfg.slowModeCooldownSeconds) {
+      const remaining = Math.max(1, Math.ceil(cfg.slowModeCooldownSeconds - elapsedSeconds));
+      return {
+        allowed: false,
+        reasonCode: 'slow_mode',
+        remainingCooldownSeconds: remaining,
+        messageHt: `Tanpri tann ${remaining} segonn anvan ou poste yon lòt kòmantè (Slow Mode aktif).`,
+        messageFr: `Veuillez patienter ${remaining}s avant de publier un autre commentaire.`,
+        messageEn: `Please wait ${remaining}s before posting another comment (Slow Mode active).`,
+        messageEs: `Por favor espere ${remaining}s antes de publicar otro comentario.`,
+      };
+    }
+  }
+
+  // Automatic filters below apply when master moderation `enabled` is true
+  if (cfg.enabled) {
+    // 6. External links check
+    if (cfg.blockExternalLinks && EXTERNAL_LINK_REGEX.test(cleanText)) {
+      return {
+        allowed: false,
+        reasonCode: 'external_link',
+        messageHt: 'Lyen ekstèn (http://, https://, www.) pa otorize nan kòmantè yo.',
+        messageFr: 'Les liens externes (http://, https://, www.) ne sont pas autorisés.',
+        messageEn: 'External links (http://, https://, www.) are not allowed in comments.',
+        messageEs: 'Los enlaces externos (http://, https://, www.) no están permitidos.',
+      };
+    }
+
+    // 7. Auto-block profanity / banned keywords check
+    if (cfg.autoBlockProfanity && cfg.blockedKeywords.length > 0) {
+      const lowerText = cleanText.toLowerCase();
+      for (const rawKw of cfg.blockedKeywords) {
+        const kw = rawKw.trim().toLowerCase();
+        if (!kw) continue;
+        const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Match whole word for short single words, or substring for phrases/domains
+        const pattern =
+          kw.includes(' ') || kw.includes('.') || kw.includes('/') || kw.length >= 6
+            ? new RegExp(escaped, 'i')
+            : new RegExp(`(^|[^a-zA-Z0-9À-ÿ])${escaped}([^a-zA-Z0-9À-ÿ]|$)`, 'i');
+        if (pattern.test(lowerText)) {
+          return {
+            allowed: false,
+            reasonCode: 'profanity_keyword',
+            matchedKeyword: kw,
+            messageHt: `Kòmantè a gen mo ki pa otorize nan kominote legliz la ("${kw}").`,
+            messageFr: `Ce commentaire contient un terme non autorisé ("${kw}").`,
+            messageEn: `This comment contains a restricted word ("${kw}").`,
+            messageEs: `Este comentario contiene una palabra restringida ("${kw}").`,
+          };
+        }
+      }
+    }
+  }
+
+  return {
+    allowed: true,
+    messageHt: 'OK',
+    messageFr: 'OK',
+    messageEn: 'OK',
+    messageEs: 'OK',
+  };
+}
+
+export interface SuspectCommentAnalysis {
+  isSuspect: boolean;
+  isMutedUser: boolean;
+  isRedacted: boolean;
+  reasons: string[];
+  matchedKeywords: string[];
+  hasExternalLink: boolean;
+  hasExcessiveCapsOrSpam: boolean;
+}
+
+export const REDACTED_COMMENT_PLACEHOLDER = '[Kòmantè modere pa Administrasyon an]';
+
+/**
+ * Analyzes any existing comment row for the Developer Panel Live Moderation Stream
+ * to highlight suspect comments (banned keywords, external URLs, excessive caps/repetition, or muted author).
+ */
+export function detectSuspectCommentReasons(
+  content: string,
+  userId?: string,
+  customConfig?: Partial<RemoteCommentModerationConfig>
+): SuspectCommentAnalysis {
+  const settings = getDeveloperSettings();
+  const cfg = sanitizeCommentModerationConfig(
+    customConfig || settings.commentModeration || DEFAULT_COMMENT_MODERATION_CONFIG
+  );
+
+  const text = (content || '').trim();
+  const isRedacted = text === REDACTED_COMMENT_PLACEHOLDER;
+  const cleanUserId = (userId || '').trim().toUpperCase();
+  const isMutedUser =
+    Boolean(cleanUserId) &&
+    cfg.mutedMemberIds.some((id) => id.trim().toUpperCase() === cleanUserId);
+
+  if (isRedacted) {
+    return {
+      isSuspect: false,
+      isMutedUser,
+      isRedacted: true,
+      reasons: [],
+      matchedKeywords: [],
+      hasExternalLink: false,
+      hasExcessiveCapsOrSpam: false,
+    };
+  }
+
+  const reasons: string[] = [];
+  const matchedKeywords: string[] = [];
+
+  const hasExternalLink = EXTERNAL_LINK_REGEX.test(text);
+  if (hasExternalLink) {
+    reasons.push('Lyen Ekstèn / URL');
+  }
+
+  const lowerText = text.toLowerCase();
+  for (const rawKw of cfg.blockedKeywords) {
+    const kw = rawKw.trim().toLowerCase();
+    if (!kw) continue;
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern =
+      kw.includes(' ') || kw.includes('.') || kw.includes('/') || kw.length >= 6
+        ? new RegExp(escaped, 'i')
+        : new RegExp(`(^|[^a-zA-Z0-9À-ÿ])${escaped}([^a-zA-Z0-9À-ÿ]|$)`, 'i');
+    if (pattern.test(lowerText)) {
+      matchedKeywords.push(kw);
+    }
+  }
+  if (matchedKeywords.length > 0) {
+    reasons.push(`Mo Entèdi (${matchedKeywords.slice(0, 2).join(', ')})`);
+  }
+
+  // Excessive caps (> 70% uppercase on strings >= 18 letters) or 6+ repeated characters
+  const lettersOnly = text.replace(/[^a-zA-ZÀ-ÿ]/g, '');
+  const upperCount = lettersOnly.replace(/[^A-ZÀ-Ý]/g, '').length;
+  const excessiveCaps = lettersOnly.length >= 18 && upperCount / lettersOnly.length >= 0.72;
+  const repeatedChars = /(.)\1{5,}/.test(text);
+  const hasExcessiveCapsOrSpam = excessiveCaps || repeatedChars;
+  if (hasExcessiveCapsOrSpam) {
+    reasons.push(repeatedChars ? 'Repetisyon Spam' : 'Majiskil Eksesif');
+  }
+
+  return {
+    isSuspect: reasons.length > 0,
+    isMutedUser,
+    isRedacted: false,
+    reasons,
+    matchedKeywords,
+    hasExternalLink,
+    hasExcessiveCapsOrSpam,
+  };
 }
 
 /**
@@ -1199,7 +2616,7 @@ export function exportFullSystemDatabase(): FullSystemBackupPayload {
     absences.length;
 
   return {
-    version: '2.6-engine',
+    version: APP_BASE_VERSION,
     exportedAt: new Date().toISOString(),
     exportedBy: 'Developer Console Master',
     churches,
@@ -1364,15 +2781,15 @@ export async function upgradeAllChurchPasscodesToSha256(): Promise<{ upgradedCou
     const rawPass = (c.adminPasscode || '').trim();
     if (rawPass && !isPasscodeHashed(rawPass)) {
       const hashed = hashAdminPasscodeSync(rawPass, c.id);
-      saveChurch({ ...c, adminPasscode: hashed });
+      saveChurch({ ...c, adminPasscode: hashed }, { deliberatePasscodeUpdate: true });
       upgradedCount++;
     }
   }
 
   if (upgradedCount > 0) {
     await logDeveloperAction(
-      'Chifman SHA-256 PIN Admin Legliz',
-      `${upgradedCount} kòd PIN legliz chifre an SHA-256 (sha256:v1) avèk sèl izolasyon.`,
+      'Chifreman Sekirite Kòd PIN Legliz',
+      `${upgradedCount} kòd PIN legliz pwoteje ak chifreman sekirite avanse.`,
       'success'
     );
   }
@@ -1380,30 +2797,65 @@ export async function upgradeAllChurchPasscodesToSha256(): Promise<{ upgradedCou
   return { upgradedCount };
 }
 
-export async function verifyCloudConfigSync(): Promise<{ ok: boolean; latencyMs: number; message: string }> {
+export async function verifyCloudConfigSync(): Promise<{
+  ok: boolean;
+  readOk: boolean;
+  writeAuthorized: boolean;
+  latencyMs: number;
+  message: string;
+}> {
   const start = Date.now();
+  const cloudAuth = getSuperDeveloperCloudAuthStatus();
   try {
     const docRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
     const snap = await getDoc(docRef);
-    const latencyMs = Date.now() - start;
-    if (snap.exists()) {
+    const readLatencyMs = Date.now() - start;
+
+    if (!cloudAuth.isAuthorized) {
       return {
-        ok: true,
-        latencyMs,
-        message: `Koneksyon Firestore /app_config/developer_engine verifye (${latencyMs}ms). Règ sekirite v2 aktif.`,
+        ok: snap.exists(),
+        readOk: true,
+        writeAuthorized: false,
+        latencyMs: readLatencyMs,
+        message: snap.exists()
+          ? `Koneksyon lekti sèvè santral la fonksyone (${readLatencyMs}ms). Pou anrejistre modifikasyon sou sèvè a, konekte ak ${SUPER_DEVELOPER_EMAIL}.`
+          : `Koneksyon lekti OK (${readLatencyMs}ms). Konekte ak ${SUPER_DEVELOPER_EMAIL} pou aktive konfigirasyon sou sèvè santral la.`,
       };
     }
-    await setDoc(docRef, { ...getDeveloperSettings(), updatedAt: new Date().toISOString() }, { merge: true });
+
+    if (snap.exists()) {
+      await setDoc(docRef, { lastVerifiedAt: new Date().toISOString() }, { merge: true });
+      const totalLatency = Date.now() - start;
+      return {
+        ok: true,
+        readOk: true,
+        writeAuthorized: true,
+        latencyMs: totalLatency,
+        message: `Lekti ak anrejistreman sou sèvè santral la verifye avèk siksè (${totalLatency}ms).`,
+      };
+    }
+
+    const cleaned = cleanObjectForFirestore({
+      ...getDeveloperSettings(),
+      lastUpdated: new Date().toISOString(),
+      lastVerifiedAt: new Date().toISOString(),
+    });
+    await setDoc(docRef, cleaned, { merge: true });
+    const totalLatency = Date.now() - start;
     return {
       ok: true,
-      latencyMs: Date.now() - start,
-      message: `Dokiman /app_config/developer_engine inisyalize e senkronize avèk siksè (${Date.now() - start}ms).`,
+      readOk: true,
+      writeAuthorized: true,
+      latencyMs: totalLatency,
+      message: `Konfigirasyon sèvè santral la kreye e verifye avèk siksè (${totalLatency}ms).`,
     };
   } catch (err: any) {
     return {
       ok: false,
+      readOk: false,
+      writeAuthorized: cloudAuth.isAuthorized,
       latencyMs: Date.now() - start,
-      message: err?.message || 'Pa ka verifye koneksyon Firestore /app_config.',
+      message: err?.message || 'Pa ka verifye koneksyon sèvè santral la.',
     };
   }
 }
@@ -1419,15 +2871,15 @@ export async function runDatabaseIntegrityCheckAndRepair(): Promise<DatabaseDoct
   const issuesDetected: string[] = [];
   const repairsApplied: string[] = [];
 
-  // 1. Verify and auto-upgrade plain-text Church Admin Passcodes to salted SHA-256
+  // 1. Verify and auto-upgrade plain-text Church Admin Passcodes
   let hashedChurchesCount = 0;
   for (const ch of churches) {
     const pass = (ch.adminPasscode || '').trim();
     if (pass && !isPasscodeHashed(pass)) {
-      issuesDetected.push(`Legliz "${ch.name}" (${ch.id}) te gen yon kòd PIN admin an tèks klè ( poko chifre SHA-256).`);
+      issuesDetected.push(`Legliz "${ch.name}" (${ch.id}) te gen yon kòd PIN admin ki poko chifre.`);
       const hashed = hashAdminPasscodeSync(pass, ch.id);
-      saveChurch({ ...ch, adminPasscode: hashed });
-      repairsApplied.push(`Chifre kòd PIN admin legliz "${ch.name}" an SHA-256 (sha256:v1).`);
+      saveChurch({ ...ch, adminPasscode: hashed }, { deliberatePasscodeUpdate: true });
+      repairsApplied.push(`Chifre kòd PIN admin legliz "${ch.name}" avèk sekirite avanse.`);
       hashedChurchesCount++;
     } else {
       hashedChurchesCount++;

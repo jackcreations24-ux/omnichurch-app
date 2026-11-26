@@ -625,8 +625,8 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                 className="py-1.5 px-3 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-amber-400"
               >
                 <option value="ALL">★ Tout Legliz</option>
-                {allChurches.map((c) => (
-                  <option key={c.id} value={c.id}>
+                {allChurches.map((c, idx) => (
+                  <option key={`${c.id || c.code || 'ch'}-${idx}`} value={c.id}>
                     {c.name} ({c.id})
                   </option>
                 ))}
@@ -701,8 +701,8 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-medium">
-                {filteredMembers.slice(0, 100).map((m) => (
-                  <tr key={m.id} className="hover:bg-slate-900/40 text-slate-300 transition-colors">
+                {filteredMembers.slice(0, 100).map((m, idx) => (
+                  <tr key={`${m.id || m.memberId || 'mem'}-${idx}`} className="hover:bg-slate-900/40 text-slate-300 transition-colors">
                     <td className="py-2.5 px-3">
                       <input
                         type="checkbox"
@@ -768,8 +768,8 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                 className="py-1.5 px-3 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-400 cursor-pointer"
               >
                 <option value="ALL">★ Tout Legliz</option>
-                {allChurches.map((c) => (
-                  <option key={c.id} value={c.id}>
+                {allChurches.map((c, idx) => (
+                  <option key={`${c.id || c.code || 'ch-srv'}-${idx}`} value={c.id}>
                     {c.name} ({c.id})
                   </option>
                 ))}
@@ -802,8 +802,8 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-medium">
-                {filteredServices.slice(0, 100).map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-900/40 text-slate-300 transition-colors">
+                {filteredServices.slice(0, 100).map((s, idx) => (
+                  <tr key={`${s.id || s.date || 'srv'}-${idx}`} className="hover:bg-slate-900/40 text-slate-300 transition-colors">
                     <td className="py-2.5 px-3 text-white font-bold">{s.title}</td>
                     <td className="py-2.5 px-3 font-mono text-slate-400">{s.churchId}</td>
                     <td className="py-2.5 px-3 font-mono">{s.date}</td>
@@ -989,8 +989,8 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                   className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-slate-200 text-xs focus:outline-none focus:border-purple-400 cursor-pointer"
                 >
                   <option value="ALL">Tout Legliz ({allChurches.length})</option>
-                  {allChurches.map((c) => (
-                    <option key={c.id} value={c.id}>
+                  {allChurches.map((c, idx) => (
+                    <option key={`${c.id || c.code || 'ch-att'}-${idx}`} value={c.id}>
                       {c.name} ({c.code || c.id})
                     </option>
                   ))}
@@ -1061,7 +1061,7 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                       </td>
                     </tr>
                   ) : (
-                    filteredAttendance.slice(0, 150).map((a) => {
+                    filteredAttendance.slice(0, 150).map((a, idx) => {
                       const churchObj = allChurches.find((c) => c.id === a.churchId);
                       const recStatus = a.attendanceStatus || (a as any).status || 'on_time';
                       const isOnTime = recStatus === 'on_time' || recStatus === 'present';
@@ -1069,7 +1069,7 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                       const memberDisplayName = a.memberName || a.memberId;
 
                       return (
-                        <tr key={a.id} className="hover:bg-slate-900/50 text-slate-300 transition-colors">
+                        <tr key={`${a.id || a.memberId || 'att'}-${idx}`} className="hover:bg-slate-900/50 text-slate-300 transition-colors">
                           <td className="py-3 px-3">
                             <input
                               type="checkbox"
@@ -1336,7 +1336,7 @@ export const DevDatabaseTab: React.FC<DevDatabaseTabProps> = ({
                   rows={4}
                   value={importJsonText}
                   onChange={(e) => setImportJsonText(e.target.value)}
-                  placeholder='{"version":"2.6","churches":[...],"members":[...]}'
+                  placeholder='{"version":"1.1.0","churches":[...],"members":[...]}'
                   className="w-full p-3 rounded-2xl bg-slate-950 border border-slate-800 text-white font-mono text-[11px] focus:outline-none focus:border-amber-400"
                 />
               </div>

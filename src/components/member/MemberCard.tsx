@@ -60,7 +60,9 @@ export const MemberCard: React.FC<MemberCardProps> = ({
     };
   }, [currentMember.id, currentMember.memberId, onMemberUpdated]);
 
-  const hasPhoto = !!(currentMember.googlePhoto || currentMember.avatarUrl);
+  const resolvedMemberPhoto =
+    currentMember.avatarUrl || currentMember.photoUrl || currentMember.googlePhoto;
+  const hasPhoto = !!resolvedMemberPhoto;
 
   const handlePhotoSaved = (updated: Member) => {
     setCurrentMember(updated);
@@ -111,8 +113,9 @@ export const MemberCard: React.FC<MemberCardProps> = ({
           <div className="relative">
             {hasPhoto ? (
               <img
-                src={currentMember.googlePhoto || currentMember.avatarUrl}
+                src={resolvedMemberPhoto}
                 alt={currentMember.fullName}
+                referrerPolicy="no-referrer"
                 className="w-12 h-12 rounded-2xl object-cover border-2 border-amber-400/70 shadow-md"
               />
             ) : (

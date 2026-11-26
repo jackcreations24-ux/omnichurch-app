@@ -1,5 +1,6 @@
 import React, * as reactExports from "react";
 import * as _jsxRuntime from "react/jsx-runtime";
+import type { Member } from "./types";
 const jsxRuntimeExports: any = _jsxRuntime;
 
 import { motion, AnimatePresence } from "motion/react";
@@ -21,6 +22,11 @@ import {
   Settings,
   House,
   User2,
+  UserCheck,
+  ShieldAlert,
+  Mail,
+  RefreshCw,
+  Megaphone,
 } from "lucide-react";
 import {
   getAllChurches,
@@ -33,6 +39,7 @@ import {
   deduplicateAnnouncements,
   getAttendanceByChurch,
   syncServiceAbsencesAutomatically,
+  getNextServiceAutoSyncDelayMs,
   getSavedActiveChurchId,
   setSavedActiveChurchId,
   getSavedActiveRole,
@@ -45,29 +52,59 @@ import {
   syncPendingOfflineAttendance,
   getSavedLanguage,
   setSavedLanguage,
+  clearSavedLanguagePreference,
   hasUserChosenInitialLanguage,
   setHasUserChosenInitialLanguage,
   isChurchAdminAuthorized,
   authorizeChurchAdminSession,
   revokeChurchAdminSession,
+  lockChurchAdminSession,
+  clearChurchAdminLock,
+  isChurchAdminLocked,
   saveToStorage,
+  saveChurch,
   loadFromStorage,
   STORAGE_KEYS,
   isMemberMarkedDeleted,
   isServiceMarkedDeleted,
   isAnnouncementMarkedDeleted,
   isAttendanceMarkedDeleted,
+  markChurchAsDeleted,
+  isChurchMarkedDeleted,
+  markMemberAsDeleted,
+  markServiceAsDeleted,
+  markAnnouncementAsDeleted,
+  markAttendanceAsDeleted,
+  hasPendingLocalUpload,
+  clearPendingLocalUpload,
+  reconcileServerSnapshotWithLocal,
+  pruneAnnouncementInteractionsByTarget,
+  reconcileRemoteChurchWithLocalPasscode,
+  isServiceEnded,
+  getMemberCrossChurchVisits,
+  unifyMemberProfile,
+  resolveAdminOwnedChurches,
+  getRememberedAdminLogin,
 } from "./utils/storage";
+import { getMemberPermissions, isServiceCurrentlyActive } from "./utils/permissions";
 import {
   initializeFirestoreDataIfEmpty,
-  subscribeToChurches,
+  fetchInitialChurches,
+  subscribeToActiveChurch,
+  subscribeToSingleMember,
+  subscribeToMemberAttendance,
+  subscribeToMemberVisitorVisits,
   subscribeToMembers,
   subscribeToServices,
   subscribeToAnnouncements,
   subscribeToAttendance,
+  firestoreSaveChurch,
+  firestoreEnsureChurchExists,
+  syncChurchAdminOwnershipWithCloud,
   firestoreAddMember,
   firestoreAddService,
   firestoreAddAnnouncement,
+  firestoreEnsureDeaconUserProfile,
   isLegacyDemoMember,
   isLegacyDemoService,
   isLegacyDemoAnnouncement,
@@ -85,12 +122,25 @@ import { LanguageSelectionModal } from "./components/common/LanguageSelectionMod
 import { DesktopAppDownloadModal } from "./components/common/DesktopAppDownloadModal";
 import { AdminPasscodeModal } from "./components/admin/AdminPasscodeModal";
 import { CreateChurchModal } from "./components/admin/CreateChurchModal";
+import { AdminEmailVerificationScreen } from "./components/admin/AdminEmailVerificationScreen";
+import { auth } from "./lib/firebase";
+import {
+  EMAIL_VERIFICATION_RESEND_COOLDOWN_SEC,
+  shouldPromptPostCreationEmailVerification,
+  shouldShowProfileResendVerificationButton,
+  needsInlineReauthForVerification,
+  computeResendCooldownRemaining,
+  getVerificationEmailLastSentAt,
+  recordVerificationEmailSent,
+} from "./utils/emailVerificationFlow";
 import { DeveloperAuthModal } from "./components/developer/DeveloperAuthModal";
 import { DeveloperEnginePage } from "./components/developer/DeveloperEnginePage";
 import { MemberPublicVerificationPage } from "./components/public/MemberPublicVerificationPage";
 import { getDeveloperSettings, subscribeToDeveloperSettings } from "./utils/developerStorage";
 import { admobEngine } from "./services/admobService";
 import { SponsorMarqueeFooter } from "./components/common/SponsorMarqueeFooter";
+import { OmniChurchLogo } from "./components/common/OmniChurchLogo";
+import { SplashScreen } from "./components/common/SplashScreen";
 import { AdMobBannerAd } from "./components/common/AdMobBannerAd";
 import { DevicePermissionBanner } from "./components/common/DevicePermissionBanner";
 import { initializeAppPermissions } from "./utils/devicePermissions";
@@ -110,6 +160,7 @@ import { MemberCard } from "./components/member/MemberCard";
 import { MemberAttendanceHistory } from "./components/member/MemberAttendanceHistory";
 import { MemberProfile } from "./components/member/MemberProfile";
 import { MemberLoginScreen } from "./components/member/MemberLoginScreen";
+import { ReceptionDeskPanel } from "./components/member/ReceptionDeskPanel";
 import { AdminDashboard } from "./components/admin/AdminDashboard";
 import { AdminMembers } from "./components/admin/AdminMembers";
 import { AdminAnnouncements } from "./components/admin/AdminAnnouncements";
@@ -119,15 +170,65 @@ import { AdminChurchSettings } from "./components/admin/AdminChurchSettings";
 import { AdminCardsPage } from "./components/admin/AdminCardsPage";
 import { AdminServiceHistory } from "./components/admin/AdminServiceHistory";
 import { NotificationsPage } from "./components/notifications/NotificationsPage";
+import { DonationScreen } from "./components/common/DonationScreen";
+import { PrivacyPolicy } from "./components/legal/PrivacyPolicy";
+import { TermsOfService } from "./components/legal/TermsOfService";
+import {
+  parseLegalRouteFromUrl,
+  getLegalDocumentPath,
+  normalizeOfficialLegalUrl,
+  LegalPageType,
+} from "./utils/legalRoutes";
+import { openExternalUrlSafely } from "./utils/safeExternalLink";
+import {
+  resolveInitialLanguageSync,
+  detectGeoCountryAsync,
+  sanitizeLanguageConfig,
+  getUrlLanguageOverride,
+  getLanguageDisplayName,
+} from "./utils/languageDetection";
 
 export function App() {
   const toast = useToast();
-  const { googleUser } = useAuth();
+  const {
+    googleUser,
+    isLoadingAuth,
+    isEmailVerified,
+    resendAdminVerificationEmail,
+    refreshAuthUserState,
+    signInWithGoogle,
+  } = useAuth();
+  const [adminCloudSyncAlert, setAdminCloudSyncAlert] = reactExports.useState<{
+    churchId: string;
+    email: string;
+  } | null>(null);
+  const [isHandlingAdminSyncAction, setIsHandlingAdminSyncAction] = reactExports.useState(false);
+  const [isResendingAdminBannerVerif, setIsResendingAdminBannerVerif] = reactExports.useState(false);
+  const [adminBannerVerifCooldown, setAdminBannerVerifCooldown] = reactExports.useState(0);
+  reactExports.useEffect(() => {
+    if (adminBannerVerifCooldown <= 0) return;
+    const id = window.setInterval(() => {
+      setAdminBannerVerifCooldown((prev) => (prev > 1 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [adminBannerVerifCooldown > 0]);
+  const lastAdminSyncKeyRef = reactExports.useRef<string>("");
   const [activeChurchId, setActiveChurchId] = reactExports.useState(() => getSavedActiveChurchId());
   const [userRole, setUserRole] = reactExports.useState(() => getSavedActiveRole());
   const [activeMemberId, setActiveMemberId] = reactExports.useState(() => getSavedActiveMemberId());
+  const [languageResolution, setLanguageResolution] = reactExports.useState(() => {
+    const cfg = sanitizeLanguageConfig(getDeveloperSettings().languageConfig);
+    return resolveInitialLanguageSync({
+      config: cfg,
+      hasUserExplicitChoice: hasUserChosenInitialLanguage(),
+    });
+  });
   const [language, setLanguage] = reactExports.useState(() => getSavedLanguage());
-  const [isLanguageModalOpen, setIsLanguageModalOpen] = reactExports.useState(() => !hasUserChosenInitialLanguage());
+  const [isLanguageModalOpen, setIsLanguageModalOpen] = reactExports.useState(
+    () =>
+      !hasUserChosenInitialLanguage() &&
+      sanitizeLanguageConfig(getDeveloperSettings().languageConfig).showInitialModalOnFirstVisit
+  );
   const [isAdminPasscodeModalOpen, setIsAdminPasscodeModalOpen] = reactExports.useState(false);
   const [pendingAdminChurch, setPendingAdminChurch] = reactExports.useState(null);
   const [isAutoLocked, setIsAutoLocked] = reactExports.useState(false);
@@ -136,7 +237,58 @@ export function App() {
     setLanguage(newLang);
     setSavedLanguage(newLang);
     setHasUserChosenInitialLanguage(true);
+    setLanguageResolution((prev) => ({
+      ...prev,
+      language: newLang,
+      source: "user_saved",
+    }));
   };
+  const handleAutoDetectLanguage = reactExports.useCallback(async () => {
+    clearSavedLanguagePreference();
+    const cfg = sanitizeLanguageConfig(getDeveloperSettings().languageConfig);
+    let geo = null;
+    if (cfg.autoDetectByCountry && cfg.useNetworkGeoFallback && isDeviceOnline()) {
+      geo = await detectGeoCountryAsync();
+    }
+    const resolved = resolveInitialLanguageSync({
+      config: { ...cfg, mode: "auto" },
+      hasUserExplicitChoice: false,
+      geoCountryCode: geo,
+      urlLang: null,
+    });
+    setLanguage(resolved.language);
+    setLanguageResolution(resolved);
+    const matchedLangName = getLanguageDisplayName(resolved.language, resolved.language);
+    toast.info(
+      resolved.language === "es"
+        ? "Idioma detectado automáticamente"
+        : resolved.language === "fr"
+        ? "Langue détectée automatiquement"
+        : resolved.language === "en"
+        ? "Language auto-detected"
+        : "Lang Detekte Otomatikman",
+      `${matchedLangName}${resolved.detectedCountryCode ? ` (${resolved.detectedCountryCode})` : ""}`
+    );
+  }, [toast]);
+  const autoDetectedBadge = reactExports.useMemo(() => {
+    if (
+      languageResolution.source !== "country_position" &&
+      languageResolution.source !== "browser"
+    ) {
+      return null;
+    }
+    const country = languageResolution.detectedCountryCode;
+    if (language === "es") {
+      return country ? `Idioma detectado automáticamente (${country})` : "Idioma detectado automáticamente";
+    }
+    if (language === "fr") {
+      return country ? `Langue détectée automatiquement (${country})` : "Langue détectée automatiquement";
+    }
+    if (language === "en") {
+      return country ? `Auto-detected by region (${country})` : "Auto-detected by device";
+    }
+    return country ? `Lang detekte otomatikman selon pozisyon (${country})` : "Lang detekte otomatikman selon aparèy la";
+  }, [languageResolution, language]);
   const [memberTab, setMemberTab] = reactExports.useState("home");
   const [adminTab, setAdminTab] = reactExports.useState("dashboard");
   const [historyInitialServiceId, setHistoryInitialServiceId] = reactExports.useState(void 0);
@@ -159,47 +311,143 @@ export function App() {
   const [isTutorialOpen, setIsTutorialOpen] = reactExports.useState(false);
   const [isDesktopModalOpen, setIsDesktopModalOpen] = reactExports.useState(false);
   const [isCreateChurchModalOpen, setIsCreateChurchModalOpen] = reactExports.useState(false);
-  const [isDevAuthModalOpen, setIsDevAuthModalOpen] = reactExports.useState(false);
+  const [postCreationVerifyChurch, setPostCreationVerifyChurch] = reactExports.useState<any>(null);
+  const [isDevAuthModalOpen, setIsDevAuthModalOpen] = reactExports.useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      const search = new URLSearchParams(window.location.search);
+      const hash = (window.location.hash || "").toLowerCase();
+      return search.has("dev") || hash === "#dev" || hash.startsWith("#dev?");
+    } catch {
+      return false;
+    }
+  });
   const [isDevEngineModalOpen, setIsDevEngineModalOpen] = reactExports.useState(false);
   const [isNotificationsPageOpen, setIsNotificationsPageOpen] = reactExports.useState(false);
-  const [verificationView, setVerificationView] = reactExports.useState(() => {
+  const [isDonateScreenOpen, setIsDonateScreenOpen] = reactExports.useState(false);
+  const parseVerificationUrlParams = (): {
+    isOpen: boolean;
+    memberCode: string;
+    churchId?: string;
+    lang?: "ht" | "fr" | "en" | "es";
+  } => {
     if (typeof window === "undefined") return { isOpen: false, memberCode: "" };
     try {
       const search = new URLSearchParams(window.location.search);
       const hash = window.location.hash || "";
-      const hashSearch = hash.includes("?") ? new URLSearchParams(hash.substring(hash.indexOf("?"))) : new URLSearchParams();
-      const isVerifyFlag = search.has("verify") || search.has("verify_member") || search.has("verification") || hash.includes("verify");
-      const member = search.get("member") || search.get("verify_member") || search.get("m") || hashSearch.get("member") || hashSearch.get("verify_member") || hashSearch.get("m") || "";
-      const church = search.get("church") || search.get("c") || hashSearch.get("church") || hashSearch.get("c") || "";
-      if (isVerifyFlag && member) {
+      const hashSearch = hash.includes("?")
+        ? new URLSearchParams(hash.substring(hash.indexOf("?")))
+        : new URLSearchParams();
+      const member =
+        search.get("member") ||
+        search.get("memberId") ||
+        search.get("verify_member") ||
+        search.get("m") ||
+        hashSearch.get("member") ||
+        hashSearch.get("memberId") ||
+        hashSearch.get("verify_member") ||
+        hashSearch.get("m") ||
+        "";
+      const church =
+        search.get("church") ||
+        search.get("churchId") ||
+        search.get("c") ||
+        hashSearch.get("church") ||
+        hashSearch.get("churchId") ||
+        hashSearch.get("c") ||
+        "";
+      const isVerifyFlag =
+        search.has("verify") ||
+        search.has("verify_member") ||
+        search.has("verification") ||
+        hash.toLowerCase().includes("verify") ||
+        (Boolean(member.trim()) && Boolean(church.trim()));
+      const rawLang = (search.get("lang") || hashSearch.get("lang") || "")
+        .trim()
+        .toLowerCase();
+      const lang =
+        rawLang === "ht" || rawLang === "fr" || rawLang === "en" || rawLang === "es"
+          ? rawLang
+          : undefined;
+      if (isVerifyFlag && member.trim()) {
         return {
           isOpen: true,
           memberCode: member.trim(),
-          churchId: church.trim() || void 0
+          churchId: church.trim() || void 0,
+          lang
         };
       }
     } catch {
     }
     return { isOpen: false, memberCode: "" };
-  });
-  reactExports.useEffect(() => {
-    const handleUrlChange = () => {
+  };
+  const [verificationView, setVerificationView] = reactExports.useState(() =>
+    parseVerificationUrlParams()
+  );
+  const [activeLegalPage, setActiveLegalPage] = reactExports.useState<LegalPageType>(() =>
+    parseLegalRouteFromUrl()
+  );
+  const openLegalPage = reactExports.useCallback((page: "privacy" | "terms", forceInternal = false) => {
+    if (!forceInternal) {
       try {
-        const search = new URLSearchParams(window.location.search);
-        const hash = window.location.hash || "";
-        const hashSearch = hash.includes("?") ? new URLSearchParams(hash.substring(hash.indexOf("?"))) : new URLSearchParams();
-        const isVerifyFlag = search.has("verify") || search.has("verify_member") || search.has("verification") || hash.includes("verify");
-        const member = search.get("member") || search.get("verify_member") || search.get("m") || hashSearch.get("member") || hashSearch.get("verify_member") || hashSearch.get("m") || "";
-        const church = search.get("church") || search.get("c") || hashSearch.get("church") || hashSearch.get("c") || "";
-        if (isVerifyFlag && member) {
-          setVerificationView({
-            isOpen: true,
-            memberCode: member.trim(),
-            churchId: church.trim() || void 0
-          });
+        const legalCfg = getDeveloperSettings().legalConfig;
+        if (legalCfg?.useExternalLinksOnClick) {
+          const rawUrl = page === "privacy" ? legalCfg.officialPrivacyUrl : legalCfg.officialTermsUrl;
+          const cleanUrl = normalizeOfficialLegalUrl(rawUrl);
+          if (cleanUrl) {
+            openExternalUrlSafely(cleanUrl);
+            return;
+          }
         }
       } catch {
       }
+    }
+    setActiveLegalPage(page);
+    if (typeof window !== "undefined") {
+      try {
+        const nextUrl = getLegalDocumentPath(page);
+        window.history.pushState({ legalPage: page }, document.title, nextUrl);
+      } catch {
+      }
+      try {
+        window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
+      } catch {
+        window.scrollTo(0, 0);
+      }
+    }
+  }, []);
+  const closeLegalPage = reactExports.useCallback(() => {
+    setActiveLegalPage(null);
+    if (typeof window !== "undefined") {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("page");
+        url.searchParams.delete("legal");
+        url.searchParams.delete("privacy");
+        url.searchParams.delete("privacy-policy");
+        url.searchParams.delete("policy-privacy");
+        url.searchParams.delete("terms");
+        url.searchParams.delete("terms-of-service");
+        url.searchParams.delete("tos");
+        if (parseLegalRouteFromUrl("", url.hash, "") !== null) {
+          url.hash = "";
+        }
+        const nextPathname =
+          parseLegalRouteFromUrl("", "", url.pathname) !== null ? "/" : url.pathname;
+        const cleanSearch = url.searchParams.toString();
+        const cleanUrl = `${nextPathname}${cleanSearch ? `?${cleanSearch}` : ""}${url.hash}`;
+        window.history.replaceState({}, document.title, cleanUrl);
+      } catch {
+      }
+    }
+  }, []);
+  reactExports.useEffect(() => {
+    const handleUrlChange = () => {
+      const parsed = parseVerificationUrlParams();
+      if (parsed.isOpen && parsed.memberCode) {
+        setVerificationView(parsed);
+      }
+      setActiveLegalPage(parseLegalRouteFromUrl());
     };
     window.addEventListener("popstate", handleUrlChange);
     window.addEventListener("hashchange", handleUrlChange);
@@ -250,6 +498,7 @@ export function App() {
     const savedId = getSavedActiveChurchId();
     return getAttendanceByChurch(savedId);
   });
+  const [memberVisitorVisits, setMemberVisitorVisits] = reactExports.useState(() => []);
   const [isOnline, setIsOnline] = reactExports.useState(() => isDeviceOnline());
   const [pendingSyncCount, setPendingSyncCount] = reactExports.useState(() => getPendingOfflineAttendanceCount());
   const authorizedAdmins = reactExports.useMemo(() => {
@@ -263,7 +512,6 @@ export function App() {
       }
     } catch (_2) {
     }
-    adminSet.add("charlesjj3186@gmail.com");
     allChurches.forEach((c3) => {
       if (c3.adminGoogleEmail && c3.adminGoogleEmail.trim()) {
         adminSet.add(c3.adminGoogleEmail.trim().toLowerCase());
@@ -294,22 +542,26 @@ export function App() {
     return authorizedAdmins.some((adminEmail) => adminEmail.toLowerCase() === cleanEmail);
   }, [googleUser, authorizedAdmins]);
   reactExports.useEffect(() => {
-    if (googleUser && googleUser.email) {
-      const cleanEmail = googleUser.email.trim().toLowerCase();
-      const isAuthorized = authorizedAdmins.some((adminEmail) => adminEmail.toLowerCase() === cleanEmail);
-      if (!isAuthorized) {
-        if (userRole === "admin") {
-          revokeChurchAdminSession();
-          setUserRole("member");
-          setSavedActiveRole("member");
+    if (isLoadingAuth) return;
+    if (userRole === "admin" && currentChurch) {
+      const stillAuthed = isChurchAdminAuthorized(
+        currentChurch.id,
+        googleUser == null ? void 0 : googleUser.email,
+        googleUser == null ? void 0 : googleUser.uid
+      );
+      if (!stillAuthed) {
+        revokeChurchAdminSession();
+        setUserRole("member");
+        setSavedActiveRole("member");
+        if (googleUser && googleUser.email && !isGoogleUserAuthorizedAdmin) {
           toast.info(
             language === "es" ? "Sesión de Miembro" : language === "fr" ? "Espace Membre" : language === "en" ? "Member Session" : "Espas Manm",
-            language === "es" ? `Conectado como miembro (${googleUser.displayName || cleanEmail}). Opciones de administrador restringidas.` : language === "fr" ? `Connecté en tant que membre (${googleUser.displayName || cleanEmail}). Options d'administrateur masquées.` : language === "en" ? `Connected as member (${googleUser.displayName || cleanEmail}). Administrator options hidden.` : `Ou konekte kòm manm (${googleUser.displayName || cleanEmail}). Opsyon admin yo kache.`
+            language === "es" ? `Conectado como miembro (${googleUser.displayName || googleUser.email}). Opciones de administrador restringidas.` : language === "fr" ? `Connecté en tant que membre (${googleUser.displayName || googleUser.email}). Options d'administrateur masquées.` : language === "en" ? `Connected as member (${googleUser.displayName || googleUser.email}). Administrator options hidden.` : `Ou konekte kòm manm (${googleUser.displayName || googleUser.email}). Opsyon admin yo kache.`
           );
         }
       }
     }
-  }, [googleUser, authorizedAdmins, userRole, language]);
+  }, [isLoadingAuth, googleUser, currentChurch, isGoogleUserAuthorizedAdmin, userRole, language]);
   reactExports.useEffect(() => {
     const handleOnline = async () => {
       setIsOnline(true);
@@ -359,15 +611,40 @@ export function App() {
   const syncedLocalIdsRef = reactExports.useRef(/* @__PURE__ */ new Set<string>());
   reactExports.useEffect(() => {
     initializeFirestoreDataIfEmpty();
-    const unsubChurches = subscribeToChurches((updatedChurches) => {
-      if (updatedChurches && updatedChurches.length > 0) {
-        saveToStorage(STORAGE_KEYS.CHURCHES, updatedChurches);
+    fetchInitialChurches(25).then((fetchedChurches) => {
+      if (!fetchedChurches || fetchedChurches.length === 0) return;
+      const localChurches = getAllChurches();
+      const localById = new Map(localChurches.map((c) => [c.id, c]));
+      const mergedMap = new Map<string, any>(localChurches.map((c) => [c.id, c]));
+      for (const remoteChurch of fetchedChurches) {
+        if (isChurchMarkedDeleted(remoteChurch.id)) continue;
+        const localMatch = localById.get(remoteChurch.id);
+        const { church: finalChurch, needsFirestoreReconcile } = reconcileRemoteChurchWithLocalPasscode(
+          remoteChurch,
+          localMatch
+        );
+        const reconcileKey = `church_sync_${finalChurch.id}_${finalChurch.adminPasscode || ""}_${finalChurch.adminGoogleUid || ""}`;
+        if (needsFirestoreReconcile && !syncedLocalIdsRef.current.has(reconcileKey)) {
+          syncedLocalIdsRef.current.add(reconcileKey);
+          firestoreSaveChurch(finalChurch, {
+            deliberatePasscodeUpdate: Boolean(finalChurch.adminPasscode),
+          })
+            .then(() => clearPendingLocalUpload("church", finalChurch.id))
+            .catch(() => {
+              syncedLocalIdsRef.current.delete(reconcileKey);
+            });
+        }
+        mergedMap.set(finalChurch.id, finalChurch);
       }
-      setAllChurches((prev) => {
-        if (JSON.stringify(prev) === JSON.stringify(updatedChurches)) return prev;
-        return updatedChurches;
-      });
-      churchStore.setAllChurches(updatedChurches);
+      const reconciledChurches = Array.from(mergedMap.values());
+      if (reconciledChurches.length > 0) {
+        saveToStorage(STORAGE_KEYS.CHURCHES, reconciledChurches);
+        setAllChurches((prev) => {
+          if (JSON.stringify(prev) === JSON.stringify(reconciledChurches)) return prev;
+          return reconciledChurches;
+        });
+        churchStore.setAllChurches(reconciledChurches);
+      }
     });
     admobEngine.initialize().catch(() => {
     });
@@ -377,15 +654,165 @@ export function App() {
         admobEngine.initialize(newSettings.adMob).catch(() => {
         });
       }
+      if (!hasUserChosenInitialLanguage() && !getUrlLanguageOverride()) {
+        const nextCfg = sanitizeLanguageConfig(newSettings == null ? void 0 : newSettings.languageConfig);
+        const resolved = resolveInitialLanguageSync({
+          config: nextCfg,
+          hasUserExplicitChoice: false,
+        });
+        setLanguage(resolved.language);
+        setLanguageResolution(resolved);
+        if (!nextCfg.showInitialModalOnFirstVisit) {
+          setIsLanguageModalOpen(false);
+        }
+      }
     });
+    const startupCfg = sanitizeLanguageConfig(getDeveloperSettings().languageConfig);
+    if (
+      !hasUserChosenInitialLanguage() &&
+      !getUrlLanguageOverride() &&
+      startupCfg.mode === "auto" &&
+      startupCfg.autoDetectByCountry &&
+      startupCfg.useNetworkGeoFallback
+    ) {
+      detectGeoCountryAsync().then((geoCountry) => {
+        if (!geoCountry || hasUserChosenInitialLanguage() || getUrlLanguageOverride()) return;
+        const latestCfg = sanitizeLanguageConfig(getDeveloperSettings().languageConfig);
+        if (latestCfg.mode !== "auto" || !latestCfg.autoDetectByCountry) return;
+        const refined = resolveInitialLanguageSync({
+          config: latestCfg,
+          hasUserExplicitChoice: false,
+          geoCountryCode: geoCountry,
+        });
+        setLanguage(refined.language);
+        setLanguageResolution(refined);
+      }).catch(() => {
+      });
+    }
+    const handleDevLanguageApplied = (ev: Event) => {
+      const detail = (ev as CustomEvent)?.detail;
+      if (detail && detail.language) {
+        setLanguage(detail.language);
+        setLanguageResolution((prev) => ({
+          ...prev,
+          language: detail.language,
+          source: detail.source || prev.source,
+          detectedCountryCode: detail.detectedCountryCode ?? prev.detectedCountryCode,
+        }));
+      }
+    };
+    window.addEventListener("omnichurch_dev_language_applied", handleDevLanguageApplied);
     return () => {
-      unsubChurches();
       unsubDevSettings();
+      window.removeEventListener("omnichurch_dev_language_applied", handleDevLanguageApplied);
     };
   }, []);
   reactExports.useEffect(() => {
+    if (!activeChurchId) return;
+    const unsubActiveChurch = subscribeToActiveChurch(activeChurchId, (remoteChurch, meta) => {
+      if (!remoteChurch) {
+        if (meta && !meta.fromCache && !meta.hasPendingWrites && !hasPendingLocalUpload("church", activeChurchId)) {
+          markChurchAsDeleted(activeChurchId);
+          const remainingChurches = getAllChurches().filter((c) => c.id !== activeChurchId);
+          saveToStorage(STORAGE_KEYS.CHURCHES, remainingChurches);
+          saveToStorage(
+            STORAGE_KEYS.MEMBERS,
+            loadFromStorage(STORAGE_KEYS.MEMBERS, []).filter((m2) => m2.churchId !== activeChurchId)
+          );
+          saveToStorage(
+            STORAGE_KEYS.SERVICES,
+            loadFromStorage(STORAGE_KEYS.SERVICES, []).filter((s3) => s3.churchId !== activeChurchId)
+          );
+          saveToStorage(
+            STORAGE_KEYS.ANNOUNCEMENTS,
+            loadFromStorage(STORAGE_KEYS.ANNOUNCEMENTS, []).filter((a2) => a2.churchId !== activeChurchId)
+          );
+          saveToStorage(
+            STORAGE_KEYS.ATTENDANCE,
+            loadFromStorage(STORAGE_KEYS.ATTENDANCE, []).filter((att) => att.churchId !== activeChurchId)
+          );
+          saveToStorage(
+            STORAGE_KEYS.PENDING_ATTENDANCE,
+            loadFromStorage(STORAGE_KEYS.PENDING_ATTENDANCE, []).filter((att) => att.churchId !== activeChurchId)
+          );
+          revokeChurchAdminSession(activeChurchId);
+          setAllChurches(remainingChurches);
+          churchStore.setAllChurches(remainingChurches);
+          setActiveMemberId("");
+          setSavedActiveMemberId("");
+          setMemberVisitorVisits([]);
+          if (remainingChurches.length > 0) {
+            const nextChurch = remainingChurches[0];
+            setActiveChurchId(nextChurch.id);
+            setSavedActiveChurchId(nextChurch.id);
+            setCurrentChurch(nextChurch);
+            churchStore.setCurrentChurch(nextChurch);
+          } else {
+            setActiveChurchId("");
+            setSavedActiveChurchId("");
+            setCurrentChurch(null);
+            churchStore.setCurrentChurch(null);
+            setMembers([]);
+            setServices([]);
+            setAnnouncements([]);
+            setAttendanceRecords([]);
+          }
+          toast.warning(
+            language === "es" ? "Iglesia eliminada" : language === "fr" ? "Église supprimée" : language === "en" ? "Church removed" : "Legliz Siprime",
+            language === "es"
+              ? "Esta iglesia fue eliminada en tiempo real desde otra sesión."
+              : language === "fr"
+              ? "Cette église a été supprimée en temps réel depuis une autre session."
+              : language === "en"
+              ? "This church was deleted in real time from another session."
+              : "Legliz sa a siprime an tan reyèl sou sèvè a."
+          );
+        }
+        return;
+      }
+      if (isChurchMarkedDeleted(remoteChurch.id)) return;
+      const localChurches = getAllChurches();
+      const localMatch = localChurches.find((c) => c.id === remoteChurch.id);
+      const { church: finalChurch, needsFirestoreReconcile } = reconcileRemoteChurchWithLocalPasscode(
+        remoteChurch,
+        localMatch
+      );
+      const reconcileKey = `church_sync_${finalChurch.id}_${finalChurch.adminPasscode || ""}_${finalChurch.adminGoogleUid || ""}`;
+      if (needsFirestoreReconcile && !syncedLocalIdsRef.current.has(reconcileKey)) {
+        syncedLocalIdsRef.current.add(reconcileKey);
+        firestoreSaveChurch(finalChurch, {
+          deliberatePasscodeUpdate: Boolean(finalChurch.adminPasscode),
+        })
+          .then(() => clearPendingLocalUpload("church", finalChurch.id))
+          .catch(() => {
+            syncedLocalIdsRef.current.delete(reconcileKey);
+          });
+      }
+      const updatedList = localChurches.some((c) => c.id === finalChurch.id)
+        ? localChurches.map((c) => (c.id === finalChurch.id ? finalChurch : c))
+        : [...localChurches, finalChurch];
+      saveToStorage(STORAGE_KEYS.CHURCHES, updatedList);
+      setAllChurches((prev) => {
+        if (JSON.stringify(prev) === JSON.stringify(updatedList)) return prev;
+        return updatedList;
+      });
+      churchStore.setAllChurches(updatedList);
+      setCurrentChurch((prev) => {
+        if (prev && JSON.stringify(prev) === JSON.stringify(finalChurch)) return prev;
+        return finalChurch;
+      });
+      churchStore.setCurrentChurch(finalChurch);
+    });
+    return () => {
+      unsubActiveChurch();
+    };
+  }, [activeChurchId]);
+  reactExports.useEffect(() => {
     if (allChurches.length > 0) {
-      const found = allChurches.find((c3) => c3.id === activeChurchId) || allChurches[0];
+      const found =
+        allChurches.find((c3) => c3.id === activeChurchId) ||
+        (activeChurchId ? getChurchById(activeChurchId) : undefined) ||
+        allChurches[0];
       setCurrentChurch((prev) => {
         if (prev && found && JSON.stringify(prev) === JSON.stringify(found)) return prev;
         return found;
@@ -393,128 +820,551 @@ export function App() {
       churchStore.setCurrentChurch(found);
     }
   }, [allChurches, activeChurchId]);
+  reactExports.useEffect(() => {
+    if (userRole !== "admin" || !currentChurch || !currentChurch.id || !googleUser || !googleUser.uid) {
+      setAdminCloudSyncAlert(null);
+      return;
+    }
+    const syncKey = `${currentChurch.id}|${googleUser.uid}|${isEmailVerified ? "1" : "0"}`;
+    if (lastAdminSyncKeyRef.current === syncKey) return;
+    lastAdminSyncKeyRef.current = syncKey;
+
+    let cancelled = false;
+    syncChurchAdminOwnershipWithCloud(currentChurch, { forceTokenRefresh: false })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.synced) {
+          setAdminCloudSyncAlert(null);
+          if ((res.status === "uid_healed" || res.status === "created_in_cloud") && res.church) {
+            saveChurch(res.church);
+            clearPendingLocalUpload("church", res.church.id);
+            setCurrentChurch(res.church);
+            churchStore.setCurrentChurch(res.church);
+            const pendingMembers = getMembersByChurch(res.church.id).filter((m) =>
+              hasPendingLocalUpload("member", m.id)
+            );
+            for (const pm of pendingMembers) {
+              firestoreAddMember(pm)
+                .then(() => clearPendingLocalUpload("member", pm.id))
+                .catch(() => {});
+            }
+          }
+        } else if (res.status === "email_verification_required") {
+          setAdminCloudSyncAlert({
+            churchId: currentChurch.id,
+            email: res.expectedEmail || googleUser.email || currentChurch.adminGoogleEmail || "",
+          });
+        } else if (res.status === "owner_mismatch") {
+          const ownedChurches = resolveAdminOwnedChurches(
+            getAllChurches(),
+            googleUser.uid,
+            googleUser.email
+          );
+          if (ownedChurches.length === 1 && ownedChurches[0].id !== currentChurch.id) {
+            const ownedChurch = ownedChurches[0];
+            setActiveChurchId(ownedChurch.id);
+            setSavedActiveChurchId(ownedChurch.id);
+            setCurrentChurch(ownedChurch);
+            churchStore.setCurrentChurch(ownedChurch);
+          }
+        }
+      })
+      .catch(() => {
+        // Non-fatal offline check
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userRole, currentChurch?.id, googleUser?.uid, isEmailVerified]);
   const currentChurchId = currentChurch == null ? void 0 : currentChurch.id;
   const currentChurchCode = currentChurch == null ? void 0 : currentChurch.code;
+  const currentMember = members.find((m2) => m2.memberId === activeMemberId);
+  const currentMemberDocId = currentMember ? currentMember.id : "";
+  const memberPermissions = getMemberPermissions(currentMember);
+  const isReceptionMember = userRole === "member" && memberPermissions.isReception;
+  const isDeaconMember = userRole === "member" && memberPermissions.isDeacon;
+  const canCreateServicesMember = userRole === "member" && memberPermissions.canCreateServices;
+  const canPublishAnnouncementsMember = userRole === "member" && memberPermissions.canPublishAnnouncements;
+  reactExports.useEffect(() => {
+    if (!isDeaconMember || !currentChurchId || !currentMember || !(googleUser == null ? void 0 : googleUser.uid)) {
+      return;
+    }
+    firestoreEnsureDeaconUserProfile(currentChurchId, currentMember).catch(() => {});
+  }, [
+    isDeaconMember,
+    currentChurchId,
+    currentMemberDocId,
+    currentMember == null ? void 0 : currentMember.role,
+    currentMember == null ? void 0 : currentMember.status,
+    googleUser == null ? void 0 : googleUser.uid,
+  ]);
   reactExports.useEffect(() => {
     if (!currentChurchId) return;
     const churchId = currentChurchId;
     const churchCodeUpper = (currentChurchCode || "").toUpperCase();
-    const unsubMembers = subscribeToMembers(churchId, (churchMembers) => {
-      const local = getMembersByChurch(churchId);
-      const remoteIds = new Set(churchMembers.map((m2) => m2.id));
-      const combined = [...churchMembers];
-      for (const lm of local) {
-        if (!remoteIds.has(lm.id) && !isLegacyDemoMember(lm) && !isMemberMarkedDeleted(lm)) {
-          combined.push(lm);
-          const syncKey = `mem_${lm.id}`;
-          if (!syncedLocalIdsRef.current.has(syncKey)) {
-            syncedLocalIdsRef.current.add(syncKey);
-            firestoreAddMember(lm).catch(() => {
+    const isAdminOrReception = userRole === "admin" || isReceptionMember;
+    const isLoggedInRegularMember = userRole === "member" && Boolean(activeMemberId) && !isReceptionMember;
+
+    // On login screen with no active session, avoid opening church real-time listeners
+    if (!isAdminOrReception && !isLoggedInRegularMember) {
+      return;
+    }
+
+    const unsubs: Array<() => void> = [];
+
+    if (isAdminOrReception) {
+      unsubs.push(
+        subscribeToMembers(churchId, (churchMembers, meta) => {
+          const local = getMembersByChurch(churchId);
+          const { merged: filteredClean, pendingToUpload } = reconcileServerSnapshotWithLocal({
+            remoteItems: churchMembers,
+            localItems: local,
+            meta,
+            isMarkedDeleted: (m2) => isMemberMarkedDeleted(m2),
+            markDeleted: (m2) =>
+              markMemberAsDeleted({
+                id: m2.id,
+                memberId: m2.memberId,
+                barcodeToken: m2.barcodeToken,
+              }),
+            isDemo: (m2) => isLegacyDemoMember(m2),
+            isPendingUpload: (id) => hasPendingLocalUpload("member", id),
+            mergeItem: (rm, lm) => {
+              if (!lm) return unifyMemberProfile(rm);
+              if (hasPendingLocalUpload("member", lm.id)) {
+                const locallyClearedPhoto = !lm.avatarUrl && !lm.photoUrl && !lm.googlePhoto;
+                const unifiedPending = unifyMemberProfile(lm, rm);
+                return locallyClearedPhoto
+                  ? { ...unifiedPending, avatarUrl: undefined, photoUrl: undefined, googlePhoto: undefined }
+                  : unifiedPending;
+              }
+              return unifyMemberProfile(rm, lm);
+            },
+          });
+          if (userRole === "admin" && pendingToUpload.length > 0) {
+            const flushPendingMembers = async () => {
+              if (hasPendingLocalUpload("church", churchId) && currentChurch) {
+                try {
+                  await firestoreSaveChurch(currentChurch, {
+                    deliberatePasscodeUpdate: Boolean(currentChurch.adminPasscode),
+                  });
+                  clearPendingLocalUpload("church", churchId);
+                } catch {}
+              } else {
+                await firestoreEnsureChurchExists(churchId, currentChurch);
+              }
+              for (const lm of pendingToUpload) {
+                const syncKey = `mem_${lm.id}`;
+                if (!syncedLocalIdsRef.current.has(syncKey)) {
+                  syncedLocalIdsRef.current.add(syncKey);
+                  firestoreAddMember(lm)
+                    .then(() => clearPendingLocalUpload("member", lm.id))
+                    .catch(() => {
+                      syncedLocalIdsRef.current.delete(syncKey);
+                    });
+                }
+              }
+            };
+            flushPendingMembers().catch(() => {});
+          }
+          setMembers(filteredClean);
+          churchStore.setMembers(filteredClean);
+          const allOtherMembers = loadFromStorage(STORAGE_KEYS.MEMBERS, []).filter(
+            (m2) =>
+              m2.churchId !== churchId &&
+              (churchCodeUpper ? (m2.churchId || "").toUpperCase() !== churchCodeUpper : true) &&
+              !isLegacyDemoMember(m2) &&
+              !isMemberMarkedDeleted(m2)
+          );
+          saveToStorage(STORAGE_KEYS.MEMBERS, [...allOtherMembers, ...filteredClean]);
+        })
+      );
+
+      unsubs.push(
+        subscribeToAttendance(churchId, (churchAttendance, meta) => {
+          const local = getAttendanceByChurch(churchId);
+          const { merged: filteredAtt } = reconcileServerSnapshotWithLocal({
+            remoteItems: churchAttendance,
+            localItems: local,
+            meta,
+            isMarkedDeleted: (att) => isAttendanceMarkedDeleted(att.id),
+            markDeleted: (att) => markAttendanceAsDeleted(att.id),
+            isDemo: (att) => isLegacyDemoAttendance(att),
+            isPendingUpload: (id) => hasPendingLocalUpload("attendance", id),
+          });
+          setAttendanceRecords(filteredAtt);
+          churchStore.setAttendanceRecords(filteredAtt);
+          const allOtherAttendance = loadFromStorage(STORAGE_KEYS.ATTENDANCE, []).filter(
+            (att) =>
+              att.churchId !== churchId &&
+              (churchCodeUpper ? (att.churchId || "").toUpperCase() !== churchCodeUpper : true) &&
+              !isLegacyDemoAttendance(att) &&
+              !isAttendanceMarkedDeleted(att.id)
+          );
+          saveToStorage(STORAGE_KEYS.ATTENDANCE, [...allOtherAttendance, ...filteredAtt]);
+        })
+      );
+    } else if (isLoggedInRegularMember && currentMemberDocId) {
+      // Phase 0 Read Optimization: regular members subscribe ONLY to their own profile & own attendance
+      unsubs.push(
+        subscribeToSingleMember(currentMemberDocId, (remoteMember, meta) => {
+          if (!remoteMember) {
+            if (meta && !meta.fromCache && !meta.hasPendingWrites && !hasPendingLocalUpload("member", currentMemberDocId)) {
+              markMemberAsDeleted({ id: currentMemberDocId, memberId: activeMemberId });
+              const remaining = loadFromStorage(STORAGE_KEYS.MEMBERS, []).filter(
+                (m2) => m2.id !== currentMemberDocId && m2.memberId !== activeMemberId
+              );
+              saveToStorage(STORAGE_KEYS.MEMBERS, remaining);
+              setMembers((prev) => {
+                const next = prev.filter((m2) => m2.id !== currentMemberDocId && m2.memberId !== activeMemberId);
+                churchStore.setMembers(next);
+                return next;
+              });
+              setMemberVisitorVisits([]);
+              setActiveMemberId("");
+              setSavedActiveMemberId("");
+              toast.warning(
+                language === "es" ? "Perfil eliminado" : language === "fr" ? "Profil supprimé" : language === "en" ? "Profile removed" : "Pwofil Siprime",
+                language === "es"
+                  ? "Su perfil de miembro fue eliminado por un administrador."
+                  : language === "fr"
+                  ? "Votre profil de membre a été supprimé par un administrateur."
+                  : language === "en"
+                  ? "Your member profile was deleted by an administrator."
+                  : "Yon administratè siprime pwofil manm ou an tan reyèl."
+              );
+            }
+            return;
+          }
+          if (isMemberMarkedDeleted(remoteMember)) return;
+          const allLocal = loadFromStorage(STORAGE_KEYS.MEMBERS, []);
+          const idx = allLocal.findIndex((m2) => m2.id === remoteMember.id);
+          const existingLocal = idx >= 0 ? allLocal[idx] : undefined;
+          let unified: Member;
+          if (existingLocal && hasPendingLocalUpload("member", remoteMember.id)) {
+            const locallyClearedPhoto =
+              !existingLocal.avatarUrl && !existingLocal.photoUrl && !existingLocal.googlePhoto;
+            unified = unifyMemberProfile(existingLocal, remoteMember);
+            if (locallyClearedPhoto) {
+              unified = { ...unified, avatarUrl: undefined, photoUrl: undefined, googlePhoto: undefined };
+            }
+          } else {
+            unified = existingLocal ? unifyMemberProfile(remoteMember, existingLocal) : unifyMemberProfile(remoteMember);
+          }
+          if (idx >= 0) {
+            allLocal[idx] = unified;
+          } else {
+            allLocal.push(unified);
+          }
+          saveToStorage(STORAGE_KEYS.MEMBERS, allLocal);
+          setMembers((prev) => {
+            const existsIdx = prev.findIndex((m2) => m2.id === unified.id);
+            const next = existsIdx >= 0
+              ? prev.map((m2) => (m2.id === unified.id ? unified : m2))
+              : [...prev, unified];
+            churchStore.setMembers(next);
+            return next;
+          });
+        })
+      );
+
+      unsubs.push(
+        subscribeToMemberAttendance(currentMemberDocId, churchId, (memberAttendanceRemote, meta) => {
+          const localMemberAtt = getAttendanceByChurch(churchId).filter(
+            (att) => att.memberDbId === currentMemberDocId || att.memberId === activeMemberId
+          );
+          const { merged: filteredAtt } = reconcileServerSnapshotWithLocal({
+            remoteItems: memberAttendanceRemote,
+            localItems: localMemberAtt,
+            meta,
+            isMarkedDeleted: (att) => isAttendanceMarkedDeleted(att.id),
+            markDeleted: (att) => markAttendanceAsDeleted(att.id),
+            isDemo: (att) => isLegacyDemoAttendance(att),
+            isPendingUpload: (id) => hasPendingLocalUpload("attendance", id),
+          });
+          setAttendanceRecords(filteredAtt);
+          churchStore.setAttendanceRecords(filteredAtt);
+          if (meta && !meta.fromCache && !meta.hasPendingWrites) {
+            const mergedIds = new Set(filteredAtt.map((att) => att.id));
+            const allAtt = loadFromStorage(STORAGE_KEYS.ATTENDANCE, []);
+            const cleanedAtt = allAtt.filter((att) => {
+              const isThisMember =
+                att.churchId === churchId &&
+                (att.memberDbId === currentMemberDocId || att.memberId === activeMemberId);
+              if (!isThisMember) return !isAttendanceMarkedDeleted(att.id);
+              return mergedIds.has(att.id);
             });
+            if (cleanedAtt.length !== allAtt.length) {
+              saveToStorage(STORAGE_KEYS.ATTENDANCE, cleanedAtt);
+            }
+          }
+        })
+      );
+    }
+
+    unsubs.push(
+      subscribeToServices(churchId, (churchServices, meta) => {
+        const local = getServicesByChurch(churchId);
+        const { merged: filteredServices, pendingToUpload, removedIdsProcessed } = reconcileServerSnapshotWithLocal({
+          remoteItems: churchServices,
+          localItems: local,
+          meta,
+          isMarkedDeleted: (s3) => isServiceMarkedDeleted(s3.id),
+          markDeleted: (s3) => markServiceAsDeleted(s3.id),
+          isDemo: (s3) => isLegacyDemoService(s3),
+          isPendingUpload: (id) => hasPendingLocalUpload("service", id),
+        });
+        if (removedIdsProcessed.length > 0) {
+          removedIdsProcessed.forEach((rid) => {
+            pruneAnnouncementInteractionsByTarget(rid);
+            pruneAnnouncementInteractionsByTarget(`srv-feed-${rid}`);
+          });
+        }
+        if (userRole === "admin" || canCreateServicesMember) {
+          for (const ls of pendingToUpload) {
+            const syncKey = `srv_${ls.id}`;
+            if (!syncedLocalIdsRef.current.has(syncKey)) {
+              syncedLocalIdsRef.current.add(syncKey);
+              firestoreAddService(ls)
+                .then(() => clearPendingLocalUpload("service", ls.id))
+                .catch(() => {
+                  syncedLocalIdsRef.current.delete(syncKey);
+                });
+            }
           }
         }
-      }
-      const filteredClean = combined.filter((m2) => !isLegacyDemoMember(m2) && !isMemberMarkedDeleted(m2));
-      setMembers(filteredClean);
-      churchStore.setMembers(filteredClean);
-      const allOtherMembers = loadFromStorage(STORAGE_KEYS.MEMBERS, []).filter(
-        (m2) => m2.churchId !== churchId && (churchCodeUpper ? (m2.churchId || "").toUpperCase() !== churchCodeUpper : true) && !isLegacyDemoMember(m2)
-      );
-      saveToStorage(STORAGE_KEYS.MEMBERS, [...allOtherMembers, ...filteredClean]);
-    });
-    const unsubServices = subscribeToServices(churchId, (churchServices) => {
-      const local = getServicesByChurch(churchId);
-      const remoteIds = new Set(churchServices.map((s3) => s3.id));
-      const combined = [...churchServices];
-      for (const ls of local) {
-        if (!remoteIds.has(ls.id) && !isLegacyDemoService(ls) && !isServiceMarkedDeleted(ls.id)) {
-          combined.push(ls);
-          const syncKey = `srv_${ls.id}`;
-          if (!syncedLocalIdsRef.current.has(syncKey)) {
-            syncedLocalIdsRef.current.add(syncKey);
-            firestoreAddService(ls).catch(() => {
-            });
+        setServices(filteredServices);
+        churchStore.setServices(filteredServices);
+        const allOtherServices = loadFromStorage(STORAGE_KEYS.SERVICES, []).filter(
+          (s3) =>
+            s3.churchId !== churchId &&
+            (churchCodeUpper ? (s3.churchId || "").toUpperCase() !== churchCodeUpper : true) &&
+            !isLegacyDemoService(s3) &&
+            !isServiceMarkedDeleted(s3.id)
+        );
+        saveToStorage(STORAGE_KEYS.SERVICES, [...allOtherServices, ...filteredServices]);
+      })
+    );
+
+    unsubs.push(
+      subscribeToAnnouncements(churchId, (churchAnnouncements, meta) => {
+        const local = getAnnouncementsByChurch(churchId);
+        const { merged, pendingToUpload, removedIdsProcessed } = reconcileServerSnapshotWithLocal({
+          remoteItems: churchAnnouncements,
+          localItems: local,
+          meta,
+          isMarkedDeleted: (a2) => isAnnouncementMarkedDeleted(a2.id),
+          markDeleted: (a2) => markAnnouncementAsDeleted(a2.id),
+          isDemo: (a2) => isLegacyDemoAnnouncement(a2),
+          isPendingUpload: (id) => hasPendingLocalUpload("announcement", id),
+        });
+        if (removedIdsProcessed.length > 0) {
+          removedIdsProcessed.forEach((rid) => pruneAnnouncementInteractionsByTarget(rid));
+        }
+        if (userRole === "admin" || canPublishAnnouncementsMember) {
+          for (const la2 of pendingToUpload) {
+            const syncKey = `ann_${la2.id}`;
+            if (!syncedLocalIdsRef.current.has(syncKey)) {
+              syncedLocalIdsRef.current.add(syncKey);
+              firestoreAddAnnouncement(la2)
+                .then(() => clearPendingLocalUpload("announcement", la2.id))
+                .catch(() => {
+                  syncedLocalIdsRef.current.delete(syncKey);
+                });
+            }
           }
         }
-      }
-      const filteredServices = combined.filter((s3) => !isLegacyDemoService(s3) && !isServiceMarkedDeleted(s3.id));
-      setServices(filteredServices);
-      churchStore.setServices(filteredServices);
-      const allOtherServices = loadFromStorage(STORAGE_KEYS.SERVICES, []).filter(
-        (s3) => s3.churchId !== churchId && (churchCodeUpper ? (s3.churchId || "").toUpperCase() !== churchCodeUpper : true) && !isLegacyDemoService(s3)
-      );
-      saveToStorage(STORAGE_KEYS.SERVICES, [...allOtherServices, ...filteredServices]);
-    });
-    const unsubAnnouncements = subscribeToAnnouncements(churchId, (churchAnnouncements) => {
-      const local = getAnnouncementsByChurch(churchId);
-      const remoteIds = new Set(churchAnnouncements.map((a2) => a2.id));
-      const combined = [...churchAnnouncements];
-      for (const la2 of local) {
-        if (!remoteIds.has(la2.id) && !isLegacyDemoAnnouncement(la2) && !isAnnouncementMarkedDeleted(la2.id)) {
-          combined.push(la2);
-          const syncKey = `ann_${la2.id}`;
-          if (!syncedLocalIdsRef.current.has(syncKey)) {
-            syncedLocalIdsRef.current.add(syncKey);
-            firestoreAddAnnouncement(la2).catch(() => {
-            });
-          }
-        }
-      }
-      const deduplicated = deduplicateAnnouncements(combined.filter((a2) => !isLegacyDemoAnnouncement(a2) && !isAnnouncementMarkedDeleted(a2.id)));
-      setAnnouncements(deduplicated);
-      churchStore.setAnnouncements(deduplicated);
-      const allOtherAnnouncements = loadFromStorage(STORAGE_KEYS.ANNOUNCEMENTS, []).filter(
-        (a2) => a2.churchId !== churchId && (churchCodeUpper ? (a2.churchId || "").toUpperCase() !== churchCodeUpper : true) && !isLegacyDemoAnnouncement(a2)
-      );
-      saveToStorage(STORAGE_KEYS.ANNOUNCEMENTS, [...allOtherAnnouncements, ...deduplicated]);
-    });
-    const unsubAttendance = subscribeToAttendance(churchId, (churchAttendance) => {
-      const local = getAttendanceByChurch(churchId);
-      const remoteIds = new Set(churchAttendance.map((att) => att.id));
-      const combined = [...churchAttendance];
-      for (const latt of local) {
-        if (!remoteIds.has(latt.id) && !isLegacyDemoAttendance(latt) && !isAttendanceMarkedDeleted(latt.id)) {
-          combined.push(latt);
-        }
-      }
-      const filteredAtt = combined.filter((att) => !isLegacyDemoAttendance(att) && !isAttendanceMarkedDeleted(att.id));
-      setAttendanceRecords(filteredAtt);
-      churchStore.setAttendanceRecords(filteredAtt);
-      const allOtherAttendance = loadFromStorage(STORAGE_KEYS.ATTENDANCE, []).filter(
-        (att) => att.churchId !== churchId && (churchCodeUpper ? (att.churchId || "").toUpperCase() !== churchCodeUpper : true) && !isLegacyDemoAttendance(att)
-      );
-      saveToStorage(STORAGE_KEYS.ATTENDANCE, [...allOtherAttendance, ...filteredAtt]);
-    });
+        const deduplicated = deduplicateAnnouncements(
+          merged.filter((a2) => !isLegacyDemoAnnouncement(a2) && !isAnnouncementMarkedDeleted(a2.id))
+        );
+        setAnnouncements(deduplicated);
+        churchStore.setAnnouncements(deduplicated);
+        const allOtherAnnouncements = loadFromStorage(STORAGE_KEYS.ANNOUNCEMENTS, []).filter(
+          (a2) =>
+            a2.churchId !== churchId &&
+            (churchCodeUpper ? (a2.churchId || "").toUpperCase() !== churchCodeUpper : true) &&
+            !isLegacyDemoAnnouncement(a2) &&
+            !isAnnouncementMarkedDeleted(a2.id)
+        );
+        saveToStorage(STORAGE_KEYS.ANNOUNCEMENTS, [...allOtherAnnouncements, ...deduplicated]);
+      })
+    );
+
     return () => {
-      unsubMembers();
-      unsubServices();
-      unsubAnnouncements();
-      unsubAttendance();
+      unsubs.forEach((fn) => fn());
     };
-  }, [currentChurchId, currentChurchCode]);
+  }, [
+    currentChurchId,
+    currentChurchCode,
+    userRole,
+    activeMemberId,
+    currentMemberDocId,
+    isReceptionMember,
+    canCreateServicesMember,
+    canPublishAnnouncementsMember,
+  ]);
+  reactExports.useEffect(() => {
+    if (userRole !== "member" || !currentChurchId || !currentMemberDocId || !activeMemberId) {
+      setMemberVisitorVisits([]);
+      return;
+    }
+    const localVisits = getMemberCrossChurchVisits(currentMemberDocId, activeMemberId, currentChurchId);
+    setMemberVisitorVisits(localVisits);
+    const unsub = subscribeToMemberVisitorVisits(
+      currentMemberDocId,
+      activeMemberId,
+      currentChurchId,
+      (remoteVisits, meta) => {
+        const latestLocal = getMemberCrossChurchVisits(currentMemberDocId, activeMemberId, currentChurchId);
+        const { merged } = reconcileServerSnapshotWithLocal({
+          remoteItems: remoteVisits,
+          localItems: latestLocal,
+          meta,
+          isMarkedDeleted: (v) => isAttendanceMarkedDeleted(v.id),
+          markDeleted: (v) => markAttendanceAsDeleted(v.id),
+          isDemo: (v) => isLegacyDemoAttendance(v),
+          isPendingUpload: (id) => hasPendingLocalUpload("attendance", id),
+        });
+        merged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+        setMemberVisitorVisits(merged);
+      }
+    );
+    return () => {
+      unsub();
+    };
+  }, [userRole, currentChurchId, currentMemberDocId, activeMemberId]);
   reactExports.useEffect(() => {
     if (!currentChurchId) return;
-    syncServiceAbsencesAutomatically(currentChurchId);
-    const interval = setInterval(() => {
-      syncServiceAbsencesAutomatically(currentChurchId);
-    }, 6e4);
+    const handleCrossTabSync = (e3?: StorageEvent) => {
+      if (
+        e3 &&
+        e3.key &&
+        ![
+          STORAGE_KEYS.CHURCHES,
+          STORAGE_KEYS.MEMBERS,
+          STORAGE_KEYS.SERVICES,
+          STORAGE_KEYS.ANNOUNCEMENTS,
+          STORAGE_KEYS.ATTENDANCE,
+          STORAGE_KEYS.DELETED_CHURCHES,
+          STORAGE_KEYS.DELETED_MEMBERS,
+          STORAGE_KEYS.DELETED_SERVICES,
+          STORAGE_KEYS.DELETED_ANNOUNCEMENTS,
+          STORAGE_KEYS.DELETED_ATTENDANCE,
+        ].includes(e3.key)
+      ) {
+        return;
+      }
+      const nextChurches = getAllChurches();
+      setAllChurches(nextChurches);
+      churchStore.setAllChurches(nextChurches);
+      setMembers(getMembersByChurch(currentChurchId));
+      setServices(getServicesByChurch(currentChurchId));
+      setAnnouncements(getAnnouncementsByChurch(currentChurchId));
+      setAttendanceRecords(getAttendanceByChurch(currentChurchId));
+    };
+    const handleMemberUpdatedEvent = (e3?: Event) => {
+      const updatedDetail = (e3 as CustomEvent<Member> | undefined)?.detail;
+      if (updatedDetail && updatedDetail.id) {
+        setMembers((prev) => {
+          const exists = prev.some((m2) => m2.id === updatedDetail.id || m2.memberId === updatedDetail.memberId);
+          const next = exists
+            ? prev.map((m2) => (m2.id === updatedDetail.id || m2.memberId === updatedDetail.memberId ? updatedDetail : m2))
+            : [...prev, updatedDetail];
+          churchStore.setMembers(next);
+          return next;
+        });
+      } else {
+        const latestMembers = getMembersByChurch(currentChurchId);
+        setMembers(latestMembers);
+        churchStore.setMembers(latestMembers);
+      }
+    };
+    window.addEventListener("storage", handleCrossTabSync);
+    window.addEventListener("church_data_updated", handleCrossTabSync as EventListener);
+    window.addEventListener("omnichurch_member_deleted", handleCrossTabSync as EventListener);
+    window.addEventListener("omnichurch_member_updated", handleMemberUpdatedEvent as EventListener);
+    return () => {
+      window.removeEventListener("storage", handleCrossTabSync);
+      window.removeEventListener("church_data_updated", handleCrossTabSync as EventListener);
+      window.removeEventListener("omnichurch_member_deleted", handleCrossTabSync as EventListener);
+      window.removeEventListener("omnichurch_member_updated", handleMemberUpdatedEvent as EventListener);
+    };
+  }, [currentChurchId]);
+  const servicesScheduleSignature = services
+    .filter((s3) => s3 && !s3.isPermanentlyEnded)
+    .map((s3) => `${s3.id}:${s3.date || ""}:${s3.startTime || ""}:${s3.endTime || ""}:${s3.endedAt || ""}`)
+    .join("|");
+  reactExports.useEffect(() => {
+    if (!currentChurchId || userRole !== "admin") return;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+
+    const clearScheduledTimer = () => {
+      if (timerId !== null) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+    };
+
+    const scheduleOrRunAutoSync = (allowImmediateRun: boolean) => {
+      clearScheduledTimer();
+      const churchServices = getServicesByChurch(currentChurchId);
+      const delayMs = getNextServiceAutoSyncDelayMs(churchServices);
+      if (delayMs === null) {
+        return;
+      }
+      if (delayMs === 0 && allowImmediateRun) {
+        const beforeSig = churchServices
+          .map((s3) => `${s3.id}:${s3.isOpenForAttendance ? 1 : 0}:${s3.isPermanentlyEnded ? 1 : 0}`)
+          .join("|");
+        syncServiceAbsencesAutomatically(currentChurchId);
+        const updatedChurchServices = getServicesByChurch(currentChurchId);
+        const afterSig = updatedChurchServices
+          .map((s3) => `${s3.id}:${s3.isOpenForAttendance ? 1 : 0}:${s3.isPermanentlyEnded ? 1 : 0}`)
+          .join("|");
+        if (afterSig !== beforeSig) {
+          setServices(updatedChurchServices);
+        }
+        const nextDelayMs = getNextServiceAutoSyncDelayMs(updatedChurchServices);
+        if (nextDelayMs !== null && nextDelayMs > 0) {
+          timerId = setTimeout(() => {
+            scheduleOrRunAutoSync(true);
+          }, nextDelayMs);
+        }
+        return;
+      }
+      if (delayMs > 0) {
+        timerId = setTimeout(() => {
+          scheduleOrRunAutoSync(true);
+        }, delayMs);
+      }
+    };
+
+    scheduleOrRunAutoSync(true);
+
+    const handleWakeCheck = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      scheduleOrRunAutoSync(true);
+    };
     const handleAbsencesSynced = () => {
       setAttendanceRecords(getAttendanceByChurch(currentChurchId));
     };
-    const handleChurchDataUpdated = () => {
-      setMembers(getMembersByChurch(currentChurchId));
-      setAttendanceRecords(getAttendanceByChurch(currentChurchId));
-    };
+
     window.addEventListener("app_legiz_absences_synced", handleAbsencesSynced);
-    window.addEventListener("church_data_updated", handleChurchDataUpdated);
-    window.addEventListener("omnichurch_member_deleted", handleChurchDataUpdated);
+    window.addEventListener("focus", handleWakeCheck);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleWakeCheck);
+    }
+
     return () => {
-      clearInterval(interval);
+      clearScheduledTimer();
       window.removeEventListener("app_legiz_absences_synced", handleAbsencesSynced);
-      window.removeEventListener("church_data_updated", handleChurchDataUpdated);
-      window.removeEventListener("omnichurch_member_deleted", handleChurchDataUpdated);
+      window.removeEventListener("focus", handleWakeCheck);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleWakeCheck);
+      }
     };
-  }, [currentChurchId]);
+  }, [currentChurchId, userRole, servicesScheduleSignature]);
   const handleChurchChange = (newChurchId) => {
     if (userRole === "member" && activeMemberId) {
       return;
@@ -522,19 +1372,16 @@ export function App() {
     const targetChurch = allChurches.find((c3) => c3.id === newChurchId) || getChurchById(newChurchId);
     if (!targetChurch) return;
     if (userRole === "admin") {
-      if (googleUser && googleUser.email && !isGoogleUserAuthorizedAdmin) {
-        revokeChurchAdminSession();
-        setUserRole("member");
-        setSavedActiveRole("member");
-        return;
-      }
-      const isAuthed = isChurchAdminAuthorized(newChurchId, googleUser == null ? void 0 : googleUser.email);
+      const isAuthed = isChurchAdminAuthorized(newChurchId, googleUser == null ? void 0 : googleUser.email, googleUser == null ? void 0 : googleUser.uid);
       if (!isAuthed) {
         setPendingAdminChurch(targetChurch);
         setIsAdminPasscodeModalOpen(true);
         return;
       }
     }
+    setAllChurches((prev) =>
+      prev.some((c3) => c3.id === targetChurch.id) ? prev : [...prev, targetChurch]
+    );
     setActiveChurchId(newChurchId);
     setSavedActiveChurchId(newChurchId);
     if (activeMemberId) {
@@ -548,30 +1395,60 @@ export function App() {
     setCurrentChurch(targetChurch);
     toast.info("Espas Legliz Chanje", `Ou konekte nan espas prive "${targetChurch.name}".`);
   };
+  const effectiveAutoLockMinutes =
+    typeof (currentChurch == null ? void 0 : currentChurch.autoLockMinutes) === "number"
+      ? currentChurch.autoLockMinutes
+      : 5;
   const handleRoleChange = (newRole) => {
     if (newRole === "admin") {
-      if (googleUser && googleUser.email && !isGoogleUserAuthorizedAdmin) {
-        toast.error(
-          language === "es" ? "Acceso Administrativo Denegado" : language === "fr" ? "Accès Administrateur Refusé" : language === "en" ? "Admin Access Denied" : "Aksè Administratè Refize",
-          language === "es" ? `La cuenta Google "${googleUser.email}" no está en la lista de administradores autorizados.` : language === "fr" ? `Le compte Google "${googleUser.email}" n'est pas dans la liste des administrateurs autorisés.` : language === "en" ? `Google account "${googleUser.email}" is not on the authorized administrators list.` : `Kont Google "${googleUser.email}" la pa nan lis administratè ki otorize yo.`
+      const remembered = getRememberedAdminLogin();
+      const ownedChurches = googleUser
+        ? resolveAdminOwnedChurches(allChurches, googleUser.uid, googleUser.email)
+        : [];
+      const preferredOwned =
+        (remembered.churchId
+          ? ownedChurches.find((c3) => c3.id === remembered.churchId)
+          : undefined) ||
+        (ownedChurches.length === 1 ? ownedChurches[0] : undefined);
+
+      if (
+        preferredOwned &&
+        isChurchAdminAuthorized(
+          preferredOwned.id,
+          googleUser == null ? void 0 : googleUser.email,
+          googleUser == null ? void 0 : googleUser.uid
+        )
+      ) {
+        handleAdminAuthSuccess(preferredOwned);
+        toast.info(
+          language === "es"
+            ? "Modo Administrador Activado"
+            : language === "fr"
+            ? "Mode Administrateur Activé"
+            : language === "en"
+            ? "Administrator Mode Active"
+            : "Mòd Administratè Aktive",
+          preferredOwned.name
         );
         return;
       }
-      const target = currentChurch || allChurches[0];
-      if (target) {
-        const isAuthed = isChurchAdminAuthorized(target.id, googleUser == null ? void 0 : googleUser.email);
-        if (!isAuthed) {
-          setIsAutoLocked(false);
-          setPendingAdminChurch(target);
-          setIsAdminPasscodeModalOpen(true);
-          return;
-        }
+
+      const isLockedCurrentOwned = Boolean(
+        currentChurch &&
+          googleUser &&
+          isChurchAdminLocked(currentChurch.id) &&
+          resolveAdminOwnedChurches([currentChurch], googleUser.uid, googleUser.email).length > 0
+      );
+
+      if (isLockedCurrentOwned && currentChurch) {
+        setIsAutoLocked(true);
+        setPendingAdminChurch(currentChurch);
+      } else {
+        setIsAutoLocked(false);
+        setPendingAdminChurch(null);
       }
-      setIsAutoLocked(false);
-      setUserRole("admin");
-      setSavedActiveRole("admin");
-      lastAdminActivityRef.current = Date.now();
-      toast.info("Mòd Administratè Aktive", "Aksè ak Tablo Bò, Manm, Sèvis, Anons & Scanner.");
+      setIsAdminPasscodeModalOpen(true);
+      return;
     } else {
       setIsAutoLocked(false);
       revokeChurchAdminSession();
@@ -581,18 +1458,28 @@ export function App() {
     }
   };
   const handleAdminAuthSuccess = (authorizedChurch) => {
-    if (googleUser && googleUser.email && !isGoogleUserAuthorizedAdmin) {
-      toast.error(
-        language === "es" ? "Acceso Administrativo Denegado" : language === "fr" ? "Accès Administrateur Refusé" : language === "en" ? "Admin Access Denied" : "Aksè Administratè Refize",
-        language === "es" ? `La cuenta Google "${googleUser.email}" no está autorizada para administrar.` : `Kont Google "${googleUser.email}" la pa otorize kòm administratè.`
-      );
-      return;
-    }
     setIsAutoLocked(false);
+    clearChurchAdminLock(authorizedChurch.id);
     authorizeChurchAdminSession(authorizedChurch.id);
+    // Strict multi-tenant workspace isolation: clear any prior member or tenant state immediately
+    setActiveMemberId("");
+    setSavedActiveMemberId("");
+    setMemberVisitorVisits([]);
+    setAdminCloudSyncAlert(null);
+    lastAdminSyncKeyRef.current = "";
+    const refreshedChurches = getAllChurches();
+    setAllChurches(
+      refreshedChurches.some((c3) => c3.id === authorizedChurch.id)
+        ? refreshedChurches
+        : [...refreshedChurches, authorizedChurch]
+    );
     setActiveChurchId(authorizedChurch.id);
     setSavedActiveChurchId(authorizedChurch.id);
     setCurrentChurch(authorizedChurch);
+    setMembers(getMembersByChurch(authorizedChurch.id));
+    setServices(getServicesByChurch(authorizedChurch.id));
+    setAnnouncements(getAnnouncementsByChurch(authorizedChurch.id));
+    setAttendanceRecords(getAttendanceByChurch(authorizedChurch.id));
     setUserRole("admin");
     setSavedActiveRole("admin");
     lastAdminActivityRef.current = Date.now();
@@ -601,7 +1488,7 @@ export function App() {
   };
   const handleLockAdminSession = reactExports.useCallback((isManual = false) => {
     if (userRole !== "admin") return;
-    revokeChurchAdminSession();
+    lockChurchAdminSession(currentChurch == null ? void 0 : currentChurch.id);
     setUserRole("member");
     setSavedActiveRole("member");
     if (currentChurch) {
@@ -615,14 +1502,15 @@ export function App() {
         language === "es" ? "Ha bloqueado la consola de administración manualmente para proteger los datos." : language === "fr" ? "Vous avez verrouillé la console administrateur manuellement pour sécuriser les données." : language === "en" ? "You manually locked the admin console to protect confidential church data." : "Ou bloke espas administratè a pou pwoteje done ak rapò legliz la."
       );
     } else {
+      const lockMins = typeof (currentChurch == null ? void 0 : currentChurch.autoLockMinutes) === "number" ? currentChurch.autoLockMinutes : 5;
       toast.warning(
-        language === "es" ? "Bloqueo Automático (5 min)" : language === "fr" ? "Verrouillage Automatique (5 min)" : language === "en" ? "Auto-Lock (5 min)" : "Sesyon Bloke pou Inaktivite",
-        language === "es" ? "La consola de administración se bloqueó automáticamente tras 5 minutos sin actividad para proteger los datos de la iglesia." : language === "fr" ? "La console administrateur s’est verrouillée automatiquement après 5 minutes d’inactivité pour sécuriser les données de l’église." : language === "en" ? "The admin console automatically locked after 5 minutes of inactivity to safeguard church records." : "Espas administratè a bloke otomatikman apre 5 minit san aktivite pou sekirize done legliz la."
+        language === "es" ? `Bloqueo Automático (${lockMins} min)` : language === "fr" ? `Verrouillage Automatique (${lockMins} min)` : language === "en" ? `Auto-Lock (${lockMins} min)` : "Sesyon Bloke pou Inaktivite",
+        language === "es" ? `La consola de administración se bloqueó automáticamente tras ${lockMins} minutos sin actividad para proteger los datos de la iglesia.` : language === "fr" ? `La console administrateur s’est verrouillée automatiquement après ${lockMins} minutes d’inactivité pour sécuriser les données de l’église.` : language === "en" ? `The admin console automatically locked after ${lockMins} minutes of inactivity to safeguard church records.` : `Espas administratè a bloke otomatikman apre ${lockMins} minit san aktivite pou sekirize done legliz la.`
       );
     }
   }, [userRole, currentChurch, language, toast]);
   reactExports.useEffect(() => {
-    if (userRole !== "admin") return;
+    if (userRole !== "admin" || effectiveAutoLockMinutes <= 0) return;
     lastAdminActivityRef.current = Date.now();
     const recordUserActivity = () => {
       lastAdminActivityRef.current = Date.now();
@@ -640,7 +1528,7 @@ export function App() {
     monitoredEvents.forEach((eventName) => {
       window.addEventListener(eventName, recordUserActivity, { passive: true });
     });
-    const FIVE_MINUTES_MS = 5 * 60 * 1e3;
+    const LOCK_TIMEOUT_MS = effectiveAutoLockMinutes * 60 * 1e3;
     const POLLING_INTERVAL_MS = 4e3;
     const timerInterval = setInterval(() => {
       if (isScannerOpen) {
@@ -651,7 +1539,7 @@ export function App() {
         return;
       }
       const idleDuration = Date.now() - lastAdminActivityRef.current;
-      if (idleDuration >= FIVE_MINUTES_MS) {
+      if (idleDuration >= LOCK_TIMEOUT_MS) {
         handleLockAdminSession(false);
       }
     }, POLLING_INTERVAL_MS);
@@ -661,7 +1549,7 @@ export function App() {
       });
       clearInterval(timerInterval);
     };
-  }, [userRole, isScannerOpen, isAdminPasscodeModalOpen, handleLockAdminSession]);
+  }, [userRole, isScannerOpen, isAdminPasscodeModalOpen, handleLockAdminSession, effectiveAutoLockMinutes]);
   const handleMemberChange = (newMemberId) => {
     setActiveMemberId(newMemberId);
     setSavedActiveMemberId(newMemberId);
@@ -671,8 +1559,14 @@ export function App() {
     }
   };
   const handleMemberLoginSuccess = (member, church) => {
+    setAllChurches((prev) =>
+      prev.some((c3) => c3.id === church.id) ? prev : [...prev, church]
+    );
     setActiveChurchId(church.id);
     setSavedActiveChurchId(church.id);
+    setCurrentChurch(church);
+    setMembers(getMembersByChurch(church.id));
+    setAttendanceRecords(getAttendanceByChurch(church.id));
     setActiveMemberId(member.memberId);
     setSavedActiveMemberId(member.memberId);
     setMemberTab("home");
@@ -749,35 +1643,77 @@ export function App() {
   const handleMemberLogout = () => {
     setActiveMemberId("");
     setSavedActiveMemberId("");
+    setMemberVisitorVisits([]);
     toast.info("Dekonekte", "Ou dekonekte nan espas manm nan avèk siksè.");
   };
-  const handleToggleActiveService = (serviceId, isOpen) => {
-    if (!currentChurch) return;
-    setServiceActiveStatus(currentChurch.id, serviceId, isOpen);
+  const handleToggleActiveService = (serviceId: string, isOpen: boolean): boolean => {
+    if (!currentChurch) return false;
+    const ok = setServiceActiveStatus(currentChurch.id, serviceId, isOpen);
+    if (ok) {
+      setServices(getServicesByChurch(currentChurch.id));
+    }
+    return ok;
   };
-  const currentMember = members.find((m2) => m2.memberId === activeMemberId);
+  const activeOngoingServices = services.filter((s3) => isServiceCurrentlyActive(s3, isServiceEnded));
+  reactExports.useEffect(() => {
+    if (!isReceptionMember && memberTab === "reception") {
+      setMemberTab("home");
+    }
+    if (!canCreateServicesMember && memberTab === "deacon_services") {
+      setMemberTab("home");
+    }
+    if (!canPublishAnnouncementsMember && memberTab === "deacon_announcements") {
+      setMemberTab("home");
+    }
+  }, [isReceptionMember, canCreateServicesMember, canPublishAnnouncementsMember, memberTab]);
   const memberAttendance = currentMember && currentChurch ? attendanceRecords.filter(
     (a2) => a2.churchId === currentChurch.id && (a2.memberId === currentMember.memberId || a2.memberDbId === currentMember.id)
   ) : [];
-  const handleChurchCreatedFromOnboarding = (newChurch) => {
-    const updated = getAllChurches();
-    setAllChurches(updated);
-    setActiveChurchId(newChurch.id);
-    setSavedActiveChurchId(newChurch.id);
-    setCurrentChurch(newChurch);
-    setUserRole("admin");
-    setSavedActiveRole("admin");
-    setAdminTab("dashboard");
+  const maybeOpenPostCreationVerification = (newChurch: any) => {
+    const liveAuthUser = auth.currentUser;
+    const authEmailVerified = Boolean(liveAuthUser?.emailVerified);
+    const authUserEmail = liveAuthUser?.email || newChurch?.adminGoogleEmail || "";
+    if (
+      shouldPromptPostCreationEmailVerification({
+        church: newChurch,
+        authEmailVerified,
+        authUserEmail,
+      })
+    ) {
+      recordVerificationEmailSent(authUserEmail);
+      setPostCreationVerifyChurch(newChurch);
+    }
   };
-  const handleChurchCreatedSuccessfully = (newChurch) => {
-    const refreshed = getAllChurches();
-    setAllChurches(refreshed);
+  const activateCreatedChurchWorkspace = (newChurch: any) => {
+    clearChurchAdminLock(newChurch.id);
+    authorizeChurchAdminSession(newChurch.id);
+    setActiveMemberId("");
+    setSavedActiveMemberId("");
+    setMemberVisitorVisits([]);
+    setIsAdminPasscodeModalOpen(false);
+    setPendingAdminChurch(null);
+    setIsAutoLocked(false);
+    setAdminCloudSyncAlert(null);
+    lastAdminSyncKeyRef.current = "";
+    const updated = getAllChurches();
+    setAllChurches(updated.some((c3) => c3.id === newChurch.id) ? updated : [...updated, newChurch]);
     setActiveChurchId(newChurch.id);
     setSavedActiveChurchId(newChurch.id);
     setCurrentChurch(newChurch);
+    setMembers(getMembersByChurch(newChurch.id));
+    setServices(getServicesByChurch(newChurch.id));
+    setAnnouncements(getAnnouncementsByChurch(newChurch.id));
+    setAttendanceRecords(getAttendanceByChurch(newChurch.id));
     setUserRole("admin");
     setSavedActiveRole("admin");
     setAdminTab("dashboard");
+    maybeOpenPostCreationVerification(newChurch);
+  };
+  const handleChurchCreatedFromOnboarding = (newChurch: any) => {
+    activateCreatedChurchWorkspace(newChurch);
+  };
+  const handleChurchCreatedSuccessfully = (newChurch: any) => {
+    activateCreatedChurchWorkspace(newChurch);
   };
   const handleNavigateToNotificationTarget = (target, targetId) => {
     setIsNotificationsPageOpen(false);
@@ -791,17 +1727,7 @@ export function App() {
       else setAdminTab("dashboard");
     } else {
       if (target === "announcement") {
-        setMemberTab("home");
-        if (targetId) {
-          setTimeout(() => {
-            const el = document.getElementById(`announcement-card-${targetId}`);
-            if (el) {
-              el.scrollIntoView({ behavior: "smooth", block: "center" });
-              el.classList.add("ring-2", "ring-amber-400");
-              setTimeout(() => el.classList.remove("ring-2", "ring-amber-400"), 2500);
-            }
-          }, 150);
-        }
+        setIsNotificationsPageOpen(true);
       } else if (target === "service") {
         setMemberTab("services");
       } else if (target === "attendance") {
@@ -818,7 +1744,7 @@ export function App() {
       {
         memberCode: verificationView.memberCode,
         churchId: verificationView.churchId,
-        initialLanguage: language,
+        initialLanguage: verificationView.lang || language,
         onClose: () => {
           const isUserLoggedIn = userRole === "admin" || Boolean(currentMember);
           if (isUserLoggedIn) {
@@ -842,6 +1768,28 @@ export function App() {
       }
     );
   }
+  if (activeLegalPage === "privacy") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      PrivacyPolicy,
+      {
+        language,
+        onLanguageChange: handleLanguageChange,
+        onBack: closeLegalPage,
+        onNavigateTerms: () => openLegalPage("terms", true)
+      }
+    );
+  }
+  if (activeLegalPage === "terms") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      TermsOfService,
+      {
+        language,
+        onLanguageChange: handleLanguageChange,
+        onBack: closeLegalPage,
+        onNavigatePrivacy: () => openLegalPage("privacy", true)
+      }
+    );
+  }
   if (isDevEngineModalOpen) {
     return /* @__PURE__ */ jsxRuntimeExports.jsx(
       DeveloperEnginePage,
@@ -849,8 +1797,13 @@ export function App() {
         isOpen: true,
         language,
         allChurches,
-        currentChurch,
+        currentChurch: null,
         onClose: () => setIsDevEngineModalOpen(false),
+        onLanguageChange: (nextLang) => {
+          setLanguage(nextLang);
+        },
+        onOpenPrivacyPolicy: () => openLegalPage("privacy", true),
+        onOpenTermsOfService: () => openLegalPage("terms", true),
         onSelectChurch: (church) => {
           handleChurchChange(church.id);
           setIsDevEngineModalOpen(false);
@@ -870,6 +1823,20 @@ export function App() {
       }
     );
   }
+  if (isLoadingAuth && !currentChurch && allChurches.length === 0) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      SplashScreen,
+      {
+        subtitle: language === "es"
+          ? "Plataforma Oficial de Gestión de Iglesias"
+          : language === "fr"
+          ? "Plateforme Officielle de Gestion d’Églises"
+          : language === "en"
+          ? "Official Multi-Tenant Church Platform"
+          : "Platfòm Ofisyèl Jesyon Legliz"
+      }
+    );
+  }
   if (!currentChurch || allChurches.length === 0) {
     return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-h-screen bg-[#0F172A] text-slate-200 flex flex-col font-sans antialiased selection:bg-amber-400 selection:text-slate-950", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -880,7 +1847,7 @@ export function App() {
           members: [],
           currentMember: void 0,
           userRole,
-          isAuthorizedAdmin: !googleUser ? true : isGoogleUserAuthorizedAdmin,
+          isAuthorizedAdmin: currentChurch ? isChurchAdminAuthorized(currentChurch.id, googleUser == null ? void 0 : googleUser.email, googleUser == null ? void 0 : googleUser.uid) : isGoogleUserAuthorizedAdmin,
           language,
           announcements: [],
           services: [],
@@ -899,10 +1866,17 @@ export function App() {
           onOpenLanguageModal: () => setIsLanguageModalOpen(true),
           onOpenDesktopModal: () => setIsDesktopModalOpen(true),
           onOpenCreateChurch: () => setIsCreateChurchModalOpen(true),
-          onOpenDeveloperPanel: handleOpenDeveloperAuth
+          onOpenDeveloperPanel: handleOpenDeveloperAuth,
+          onOpenDonateScreen: () => setIsDonateScreenOpen(true)
         }
       ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("main", { className: "flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6 pb-24 sm:pb-8", children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      /* @__PURE__ */ jsxRuntimeExports.jsx("main", { className: "flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6 pb-24 sm:pb-8", children: isDonateScreenOpen ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        DonationScreen,
+        {
+          language,
+          onBack: () => setIsDonateScreenOpen(false)
+        }
+      ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
         EmptyChurchOnboarding,
         {
           onChurchCreated: handleChurchCreatedFromOnboarding,
@@ -911,11 +1885,23 @@ export function App() {
         }
       ) }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
+        SponsorMarqueeFooter,
+        {
+          language,
+          onOpenDevPanel: () => setIsDevAuthModalOpen(true),
+          onOpenPrivacyPolicy: () => openLegalPage("privacy"),
+          onOpenTermsOfService: () => openLegalPage("terms")
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
         UserTutorialModal,
         {
           isOpen: isTutorialOpen,
           onClose: () => setIsTutorialOpen(false),
-          onOpenCreateChurch: () => setIsTutorialOpen(false),
+          onOpenCreateChurch: () => {
+            setIsTutorialOpen(false);
+            setIsCreateChurchModalOpen(true);
+          },
           language,
           userRole,
           currentChurch,
@@ -928,7 +1914,12 @@ export function App() {
           isOpen: isLanguageModalOpen,
           currentLanguage: language,
           onSelectLanguage: handleLanguageChange,
-          onClose: () => setIsLanguageModalOpen(false)
+          onClose: () => setIsLanguageModalOpen(false),
+          onAutoDetectLanguage: handleAutoDetectLanguage,
+          detectedCountryCode: languageResolution.detectedCountryCode,
+          isAutoDetected:
+            languageResolution.source === "country_position" ||
+            languageResolution.source === "browser",
         }
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -963,15 +1954,19 @@ export function App() {
         members,
         currentMember,
         userRole,
-        isAuthorizedAdmin: !googleUser ? true : isGoogleUserAuthorizedAdmin,
+        isAuthorizedAdmin: currentChurch ? isChurchAdminAuthorized(currentChurch.id, googleUser == null ? void 0 : googleUser.email, googleUser == null ? void 0 : googleUser.uid) : isGoogleUserAuthorizedAdmin,
         language,
         announcements,
         services,
         attendanceRecords,
         isNotificationsOpen: isNotificationsPageOpen,
-        onOpenNotifications: () => setIsNotificationsPageOpen((prev) => !prev),
+        onOpenNotifications: () => {
+          setIsDonateScreenOpen(false);
+          setIsNotificationsPageOpen((prev) => !prev);
+        },
         onCloseNotifications: () => setIsNotificationsPageOpen(false),
         onNavigateToNotificationTarget: (target, targetId) => {
+          setIsDonateScreenOpen(false);
           handleNavigateToNotificationTarget(target, targetId);
         },
         onChurchChange: handleChurchChange,
@@ -985,7 +1980,16 @@ export function App() {
         onOpenDesktopModal: () => setIsDesktopModalOpen(true),
         onOpenCreateChurch: () => setIsCreateChurchModalOpen(true),
         onOpenDeveloperPanel: handleOpenDeveloperAuth,
-        onLockAdmin: () => handleLockAdminSession(true)
+        onOpenDonateScreen: () => {
+          setIsNotificationsPageOpen(false);
+          setIsDonateScreenOpen(true);
+        },
+        onLockAdmin: () => handleLockAdminSession(true),
+        onOpenEmailVerificationScreen: () => {
+          if (currentChurch) {
+            setPostCreationVerifyChurch(currentChurch);
+          }
+        }
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsx(AdMobBannerAd, { churchId: currentChurch == null ? void 0 : currentChurch.id, placement: "navbar_bottom" }),
@@ -1078,21 +2082,74 @@ export function App() {
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Escanear Código QR" : language === "en" ? "Scan QR Code" : language === "fr" ? "Scanner Code QR" : "Eskane Kòd QR" })
           ]
         }
-      ) : /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "button",
-        {
-          type: "button",
-          id: "btn-quick-view-my-card",
-          onClick: () => setMemberTab("mycode"),
-          className: "px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer",
-          children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(QrCode, { className: "w-3.5 h-3.5" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Mi Carnet" : language === "en" ? "My ID Card" : language === "fr" ? "Ma Carte" : "Kat Mwen" })
-          ]
-        }
-      ) })
+      ) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        isReceptionMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "btn-member-reception-quick-scan",
+            onClick: () => {
+              if (activeOngoingServices.length > 0) {
+                setIsScannerOpen(true);
+              } else {
+                setMemberTab("reception");
+              }
+            },
+            className: "px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 shadow transition-all cursor-pointer",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Camera, { className: "w-3.5 h-3.5" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Escanear (Recepción)" : language === "en" ? "Scan (Reception)" : language === "fr" ? "Scanner (Réception)" : "Eskane (Resepsyon)" })
+            ]
+          }
+        ),
+        canCreateServicesMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "btn-member-deacon-quick-services",
+            onClick: () => setMemberTab("deacon_services"),
+            className: "px-3 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-xs flex items-center gap-1.5 shadow transition-all cursor-pointer",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar, { className: "w-3.5 h-3.5" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Cultos (Diácono)" : language === "en" ? "Services (Deacon)" : language === "fr" ? "Cultes (Diacre)" : "Sèvis (Dyak)" })
+            ]
+          }
+        ),
+        canPublishAnnouncementsMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "btn-member-deacon-quick-announcements",
+            onClick: () => setMemberTab("deacon_announcements"),
+            className: "px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-400/40 font-extrabold text-xs flex items-center gap-1.5 transition-all cursor-pointer",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Megaphone, { className: "w-3.5 h-3.5" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Avisos (Diácono)" : language === "en" ? "News (Deacon)" : language === "fr" ? "Annonces (Diacre)" : "Anons (Dyak)" })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "btn-quick-view-my-card",
+            onClick: () => setMemberTab("mycode"),
+            className: "px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/30 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(QrCode, { className: "w-3.5 h-3.5" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Mi Carnet" : language === "en" ? "My ID Card" : language === "fr" ? "Ma Carte" : "Kat Mwen" })
+            ]
+          }
+        )
+      ] }) })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("main", { className: "flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6 pb-24 sm:pb-8", children: isNotificationsPageOpen ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+    /* @__PURE__ */ jsxRuntimeExports.jsx("main", { className: `flex-1 ${userRole === "admin" && !isNotificationsPageOpen && !isDonateScreenOpen ? "max-w-[1440px]" : "max-w-7xl"} w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6 pb-24 sm:pb-8`, children: isDonateScreenOpen ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+      DonationScreen,
+      {
+        language,
+        onBack: () => setIsDonateScreenOpen(false)
+      }
+    ) : isNotificationsPageOpen ? /* @__PURE__ */ jsxRuntimeExports.jsx(
       NotificationsPage,
       {
         church: currentChurch,
@@ -1123,7 +2180,368 @@ export function App() {
          ADMINISTRATION WORKSPACE
          ========================================================================= */
       /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1 overflow-x-auto pb-1 border-b border-slate-800 text-xs scrollbar-none", children: [
+        (() => {
+          const liveAuthUser = auth.currentUser;
+          const activeAuthEmail = (liveAuthUser == null ? void 0 : liveAuthUser.email) || (googleUser == null ? void 0 : googleUser.email) || "";
+          const showAdminProfileVerifyBanner = shouldShowProfileResendVerificationButton({
+            userRole,
+            church: currentChurch,
+            hasAuthUser: Boolean((liveAuthUser && liveAuthUser.uid) || (googleUser && googleUser.uid)),
+            authEmailVerified: isEmailVerified,
+            authUserEmail: activeAuthEmail,
+          });
+          if (!showAdminProfileVerifyBanner || adminCloudSyncAlert || !currentChurch) return null;
+          const targetEmail = currentChurch.adminGoogleEmail || activeAuthEmail;
+          const remainingSec = Math.max(
+            adminBannerVerifCooldown,
+            computeResendCooldownRemaining(getVerificationEmailLastSentAt(targetEmail))
+          );
+          const resendLabel =
+            language === "es"
+              ? "Reenviar correo de verificación"
+              : language === "fr"
+              ? "Renvoyer l’e-mail de vérification"
+              : language === "en"
+              ? "Resend verification email"
+              : "Resend imel verifikasyon";
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", {
+            id: "admin-unverified-email-banner",
+            className: "mb-4 px-4 py-3 rounded-2xl bg-[#1E293B] border border-amber-500/35 text-slate-200 text-xs flex flex-col md:flex-row md:items-center justify-between gap-3",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-start gap-2.5 min-w-0", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Mail, { className: "w-4 h-4" }) }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 space-y-0.5 leading-snug", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "font-bold text-white", children: language === "es" ? "Correo del propietario aún sin verificar" : language === "fr" ? "E-mail du propriétaire non vérifié" : language === "en" ? "Owner email address not verified yet" : "Imèl mèt legliz la poko verifye" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { className: "text-[11px] text-slate-300", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "font-mono text-amber-300 break-all", children: targetEmail }),
+                    " — ",
+                    language === "es"
+                      ? "Si el enlace anterior expiró, puede reenviar uno nuevo en cualquier momento."
+                      : language === "fr"
+                      ? "Si le lien précédent a expiré, vous pouvez en renvoyer un nouveau à tout moment."
+                      : language === "en"
+                      ? "If an older verification link expired, you can resend a fresh link anytime."
+                      : "Menm si ansyen lyen verifikasyon an ekspire deja, ou toujou ka revoye yon nouvo kounye a."
+                  ] })
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2 shrink-0", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "admin-banner-resend-verification-btn",
+                  disabled: isResendingAdminBannerVerif || remainingSec > 0,
+                  onClick: async () => {
+                    if (isResendingAdminBannerVerif || remainingSec > 0) return;
+                    const requiresReauth = needsInlineReauthForVerification({
+                      church: currentChurch,
+                      hasAuthUser: Boolean(auth.currentUser && auth.currentUser.uid),
+                      authUserEmail: (auth.currentUser && auth.currentUser.email) || (googleUser && googleUser.email),
+                    });
+                    if (requiresReauth) {
+                      setPostCreationVerifyChurch(currentChurch);
+                      return;
+                    }
+                    setIsResendingAdminBannerVerif(true);
+                    try {
+                      const alreadyVerified = await refreshAuthUserState();
+                      if (alreadyVerified) {
+                        toast.success(
+                          language === "en" ? "Email Already Verified!" : "Imèl ou Deja Verifye!",
+                          language === "en" ? "Your owner email is confirmed." : "Kont mèt legliz ou a deja konfime."
+                        );
+                        return;
+                      }
+                      await resendAdminVerificationEmail();
+                      recordVerificationEmailSent(targetEmail);
+                      setAdminBannerVerifCooldown(EMAIL_VERIFICATION_RESEND_COOLDOWN_SEC);
+                      toast.success(
+                        language === "es" ? "Correo de verificación reenviado" : language === "fr" ? "E-mail renvoyé" : language === "en" ? "Verification Email Sent" : "Imèl Verifikasyon Voye",
+                        language === "en"
+                          ? `A fresh verification link was sent to ${targetEmail}.`
+                          : `Nou voye yon nouvo lyen verifikasyon nan ${targetEmail}.`
+                      );
+                    } catch (err: any) {
+                      if (!auth.currentUser) {
+                        setPostCreationVerifyChurch(currentChurch);
+                        return;
+                      }
+                      toast.error(language === "en" ? "Verification Note" : "Nòt Verifikasyon", err?.message || "Pa ka voye imèl la kounye a.");
+                    } finally {
+                      setIsResendingAdminBannerVerif(false);
+                    }
+                  },
+                  className: "min-h-[36px] px-3.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed whitespace-nowrap transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Mail, { className: "w-3.5 h-3.5 shrink-0" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", {
+                      className: "tabular-nums",
+                      children: isResendingAdminBannerVerif
+                        ? (language === "en" ? "Sending..." : "Ap voye...")
+                        : remainingSec > 0
+                        ? `${resendLabel} (${remainingSec}s)`
+                        : resendLabel
+                    })
+                  ]
+                }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                  type: "button",
+                  id: "admin-banner-open-verify-screen-btn",
+                  onClick: () => setPostCreationVerifyChurch(currentChurch),
+                  className: "min-h-[36px] px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: "w-3.5 h-3.5" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Verificar" : language === "fr" ? "Vérifier" : language === "en" ? "Verify" : "Verifye" })
+                  ]
+                })
+              ] })
+            ]
+          });
+        })(),
+        adminCloudSyncAlert && currentChurch && adminCloudSyncAlert.churchId === currentChurch.id && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mb-4 p-4 rounded-2xl bg-amber-500/15 border border-amber-400/50 text-amber-100 text-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-start gap-2.5", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldAlert, { className: "w-4 h-4 text-amber-300 shrink-0 mt-0.5" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-0.5 leading-relaxed", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "font-bold text-amber-200", children: language === "es" ? "Sincronización de cuenta pendiente (evita errores de permiso)" : language === "en" ? "Admin account cloud sync required (prevents permission errors)" : language === "fr" ? "Synchronisation du compte admin requise" : "Senkronizasyon Kont Admin Obligatwa (pou anpeche erè pèmisyon)" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-[11px] text-amber-100/90", children: language === "es" ? `Verifique el correo ${adminCloudSyncAlert.email} una sola vez o inicie sesión con Google para sincronizar su ID con el servidor.` : language === "en" ? `Verify ${adminCloudSyncAlert.email} once or sign in with Google to permanently sync your admin ID with the cloud.` : language === "fr" ? `Vérifiez ${adminCloudSyncAlert.email} une fois ou connectez-vous avec Google pour synchroniser votre ID administrateur.` : `Verifye imèl ${adminCloudSyncAlert.email} yon sèl fwa oswa konekte ak Google pou senkronize ID kont ou a nèt ak baz done legliz la.` })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-wrap items-center gap-2 shrink-0", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+              type: "button",
+              disabled: isHandlingAdminSyncAction,
+              onClick: async () => {
+                setIsHandlingAdminSyncAction(true);
+                try {
+                  await resendAdminVerificationEmail();
+                  toast.success(
+                    language === "en" ? "Verification Sent" : "Imèl Verifikasyon Voye ✓",
+                    language === "en" ? `Check ${adminCloudSyncAlert.email} and click the link.` : `Louvri ${adminCloudSyncAlert.email} epi klike sou lyen verifikasyon an.`
+                  );
+                } catch (err: any) {
+                  toast.error(language === "en" ? "Verification Note" : "Nòt", err?.message || "Pa ka voye imèl la.");
+                } finally {
+                  setIsHandlingAdminSyncAction(false);
+                }
+              },
+              className: "px-3 py-1.5 rounded-xl bg-amber-400/20 hover:bg-amber-400/30 text-amber-200 border border-amber-400/40 font-bold text-[11px] flex items-center gap-1.5 cursor-pointer disabled:opacity-50",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Mail, { className: "w-3.5 h-3.5" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Enviar Verificación" : language === "en" ? "Send Verification" : language === "fr" ? "Envoyer Lien" : "Voye Verifikasyon" })
+              ]
+            }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+              type: "button",
+              disabled: isHandlingAdminSyncAction,
+              onClick: async () => {
+                setIsHandlingAdminSyncAction(true);
+                try {
+                  const verified = await refreshAuthUserState();
+                  if (!verified) {
+                    toast.warning(
+                      language === "en" ? "Not Verified Yet" : "Poko Verifye",
+                      language === "en" ? "Click the link in your email inbox (or Spam) first, then try again." : "Klike sou lyen ki nan imèl ou a (oswa Spam) dabò, epi re-eseye."
+                    );
+                    return;
+                  }
+                  lastAdminSyncKeyRef.current = "";
+                  const res = await syncChurchAdminOwnershipWithCloud(currentChurch, { forceTokenRefresh: true, reloadUser: true });
+                  if (res.synced && res.church) {
+                    saveChurch(res.church);
+                    clearPendingLocalUpload("church", res.church.id);
+                    setCurrentChurch(res.church);
+                    churchStore.setCurrentChurch(res.church);
+                    setAdminCloudSyncAlert(null);
+                    const pendingMembers = getMembersByChurch(res.church.id).filter((m) => hasPendingLocalUpload("member", m.id));
+                    for (const pm of pendingMembers) {
+                      firestoreAddMember(pm).then(() => clearPendingLocalUpload("member", pm.id)).catch(() => {});
+                    }
+                    toast.success(
+                      language === "en" ? "Synced Successfully!" : "Senkronize avèk Siksè ✓",
+                      language === "en" ? "Cloud write permissions are now active." : "Pèmisyon kont administratè ou a senkronize kounye a."
+                    );
+                  }
+                } catch (err: any) {
+                  toast.error(language === "en" ? "Sync Error" : "Erè Senkronizasyon", err?.message || "Re-eseye.");
+                } finally {
+                  setIsHandlingAdminSyncAction(false);
+                }
+              },
+              className: "px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-[11px] flex items-center gap-1.5 cursor-pointer disabled:opacity-50",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(RefreshCw, { className: `w-3.5 h-3.5 ${isHandlingAdminSyncAction ? "animate-spin" : ""}` }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Ya Verifiqué — Sincronizar" : language === "en" ? "I Verified — Sync" : language === "fr" ? "Synchroniser" : "Mwen Verifye — Senkronize" })
+              ]
+            }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", {
+              type: "button",
+              disabled: isHandlingAdminSyncAction,
+              onClick: async () => {
+                setIsHandlingAdminSyncAction(true);
+                try {
+                  await signInWithGoogle();
+                  lastAdminSyncKeyRef.current = "";
+                  const res = await syncChurchAdminOwnershipWithCloud(currentChurch, { forceTokenRefresh: true });
+                  if (res.synced && res.church) {
+                    saveChurch(res.church);
+                    clearPendingLocalUpload("church", res.church.id);
+                    setCurrentChurch(res.church);
+                    churchStore.setCurrentChurch(res.church);
+                    setAdminCloudSyncAlert(null);
+                    const pendingMembers = getMembersByChurch(res.church.id).filter((m) => hasPendingLocalUpload("member", m.id));
+                    for (const pm of pendingMembers) {
+                      firestoreAddMember(pm).then(() => clearPendingLocalUpload("member", pm.id)).catch(() => {});
+                    }
+                    toast.success(
+                      language === "en" ? "Google Synced!" : "Senkronize ak Google ✓",
+                      language === "en" ? "Your admin account is now synced with the church." : "Kont administratè ou a senkronize kounye a ak legliz la."
+                    );
+                  } else if (res.status === "owner_mismatch") {
+                    toast.error(
+                      language === "en" ? "Wrong Account" : "Move Kont",
+                      language === "en" ? `Please sign in with ${res.expectedEmail || adminCloudSyncAlert.email}.` : `Tanpri konekte ak kont ${res.expectedEmail || adminCloudSyncAlert.email}.`
+                    );
+                  }
+                } catch (err: any) {
+                  toast.error(language === "en" ? "Google Sign-In Note" : "Erè Google", err?.message || "Re-eseye.");
+                } finally {
+                  setIsHandlingAdminSyncAction(false);
+                }
+              },
+              className: "px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-[11px] cursor-pointer disabled:opacity-50",
+              children: language === "es" ? "Sincronizar con Google" : language === "en" ? "Sync with Google" : language === "fr" ? "Synchroniser Google" : "Konekte ak Google"
+            })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col lg:flex-row lg:items-start gap-6", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "aside",
+            {
+              id: "admin-desktop-sidebar",
+              "aria-label": "OmniChurch PRO Desktop Navigation",
+              className: "hidden lg:flex lg:flex-col w-60 shrink-0 rounded-2xl border border-slate-800/90 bg-gradient-to-b from-[#07152F] via-[#0B1733] to-[#0F172A] p-4 shadow-xl sticky top-20 self-start space-y-4",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col items-center text-center pb-3.5 border-b border-slate-800/90 gap-2", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    OmniChurchLogo,
+                    {
+                      variant: "full",
+                      priority: true,
+                      className: "h-16 w-auto"
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "w-full min-w-0", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { className: "text-xs font-bold text-white truncate", title: currentChurch.name, children: currentChurch.name }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "mt-1 inline-flex items-center gap-1.5 text-[10px] font-mono text-[#38BDF8]", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-1.5 py-0.5 rounded bg-[#FBBF24]/15 border border-[#FBBF24]/30 text-[#FBBF24] font-bold", children: "PRO" }),
+                      currentChurch.code && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-slate-400", children: currentChurch.code })
+                    ] })
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("nav", { className: "flex flex-col gap-1 text-xs", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-dashboard",
+                    onClick: () => setAdminTab("dashboard"),
+                    className: `flex items-center gap-2.5 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "dashboard" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(LayoutDashboard, { className: "w-4 h-4 shrink-0" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navDashboard })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-attendance",
+                    onClick: () => setAdminTab("attendance"),
+                    className: `flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "attendance" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-2.5 min-w-0", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-4 h-4 shrink-0" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navAttendance })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] font-mono px-1.5 py-0.5 rounded-md ${adminTab === "attendance" ? "bg-slate-950/15 text-slate-950" : "bg-slate-800 text-slate-400"}`, children: attendanceRecords.length })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-members",
+                    onClick: () => setAdminTab("members"),
+                    className: `flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "members" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-2.5 min-w-0", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(Users, { className: "w-4 h-4 shrink-0" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navMembers })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] font-mono px-1.5 py-0.5 rounded-md ${adminTab === "members" ? "bg-slate-950/15 text-slate-950" : "bg-slate-800 text-slate-400"}`, children: members.length })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-cards",
+                    onClick: () => {
+                      setCardTargetMember(null);
+                      setAdminTab("cards");
+                    },
+                    className: `flex items-center gap-2.5 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "cards" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(Printer, { className: "w-4 h-4 shrink-0" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navCards })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-services",
+                    onClick: () => setAdminTab("services"),
+                    className: `flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "services" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-2.5 min-w-0", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar, { className: "w-4 h-4 shrink-0" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navServices })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] font-mono px-1.5 py-0.5 rounded-md ${adminTab === "services" ? "bg-slate-950/15 text-slate-950" : "bg-slate-800 text-slate-400"}`, children: services.length })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-history",
+                    onClick: () => {
+                      setHistoryInitialServiceId(void 0);
+                      setAdminTab("history");
+                    },
+                    className: `flex items-center gap-2.5 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "history" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(History, { className: "w-4 h-4 shrink-0" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navServiceHistory || (language === "es" ? "Historial de Cultos" : language === "en" ? "Service History" : language === "fr" ? "Historique Cultes" : "Istwa Sèvis") })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-announcements",
+                    onClick: () => setAdminTab("announcements"),
+                    className: `flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "announcements" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-2.5 min-w-0", children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(Bell, { className: "w-4 h-4 shrink-0" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navAnnouncements })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] font-mono px-1.5 py-0.5 rounded-md ${adminTab === "announcements" ? "bg-slate-950/15 text-slate-950" : "bg-slate-800 text-slate-400"}`, children: announcements.length })
+                    ]
+                  }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "sidebar-admin-tab-settings",
+                    onClick: () => setAdminTab("settings"),
+                    className: `flex items-center gap-2.5 px-3 py-2.5 rounded-xl font-bold transition-all cursor-pointer text-left ${adminTab === "settings" ? "bg-[#FBBF24] text-slate-950 font-black shadow-md shadow-amber-400/20" : "text-slate-300 hover:text-white hover:bg-slate-800/60"}`,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(Settings, { className: "w-4 h-4 shrink-0" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: t3.navSettings })
+                    ]
+                  })
+                ] })
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex-1 min-w-0 space-y-6", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex lg:hidden items-center gap-1 overflow-x-auto pb-1 border-b border-slate-800 text-xs scrollbar-none", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "button",
             {
@@ -1353,7 +2771,11 @@ export function App() {
                       setAdminTab(tab);
                     }
                   },
-                  onToggleActiveService: handleToggleActiveService
+                  onToggleActiveService: handleToggleActiveService,
+                  onOpenDonateScreen: () => {
+                    setIsNotificationsPageOpen(false);
+                    setIsDonateScreenOpen(true);
+                  }
                 }
               ),
               adminTab === "attendance" && /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -1464,6 +2886,7 @@ export function App() {
                     setActiveChurchId(newChurch.id);
                     setSavedActiveChurchId(newChurch.id);
                     setCurrentChurch(newChurch);
+                    maybeOpenPostCreationVerification(newChurch);
                   },
                   onChurchDeleted: (deletedChurchId) => {
                     const refreshed = getAllChurches().filter((c3) => c3.id !== deletedChurchId);
@@ -1512,6 +2935,11 @@ export function App() {
                         setAttendanceRecords(getAttendanceByChurch(current2.id));
                       }
                     }
+                  },
+                  onOpenPrivacyPolicy: () => openLegalPage("privacy"),
+                  onOpenTermsOfService: () => openLegalPage("terms"),
+                  onOpenEmailVerificationScreen: () => {
+                    if (currentChurch) setPostCreationVerifyChurch(currentChurch);
                   }
                 }
               )
@@ -1519,6 +2947,8 @@ export function App() {
           },
           adminTab
         )
+          ] })
+        ] })
       ] })
     ) : !currentMember ? (
       /* =========================================================================
@@ -1531,11 +2961,15 @@ export function App() {
           selectedChurchId: activeChurchId,
           onSelectChurch: handleChurchChange,
           onLoginSuccess: handleMemberLoginSuccess,
-          onSwitchToAdmin: googleUser && !isGoogleUserAuthorizedAdmin ? void 0 : () => handleRoleChange("admin"),
+          onSwitchToAdmin: () => handleRoleChange("admin"),
           members,
           language,
           onLanguageChange: handleLanguageChange,
-          onOpenCreateChurch: googleUser && !isGoogleUserAuthorizedAdmin ? void 0 : () => setIsCreateChurchModalOpen(true)
+          onAutoDetectLanguage: handleAutoDetectLanguage,
+          autoDetectedBadge,
+          onOpenCreateChurch: () => setIsCreateChurchModalOpen(true),
+          onOpenPrivacyPolicy: () => openLegalPage("privacy"),
+          onOpenTermsOfService: () => openLegalPage("terms")
         }
       )
     ) : (
@@ -1628,6 +3062,69 @@ export function App() {
               ]
             }
           ),
+          isReceptionMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              id: "member-tab-reception",
+              onClick: () => setMemberTab("reception"),
+              className: `relative flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${memberTab === "reception" ? "text-slate-950 font-black" : "text-emerald-300 hover:text-white hover:bg-emerald-500/10"}`,
+              children: [
+                memberTab === "reception" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  motion.div,
+                  {
+                    layoutId: "member-active-tab-pill",
+                    className: "absolute inset-0 bg-emerald-400 rounded-xl shadow-md -z-10",
+                    transition: { type: "spring", stiffness: 400, damping: 32 }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(UserCheck, { className: "w-4 h-4" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Recepción & Escaneo" : language === "en" ? "Reception & Scan" : language === "fr" ? "Réception & Scan" : "Resepsyon & Scan" })
+              ]
+            }
+          ),
+          canCreateServicesMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              id: "member-tab-deacon-services",
+              onClick: () => setMemberTab("deacon_services"),
+              className: `relative flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${memberTab === "deacon_services" ? "text-slate-950 font-black" : "text-amber-300 hover:text-white hover:bg-amber-500/10"}`,
+              children: [
+                memberTab === "deacon_services" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  motion.div,
+                  {
+                    layoutId: "member-active-tab-pill",
+                    className: "absolute inset-0 bg-amber-400 rounded-xl shadow-md -z-10",
+                    transition: { type: "spring", stiffness: 400, damping: 32 }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar, { className: "w-4 h-4" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Crear Cultos" : language === "en" ? "Manage Services" : language === "fr" ? "Créer Cultes" : "Kreye Sèvis" })
+              ]
+            }
+          ),
+          canPublishAnnouncementsMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              id: "member-tab-deacon-announcements",
+              onClick: () => setMemberTab("deacon_announcements"),
+              className: `relative flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold whitespace-nowrap transition-colors cursor-pointer ${memberTab === "deacon_announcements" ? "text-slate-950 font-black" : "text-amber-300 hover:text-white hover:bg-amber-500/10"}`,
+              children: [
+                memberTab === "deacon_announcements" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  motion.div,
+                  {
+                    layoutId: "member-active-tab-pill",
+                    className: "absolute inset-0 bg-amber-400 rounded-xl shadow-md -z-10",
+                    transition: { type: "spring", stiffness: 400, damping: 32 }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(Megaphone, { className: "w-4 h-4" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Publicar Avisos" : language === "en" ? "Publish Announcements" : language === "fr" ? "Publier Annonces" : "Pibliye Anons" })
+              ]
+            }
+          ),
           /* @__PURE__ */ jsxRuntimeExports.jsxs(
             "button",
             {
@@ -1660,13 +3157,24 @@ export function App() {
                 {
                   church: currentChurch,
                   member: currentMember,
+                  members,
                   services,
                   announcements,
                   language,
+                  isReception: isReceptionMember,
+                  onOpenReceptionDesk: () => setMemberTab("reception"),
+                  onOpenReceptionScanner: () => setIsScannerOpen(true),
+                  isDeacon: isDeaconMember,
+                  onOpenDeaconServices: canCreateServicesMember ? () => setMemberTab("deacon_services") : void 0,
+                  onOpenDeaconAnnouncements: canPublishAnnouncementsMember ? () => setMemberTab("deacon_announcements") : void 0,
                   onOpenMyCode: () => setMemberTab("mycode"),
                   onSelectServiceCategory: (cat) => {
                     setServiceCategoryInitial(cat);
                     setMemberTab("services");
+                  },
+                  onOpenDonateScreen: () => {
+                    setIsNotificationsPageOpen(false);
+                    setIsDonateScreenOpen(true);
                   }
                 }
               ),
@@ -1678,6 +3186,14 @@ export function App() {
                   language,
                   onMemberUpdated: (updated) => {
                     setActiveMemberId(updated.memberId);
+                    setMembers((prev) => {
+                      const exists = prev.some((m2) => m2.id === updated.id || m2.memberId === updated.memberId);
+                      const next = exists
+                        ? prev.map((m2) => (m2.id === updated.id || m2.memberId === updated.memberId ? updated : m2))
+                        : [...prev, updated];
+                      churchStore.setMembers(next);
+                      return next;
+                    });
                   }
                 }
               ),
@@ -1699,7 +3215,61 @@ export function App() {
                   church: currentChurch,
                   member: currentMember,
                   attendanceRecords: memberAttendance,
+                  visitorVisits: memberVisitorVisits,
                   language
+                }
+              ),
+              memberTab === "reception" && isReceptionMember && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                ReceptionDeskPanel,
+                {
+                  church: currentChurch,
+                  currentMember,
+                  members,
+                  services,
+                  attendanceRecords,
+                  language,
+                  onOpenScanner: () => setIsScannerOpen(true),
+                  onAttendanceUpdated: () => {
+                    if (currentChurch) {
+                      setAttendanceRecords(getAttendanceByChurch(currentChurch.id));
+                    }
+                  }
+                }
+              ),
+              memberTab === "deacon_services" && canCreateServicesMember && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                AdminServices,
+                {
+                  church: currentChurch,
+                  services,
+                  members,
+                  currentMember,
+                  isDeaconMode: true,
+                  language,
+                  initialCategory: serviceCategoryInitial,
+                  onOpenScanner: isReceptionMember ? () => setIsScannerOpen(true) : void 0,
+                  onServicesChange: () => {
+                    setServices(getServicesByChurch(currentChurch.id));
+                  },
+                  onServicesUpdated: () => {
+                    setServices(getServicesByChurch(currentChurch.id));
+                  }
+                }
+              ),
+              memberTab === "deacon_announcements" && canPublishAnnouncementsMember && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                AdminAnnouncements,
+                {
+                  church: currentChurch,
+                  announcements,
+                  services,
+                  currentMember,
+                  isDeaconMode: true,
+                  language,
+                  onAnnouncementsChange: () => {
+                    setAnnouncements(getAnnouncementsByChurch(currentChurch.id));
+                  },
+                  onAnnouncementsUpdated: () => {
+                    setAnnouncements(getAnnouncementsByChurch(currentChurch.id));
+                  }
                 }
               ),
               memberTab === "profile" && /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -1711,6 +3281,14 @@ export function App() {
                   language,
                   onMemberUpdated: (updated) => {
                     setActiveMemberId(updated.memberId);
+                    setMembers((prev) => {
+                      const exists = prev.some((m2) => m2.id === updated.id || m2.memberId === updated.memberId);
+                      const next = exists
+                        ? prev.map((m2) => (m2.id === updated.id || m2.memberId === updated.memberId ? updated : m2))
+                        : [...prev, updated];
+                      churchStore.setMembers(next);
+                      return next;
+                    });
                   }
                 }
               )
@@ -1724,7 +3302,9 @@ export function App() {
       SponsorMarqueeFooter,
       {
         language,
-        onOpenDevPanel: () => setIsDevAuthModalOpen(true)
+        onOpenDevPanel: () => setIsDevAuthModalOpen(true),
+        onOpenPrivacyPolicy: () => openLegalPage("privacy"),
+        onOpenTermsOfService: () => openLegalPage("terms")
       }
     ),
     (userRole === "admin" || currentMember) && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sm:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0F172A]/95 backdrop-blur-md border-t border-slate-800 px-3 py-2 flex items-center justify-around", children: userRole === "admin" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
@@ -1831,6 +3411,44 @@ export function App() {
           ]
         }
       ),
+      isReceptionMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          type: "button",
+          onClick: () => setMemberTab("reception"),
+          className: `flex flex-col items-center gap-1 text-[10px] font-bold ${memberTab === "reception" ? "text-emerald-400" : "text-slate-400"}`,
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(UserCheck, { className: "w-5 h-5" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Recepción" : language === "en" ? "Reception" : language === "fr" ? "Réception" : "Resepsyon" })
+          ]
+        }
+      ),
+      canCreateServicesMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          type: "button",
+          id: "mobile-member-tab-deacon-services",
+          onClick: () => setMemberTab("deacon_services"),
+          className: `flex flex-col items-center gap-1 text-[10px] font-bold ${memberTab === "deacon_services" ? "text-amber-400" : "text-slate-400"}`,
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Calendar, { className: "w-5 h-5" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Cultos" : language === "en" ? "Services" : language === "fr" ? "Cultes" : "Sèvis+" })
+          ]
+        }
+      ),
+      canPublishAnnouncementsMember && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          type: "button",
+          id: "mobile-member-tab-deacon-announcements",
+          onClick: () => setMemberTab("deacon_announcements"),
+          className: `flex flex-col items-center gap-1 text-[10px] font-bold ${memberTab === "deacon_announcements" ? "text-amber-400" : "text-slate-400"}`,
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(Megaphone, { className: "w-5 h-5" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: language === "es" ? "Avisos" : language === "en" ? "News" : language === "fr" ? "Annonces" : "Anons" })
+          ]
+        }
+      ),
       /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "button",
         {
@@ -1844,15 +3462,25 @@ export function App() {
         }
       )
     ] }) }),
-    isScannerOpen && /* @__PURE__ */ jsxRuntimeExports.jsx(
+    isScannerOpen && (userRole === "admin" || isReceptionMember) && /* @__PURE__ */ jsxRuntimeExports.jsx(
       QrScannerModal,
       {
         church: currentChurch,
         services,
         isOpen: isScannerOpen,
         language,
+        restrictToActiveService: userRole === "member",
+        operatorLabel: isReceptionMember && currentMember ? `Resepsyon: ${currentMember.fullName}` : void 0,
         onClose: () => setIsScannerOpen(false),
+        onAttendanceRecorded: () => {
+          if (currentChurch) {
+            setAttendanceRecords(getAttendanceByChurch(currentChurch.id));
+          }
+        },
         onScanSuccess: () => {
+          if (currentChurch) {
+            setAttendanceRecords(getAttendanceByChurch(currentChurch.id));
+          }
         }
       }
     ),
@@ -1863,11 +3491,7 @@ export function App() {
         onClose: () => setIsTutorialOpen(false),
         onOpenCreateChurch: () => {
           setIsTutorialOpen(false);
-          if (googleUser && !isGoogleUserAuthorizedAdmin) {
-            return;
-          }
-          if (userRole !== "admin") setUserRole("admin");
-          setAdminTab("settings");
+          setIsCreateChurchModalOpen(true);
         },
         language,
         userRole,
@@ -1881,7 +3505,12 @@ export function App() {
         isOpen: isLanguageModalOpen,
         currentLanguage: language,
         onSelectLanguage: handleLanguageChange,
-        onClose: () => setIsLanguageModalOpen(false)
+        onClose: () => setIsLanguageModalOpen(false),
+        onAutoDetectLanguage: handleAutoDetectLanguage,
+        detectedCountryCode: languageResolution.detectedCountryCode,
+        isAutoDetected:
+          languageResolution.source === "country_position" ||
+          languageResolution.source === "browser",
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -1911,11 +3540,17 @@ export function App() {
           setPendingAdminChurch(null);
           setIsAutoLocked(false);
         },
-        church: pendingAdminChurch || currentChurch || allChurches[0],
+        church: isAutoLocked ? (pendingAdminChurch || currentChurch) : null,
         allChurches,
         language,
         onSuccess: handleAdminAuthSuccess,
-        isAutoLock: isAutoLocked
+        isAutoLock: isAutoLocked,
+        onOpenCreateChurch: () => {
+          setIsAdminPasscodeModalOpen(false);
+          setPendingAdminChurch(null);
+          setIsAutoLocked(false);
+          setIsCreateChurchModalOpen(true);
+        }
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -1945,6 +3580,25 @@ export function App() {
         isOpen: isUpdateModalOpen,
         onClose: () => setIsUpdateModalOpen(false),
         language
+      }
+    ),
+    postCreationVerifyChurch && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      AdminEmailVerificationScreen,
+      {
+        church: postCreationVerifyChurch,
+        language,
+        onVerifiedComplete: (syncedChurch) => {
+          const refreshed = getAllChurches();
+          setAllChurches(refreshed);
+          setCurrentChurch(syncedChurch);
+          churchStore.setCurrentChurch(syncedChurch);
+          setAdminCloudSyncAlert(null);
+          lastAdminSyncKeyRef.current = "";
+          setPostCreationVerifyChurch(null);
+        },
+        onContinueLater: () => {
+          setPostCreationVerifyChurch(null);
+        }
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsx(DevicePermissionBanner, { language })

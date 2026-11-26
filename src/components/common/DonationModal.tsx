@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Language, DeveloperDonationConfig } from '../../types';
-import { getDonationConfig } from '../../utils/developerStorage';
+import {
+  getDonationConfig,
+  resolveLocalizedDonationCopy,
+} from '../../utils/developerStorage';
 import {
   Heart,
   Copy,
@@ -46,10 +49,16 @@ export const DonationModal: React.FC<DonationModalProps> = ({
   }, []);
 
   const config: DeveloperDonationConfig = customConfig || liveConfig;
+  const localizedCopy = useMemo(
+    () => resolveLocalizedDonationCopy(config, language),
+    [config, language]
+  );
 
   const isEs = language === 'es';
   const isFr = language === 'fr';
   const isEn = language === 'en';
+  const copyLabel = isEs ? 'Copiar' : isEn ? 'Copy' : isFr ? 'Copier' : 'Kopye';
+  const copiedLabel = isEs ? '¡Copiado!' : isEn ? 'Copied!' : isFr ? 'Copié !' : 'Kopye!';
 
   // Compute available channels enabled in Developer Engine
   const availableMethods = useMemo(() => {
@@ -194,13 +203,7 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                 </span>
               </div>
               <h2 className="text-lg sm:text-xl font-black text-white mt-0.5 tracking-tight">
-                {isEs
-                  ? 'Apoya la Misión Digital de la Iglesia'
-                  : isEn
-                  ? 'Support the Church Digital Mission'
-                  : isFr
-                  ? 'Soutenez la Mission Numérique de l’Église'
-                  : 'Soutni Misyon Nimerik Legliz la'}
+                {localizedCopy.screenTitle}
               </h2>
             </div>
           </div>
@@ -225,11 +228,11 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                     {config.developerName || 'Jackson Charles'}
                   </h3>
                   <span className="text-[10px] font-mono text-amber-300 bg-amber-400/10 px-2 py-0.5 rounded-full border border-amber-400/20 font-bold">
-                    Devlopè Prensipal
+                    {isEs ? 'Desarrollador Principal' : isEn ? 'Lead Developer' : isFr ? 'Développeur Principal' : 'Devlopè Prensipal'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-400 font-medium mt-0.5">
-                  {config.developerRole || 'Lead Software Architect & Ministry Technologist'}
+                  {localizedCopy.developerRole}
                 </p>
               </div>
             </div>
@@ -243,16 +246,7 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                 </span>
               </div>
               <p className="italic text-slate-200">
-                &ldquo;
-                {config.developerBio ||
-                  (isEs
-                    ? 'Mi objetivo principal es ayudar a la iglesia a crecer social, espiritual y tecnológicamente mediante herramientas digitales modernas, accesibles y transparentes.'
-                    : isEn
-                    ? 'My core objective is to empower the church to grow socially, spiritually, and technologically through modern, accessible, and transparent digital tools.'
-                    : isFr
-                    ? 'Mon objectif principal est d’aider l’église à grandir socialement, spirituellement et technologiquement grâce à des outils numériques modernes et transparents.'
-                    : 'Objektif mwen se ede legliz la grandi sosyalman, espirityèlman ak nimerikman atravè zouti teknolojik modèn, efikas e transparan ki fasilite kominikasyon ak jesyon manm yo.')}
-                &rdquo;
+                &ldquo;{localizedCopy.developerBio}&rdquo;
               </p>
             </div>
           </div>
@@ -313,11 +307,19 @@ export const DonationModal: React.FC<DonationModalProps> = ({
               <p className="text-xs font-bold text-white">
                 {isEs
                   ? 'Canales de donación no disponibles temporalmente'
+                  : isEn
+                  ? 'Donation channels temporarily unavailable'
+                  : isFr
+                  ? 'Canaux de don temporairement indisponibles'
                   : 'Kanal donasyon yo pa aktif pou kounye a'}
               </p>
               <p className="text-[11px] text-slate-400">
                 {isEs
                   ? 'El desarrollador ha pausado temporalmente las opciones de donación directa.'
+                  : isEn
+                  ? 'Direct donation options are currently paused in system settings.'
+                  : isFr
+                  ? 'Les options de don direct sont temporairement en pause.'
                   : 'Devlopè a dezaktive kanal peman dirèk yo nan paramèt motè a.'}
               </p>
             </div>
@@ -335,12 +337,14 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                       PayPal Account & Link
                     </span>
                   </div>
-                  <span className="text-[10px] text-blue-300 font-mono">Entènasyonal</span>
+                  <span className="text-[10px] text-blue-300 font-mono">
+                    {isEs ? 'Internacional' : isEn ? 'International' : isFr ? 'International' : 'Entènasyonal'}
+                  </span>
                 </div>
 
                 <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1.5">
                   <span className="text-[10px] text-slate-400 font-mono block">
-                    {isEs ? 'Correo Electrónico PayPal:' : 'Imèl PayPal:'}
+                    {isEs ? 'Correo Electrónico PayPal:' : isEn ? 'PayPal Email:' : isFr ? 'E-mail PayPal :' : 'Imèl PayPal:'}
                   </span>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-mono font-bold text-blue-300 break-all select-all">
@@ -359,12 +363,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'paypal_email' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400 font-bold">Kopye!</span>
+                            <span className="text-emerald-400 font-bold">{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -425,12 +429,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'binance_pay_id' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400 font-bold">Kopye!</span>
+                            <span className="text-emerald-400 font-bold">{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -441,7 +445,13 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                 {/* USDT Wallet Address */}
                 <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1">
                   <span className="text-[10px] text-slate-400 font-mono block">
-                    {isEs ? 'Dirección USDT (TRC20 / BEP20):' : 'Adrès Portefeuille USDT:'}
+                    {isEs
+                      ? 'Dirección USDT (TRC20 / BEP20):'
+                      : isEn
+                        ? 'USDT Wallet Address:'
+                        : isFr
+                          ? 'Adresse Portefeuille USDT :'
+                          : 'Adrès Portefeuille USDT:'}
                   </span>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-mono font-bold text-slate-300 break-all select-all">
@@ -460,12 +470,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'binance_wallet' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-slate-950" />
-                            <span>Kopye!</span>
+                            <span>{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -482,15 +492,23 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
                     <span className="text-xs font-bold text-white uppercase tracking-wider">
-                      Wise (TransferWise) Account
+                      {isEs
+                        ? 'Cuenta Wise (TransferWise)'
+                        : isEn
+                          ? 'Wise (TransferWise) Account'
+                          : isFr
+                            ? 'Compte Wise (TransferWise)'
+                            : 'Kont Wise (TransferWise)'}
                     </span>
                   </div>
-                  <span className="text-[10px] text-emerald-300 font-mono font-bold">Virement Global</span>
+                  <span className="text-[10px] text-emerald-300 font-mono font-bold">
+                    {isEs ? 'Transferencia Global' : isEn ? 'Global Transfer' : isFr ? 'Virement Global' : 'Virement Global'}
+                  </span>
                 </div>
 
                 <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1.5">
                   <span className="text-[10px] text-slate-400 font-mono block">
-                    Wise Tag / Email:
+                    {isEs ? 'Wise Tag / Correo:' : isEn ? 'Wise Tag / Email:' : isFr ? 'Wise Tag / E-mail :' : 'Wise Tag / Imèl:'}
                   </span>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-mono font-bold text-emerald-300">
@@ -505,12 +523,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'wise_email' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400 font-bold">Kopye!</span>
+                            <span className="text-emerald-400 font-bold">{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -521,7 +539,13 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                 {config.wiseIban && (
                   <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1">
                     <span className="text-[10px] text-slate-400 font-mono block">
-                      IBAN / Bank Transfer:
+                      {isEs
+                        ? 'IBAN / Transferencia Bancaria:'
+                        : isEn
+                          ? 'IBAN / Bank Transfer:'
+                          : isFr
+                            ? 'IBAN / Virement Bancaire :'
+                            : 'IBAN / Virement Bankè:'}
                     </span>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-mono font-bold text-slate-300">
@@ -535,12 +559,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'wise_iban' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400 font-bold">Kopye!</span>
+                            <span className="text-emerald-400 font-bold">{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -557,16 +581,24 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-rose-400"></span>
                     <span className="text-xs font-bold text-white uppercase tracking-wider">
-                      MonCash (Digicel Ayiti)
+                      {isEs ? 'MonCash (Digicel Haití)' : isEn ? 'MonCash (Digicel Haiti)' : isFr ? 'MonCash (Digicel Haïti)' : 'MonCash (Digicel Ayiti)'}
                     </span>
                   </div>
-                  <span className="text-[10px] text-rose-300 font-mono font-bold">Ayiti Lokal</span>
+                  <span className="text-[10px] text-rose-300 font-mono font-bold">
+                    {isEs ? 'Haití Local' : isEn ? 'Haiti Local' : isFr ? 'Haïti Local' : 'Ayiti Lokal'}
+                  </span>
                 </div>
 
                 {/* MonCash */}
                 <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1">
                   <span className="text-[10px] text-slate-400 font-mono block">
-                    Nimewo MonCash (Ayiti):
+                    {isEs
+                      ? 'Número MonCash (Haití):'
+                      : isEn
+                        ? 'MonCash Number (Haiti):'
+                        : isFr
+                          ? 'Numéro MonCash (Haïti) :'
+                          : 'Nimewo MonCash (Ayiti):'}
                   </span>
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-mono font-bold text-rose-300">
@@ -589,12 +621,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'moncash' ? (
                           <>
                             <Check className="w-3.5 h-3.5" />
-                            <span>Kopye!</span>
+                            <span>{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -603,7 +635,13 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                 </div>
 
                 <p className="text-[11px] text-slate-400 leading-relaxed italic">
-                  Ou ka voye donasyon an dirèkteman via aplikasyon MonCash oswa kòd *202# sou nimewo sa a.
+                  {isEs
+                    ? 'Puedes enviar tu donación directamente desde la app MonCash o marcando *202# a este número.'
+                    : isEn
+                      ? 'You can send your donation directly via the MonCash app or by dialing *202# to this number.'
+                      : isFr
+                        ? 'Vous pouvez envoyer votre don directement via l’application MonCash ou en composant *202# vers ce numéro.'
+                        : 'Ou ka voye donasyon an dirèkteman via aplikasyon MonCash oswa kòd *202# sou nimewo sa a.'}
                 </p>
               </div>
             )}
@@ -615,7 +653,7 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
                     <span className="text-xs font-bold text-white uppercase tracking-wider">
-                      Zelle (Etazini / USA)
+                      {isEs ? 'Zelle (Estados Unidos / USA)' : isEn ? 'Zelle (United States / USA)' : isFr ? 'Zelle (États-Unis / USA)' : 'Zelle (Etazini / USA)'}
                     </span>
                   </div>
                   <span className="text-[10px] text-purple-300 font-mono font-bold">USA Direct</span>
@@ -624,7 +662,13 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                 {config.zelleInfo && (
                   <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-1">
                     <span className="text-[10px] text-slate-400 font-mono block">
-                      Enfòmasyon Zelle (USA):
+                      {isEs
+                        ? 'Información Zelle (USA):'
+                        : isEn
+                          ? 'Zelle Information (USA):'
+                          : isFr
+                            ? 'Informations Zelle (USA) :'
+                            : 'Enfòmasyon Zelle (USA):'}
                     </span>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-mono font-bold text-purple-300">
@@ -638,12 +682,12 @@ export const DonationModal: React.FC<DonationModalProps> = ({
                         {copiedField === 'zelle' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            <span className="text-emerald-400">Kopye!</span>
+                            <span className="text-emerald-400">{copiedLabel}</span>
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Kopye</span>
+                            <span>{copyLabel}</span>
                           </>
                         )}
                       </button>
@@ -657,14 +701,7 @@ export const DonationModal: React.FC<DonationModalProps> = ({
           {/* FOOTER BLESSING & ACKNOWLEDGEMENT */}
           <div className="text-center pt-2">
             <p className="text-[11px] text-slate-400 italic">
-              {config.customNote ||
-                (isEs
-                  ? '«Cada uno dé como propuso en su corazón: no con tristeza, ni por necesidad, porque Dios ama al dador alegre.» — 2 Corintios 9:7'
-                  : isEn
-                  ? '“Each of you should give what you have decided in your heart to give, not reluctantly or under compulsion, for God loves a cheerful giver.” — 2 Corinthians 9:7'
-                  : isFr
-                  ? '« Que chacun donne comme il l’a résolu en son cœur, sans tristesse ni contrainte ; car Dieu aime celui qui donne avec joie. » — 2 Corinthiens 9:7'
-                  : '« Se pou chak moun bay jan yo te deside nan kè yo, san regrèt ni fòse, paske Bondye renmen moun ki bay ak kè kontan. » — 2 Korentyen 9:7')}
+              {localizedCopy.customNote}
             </p>
           </div>
         </div>

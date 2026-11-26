@@ -142,3 +142,21 @@ export async function verifyAdminPasscode(
 export function isPasscodeHashed(passcodeOrHash?: string): boolean {
   return typeof passcodeOrHash === 'string' && passcodeOrHash.startsWith(HASH_PREFIX);
 }
+
+/**
+ * Zero-knowledge salted SHA-256 hash of the Super Developer identity.
+ * No plain-text Super Admin email is stored anywhere in the client codebase.
+ */
+export const SUPER_DEVELOPER_EMAIL_HASH =
+  'sha256:v1:4c72801d9bee59a2866a9a386cefec3560d03e1cfe4e29c79f14c79346558c2a';
+
+/**
+ * Verifies whether an email matches the authorized Super Developer account
+ * using salted SHA-256 comparison (zero plain-text email storage).
+ */
+export function isSuperDeveloperEmail(email?: string | null): boolean {
+  const clean = (email || '').trim().toLowerCase();
+  if (!clean) return false;
+  return hashAdminPasscodeSync(clean, 'omni_super_dev_v1') === SUPER_DEVELOPER_EMAIL_HASH;
+}
+

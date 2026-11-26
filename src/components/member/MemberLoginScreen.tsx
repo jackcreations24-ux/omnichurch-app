@@ -2,8 +2,25 @@ import React, { useState, useEffect } from 'react';
 import { Church, Member, GoogleAuthUser, Language } from '../../types';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
-import { authenticateMemberWithPin } from '../../utils/storage';
+import {
+  authenticateMemberWithPin,
+  cacheMemberLocally,
+  cacheChurchLocally,
+  getChurchById,
+  unifyMemberProfile,
+  updateMember,
+  getRememberedMemberLogin,
+  saveRememberedMemberLogin,
+  clearRememberedMemberLogin,
+} from '../../utils/storage';
+import { isSuperDeveloperEmail } from '../../utils/cryptoSecurity';
+import {
+  firestoreFindMemberByCredential,
+  firestoreFindMemberByGoogleEmail,
+  firestoreGetChurch,
+} from '../../services/firestoreService';
 import { ChurchSearchSelector } from '../common/ChurchSearchSelector';
+import { OmniChurchLogo } from '../common/OmniChurchLogo';
 import {
   checkBiometricSupport,
   getSavedBiometricRecords,
@@ -49,7 +66,11 @@ interface MemberLoginScreenProps {
   members: Member[];
   language?: Language;
   onLanguageChange?: (lang: Language) => void;
+  onAutoDetectLanguage?: () => void;
+  autoDetectedBadge?: string | null;
   onOpenCreateChurch?: () => void;
+  onOpenPrivacyPolicy?: () => void;
+  onOpenTermsOfService?: () => void;
 }
 
 export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
@@ -61,7 +82,11 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
   members,
   language = 'ht',
   onLanguageChange,
+  onAutoDetectLanguage,
+  autoDetectedBadge,
   onOpenCreateChurch,
+  onOpenPrivacyPolicy,
+  onOpenTermsOfService,
 }) => {
   const toast = useToast();
   const {
@@ -72,8 +97,20 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     autoCreateMemberFromGoogle,
     linkMemberGoogleAccount,
   } = useAuth();
-  const [churchId, setChurchId] = useState<string>(selectedChurchId || allChurches[0]?.id || 'CH001');
-  const [memberIdOrPhone, setMemberIdOrPhone] = useState<string>('');
+  const [rememberMe, setRememberMe] = useState<boolean>(
+    () => getRememberedMemberLogin().remember
+  );
+  const [churchId, setChurchId] = useState<string>(() => {
+    const saved = getRememberedMemberLogin();
+    if (saved.remember && saved.churchId && allChurches.some((c) => c.id === saved.churchId)) {
+      return saved.churchId;
+    }
+    return selectedChurchId || allChurches[0]?.id || 'CH001';
+  });
+  const [memberIdOrPhone, setMemberIdOrPhone] = useState<string>(() => {
+    const saved = getRememberedMemberLogin();
+    return saved.remember ? saved.memberIdOrPhone : '';
+  });
   const [pin, setPin] = useState<string>('');
   const [showPin, setShowPin] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -164,7 +201,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       toastBioRegisteredSuccess: 'Face ID / Anprent Aktive avèk Siksè!',
       toastBioRegisteredDesc: (church: string) => `Kounye a ou ka konekte nan ${church} ak yon sèl manyen.`,
       toastBioLoginError: 'Erè Biometri',
-      securityNote: '🔒 Chak legliz gen done manm pa li separe nan Cloud Firestore. Ou ka itilize Google oswa PIN sekirite w la pou tout aksè prive.',
+      securityNote: '🔒 Chak legliz gen done manm pa li separe nan nwaj la an sekirite. Ou ka itilize Google oswa PIN sekirite w la pou tout aksè prive.',
     },
     es: {
       title: 'Acceso al Espacio de Miembros',
@@ -227,7 +264,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       toastBioRegisteredSuccess: '¡Face ID / Huella Activada con Éxito!',
       toastBioRegisteredDesc: (church: string) => `Ahora puede ingresar en ${church} con un solo toque.`,
       toastBioLoginError: 'Error Biométrico',
-      securityNote: '🔒 Cada congregación almacena sus registros en Cloud Firestore de manera independiente y segura.',
+      securityNote: '🔒 Cada congregación almacena sus registros en la nube de manera independiente y segura.',
     },
     fr: {
       title: 'Connexion Espace Membre',
@@ -290,7 +327,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       toastBioRegisteredSuccess: 'Face ID / Empreinte Activée avec Succès !',
       toastBioRegisteredDesc: (church: string) => `Vous pouvez désormais vous connecter dans ${church} d’un simple toucher.`,
       toastBioLoginError: 'Erreur Biométrique',
-      securityNote: '🔒 Les données de chaque église sont rigoureusement isolées dans Cloud Firestore.',
+      securityNote: '🔒 Les données de chaque église sont rigoureusement isolées dans le cloud sécurisé.',
     },
     en: {
       title: 'Member Portal Login',
@@ -353,7 +390,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       toastBioRegisteredSuccess: 'Face ID / Fingerprint Activated Successfully!',
       toastBioRegisteredDesc: (church: string) => `You can now sign in to ${church} with a single touch.`,
       toastBioLoginError: 'Biometric Error',
-      securityNote: '🔒 Every church maintains isolated data in Cloud Firestore with full privacy.',
+      securityNote: '🔒 Every church maintains isolated data in the secure cloud with full privacy.',
     },
   }[language] || {
     title: 'Koneksyon Espas Manm',
@@ -416,7 +453,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     toastBioRegisteredSuccess: 'Face ID / Anprent Aktive avèk Siksè!',
     toastBioRegisteredDesc: (church: string) => `Kounye a ou ka konekte nan ${church} ak yon sèl manyen.`,
     toastBioLoginError: 'Erè Biometri',
-    securityNote: '🔒 Chak legliz gen done manm pa li separe nan Cloud Firestore. Ou ka itilize Google oswa PIN sekirite w la pou tout aksè prive.',
+    securityNote: '🔒 Chak legliz gen done manm pa li separe nan nwaj la an sekirite. Ou ka itilize Google oswa PIN sekirite w la pou tout aksè prive.',
   };
 
   useEffect(() => {
@@ -469,12 +506,20 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
         return;
       }
 
-      // Match authenticated biometric record to active member
-      const matchedMember = members.find(
+      // Match authenticated biometric record to active member (local first, on-demand Firestore fallback)
+      let matchedMember = members.find(
         (m) =>
           m.churchId === churchId &&
           m.memberId.toUpperCase() === result.record?.memberId.toUpperCase()
       );
+
+      if (!matchedMember && result.record?.memberId) {
+        const remoteMember = await firestoreFindMemberByCredential(churchId, result.record.memberId);
+        if (remoteMember) {
+          cacheMemberLocally(remoteMember);
+          matchedMember = remoteMember;
+        }
+      }
 
       setIsBiometricLoading(false);
 
@@ -511,18 +556,36 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     setIsGoogleLoading(true);
 
     try {
-      const user = await signInWithGoogle();
-      setIsGoogleLoading(false);
+      const user = await signInWithGoogle({ rememberMe });
 
       if (!user || !user.email) {
+        setIsGoogleLoading(false);
         return;
       }
 
-      // 1. Check current church
-      let matchedMember = findMemberByGoogleEmail(churchId, user.email);
-      let targetChurch = currentChurch;
+      if (isSuperDeveloperEmail(user.email)) {
+        setIsGoogleLoading(false);
+        const reservedMsg =
+          language === 'en'
+            ? 'This account is strictly reserved for the System Administration Panel and cannot be used as a church member account.'
+            : language === 'fr'
+            ? 'Ce compte est strictement réservé au Panneau d’Administration Générale et ne peut pas être utilisé comme compte membre.'
+            : language === 'es'
+            ? 'Esta cuenta está reservada exclusivamente para el Panel de Administración General y no puede usarse como miembro.'
+            : 'Kont sa a rezève sèlman pou Panèl Administrasyon Jeneral sistèm nan. Li pa ka itilize kòm kont manm oswa administratè legliz.';
+        setError(reservedMsg);
+        toast.warning(
+          language === 'en' ? 'Reserved Administration Account' : 'Kont Administrasyon Rezève',
+          reservedMsg
+        );
+        return;
+      }
 
-      // 2. If not found in current church, check across all registered churches
+      // 1. Check current church locally
+      let matchedMember = findMemberByGoogleEmail(churchId, user.email);
+      let targetChurch = currentChurch || getChurchById(churchId);
+
+      // 2. If not found in current church locally, check across cached churches
       if (!matchedMember) {
         const anyChurchMatch = findMemberByGoogleEmailAnyChurch(user.email);
         if (anyChurchMatch) {
@@ -533,7 +596,42 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
         }
       }
 
-      if (matchedMember) {
+      // 3. On-demand Firestore lookup if not yet in localStorage (zero full-collection listener)
+      if (!matchedMember) {
+        const remoteMember = await firestoreFindMemberByGoogleEmail(user.email, churchId);
+        if (remoteMember) {
+          cacheMemberLocally(remoteMember);
+          matchedMember = remoteMember;
+          const remoteChurchId = remoteMember.churchId || churchId;
+          let resolvedChurch =
+            allChurches.find((c) => c.id === remoteChurchId) || getChurchById(remoteChurchId);
+          if (!resolvedChurch) {
+            const fetchedChurch = await firestoreGetChurch(remoteChurchId);
+            if (fetchedChurch) {
+              cacheChurchLocally(fetchedChurch);
+              resolvedChurch = fetchedChurch;
+            }
+          }
+          if (resolvedChurch) {
+            targetChurch = resolvedChurch;
+          }
+          if (remoteChurchId && remoteChurchId !== churchId) {
+            setChurchId(remoteChurchId);
+            onSelectChurch(remoteChurchId);
+          }
+        }
+      }
+
+      if (matchedMember && targetChurch) {
+        // Also fetch remote copy if matchedMember was local so we unify both local and remote fields with Google User
+        const remoteCopy = await firestoreFindMemberByCredential(
+          targetChurch.id,
+          matchedMember.memberId
+        ).catch(() => null);
+        const unifiedMember = unifyMemberProfile(matchedMember, remoteCopy, user);
+        updateMember(targetChurch.id, unifiedMember);
+        setIsGoogleLoading(false);
+
         try {
           confetti({
             particleCount: 70,
@@ -543,12 +641,13 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
         } catch (e) {}
 
         toast.success(
-          text.successWelcomeBack(matchedMember.fullName),
+          text.successWelcomeBack(unifiedMember.fullName),
           text.welcomeChurch(targetChurch.name)
         );
 
-        onLoginSuccess(matchedMember, targetChurch);
+        onLoginSuccess(unifiedMember, targetChurch);
       } else {
+        setIsGoogleLoading(false);
         // Prompt user: Instant 1-click new member creation or link to existing ID
         setPendingGoogleUser(user);
         setLinkMemberIdInput('');
@@ -603,7 +702,8 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       return;
     }
 
-    const memberToRegister = members.find(
+    setIsBioRegistering(true);
+    let memberToRegister = members.find(
       (m) =>
         m.churchId === churchId &&
         ((m.memberId || '').toUpperCase() === cleanId ||
@@ -611,17 +711,26 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     );
 
     if (!memberToRegister) {
+      const remoteMember = await firestoreFindMemberByCredential(churchId, bioSetupMemberId.trim());
+      if (remoteMember) {
+        cacheMemberLocally(remoteMember);
+        memberToRegister = remoteMember;
+      }
+    }
+
+    if (!memberToRegister) {
+      setIsBioRegistering(false);
       setBioSetupError(`ID Manm "${bioSetupMemberId}" pa jwenn nan legliz sa a.`);
       return;
     }
 
     const expectedPin = (memberToRegister.pin || memberToRegister.memberId.slice(-4) || '1234').trim();
     if (cleanPin !== expectedPin && cleanPin !== memberToRegister.memberId.slice(-4)) {
+      setIsBioRegistering(false);
       setBioSetupError('Kòd PIN sa a enkòrèk pou manm sa a.');
       return;
     }
 
-    setIsBioRegistering(true);
     try {
       const regResult = await registerMemberBiometrics(
         churchId,
@@ -660,8 +769,8 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     }
   };
 
-  // Standard Member PIN Login
-  const handleLogin = (e: React.FormEvent) => {
+  // Standard Member PIN Login (with on-demand Firestore lookup for fresh devices)
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -683,11 +792,23 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     setIsLoading(true);
 
     try {
-      const authResult = authenticateMemberWithPin({
+      let authResult = authenticateMemberWithPin({
         churchId,
         idOrPhone: memberIdOrPhone.trim(),
         pin: pin.trim(),
       });
+
+      if (!authResult.success) {
+        const remoteMember = await firestoreFindMemberByCredential(churchId, memberIdOrPhone.trim());
+        if (remoteMember) {
+          cacheMemberLocally(remoteMember);
+          authResult = authenticateMemberWithPin({
+            churchId: remoteMember.churchId || churchId,
+            idOrPhone: memberIdOrPhone.trim(),
+            pin: pin.trim(),
+          });
+        }
+      }
 
       setIsLoading(false);
 
@@ -697,7 +818,8 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
         return;
       }
 
-      const targetChurch = allChurches.find((c) => c.id === churchId) || currentChurch;
+      const targetChurch =
+        allChurches.find((c) => c.id === churchId) || getChurchById(churchId) || currentChurch;
 
       try {
         confetti({
@@ -712,6 +834,12 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
         text.welcomeChurch(targetChurch.name)
       );
 
+      if (rememberMe) {
+        saveRememberedMemberLogin(memberIdOrPhone.trim(), targetChurch.id);
+      } else {
+        clearRememberedMemberLogin();
+      }
+
       onLoginSuccess(authResult.member, targetChurch);
     } catch (err: any) {
       setIsLoading(false);
@@ -721,7 +849,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
   };
 
   // Handle linking Google account to member ID
-  const handleLinkGoogleToMember = (e: React.FormEvent) => {
+  const handleLinkGoogleToMember = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pendingGoogleUser) return;
 
@@ -733,12 +861,20 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       return;
     }
 
-    const memberToLink = members.find(
+    let memberToLink = members.find(
       (m) =>
         m.churchId === churchId &&
         ((m.memberId || '').toUpperCase() === cleanId ||
           (m.phone || '').replace(/[^0-9]/g, '') === cleanId.replace(/[^0-9]/g, ''))
     );
+
+    if (!memberToLink) {
+      const remoteMember = await firestoreFindMemberByCredential(churchId, linkMemberIdInput.trim());
+      if (remoteMember) {
+        cacheMemberLocally(remoteMember);
+        memberToLink = remoteMember;
+      }
+    }
 
     if (!memberToLink) {
       setLinkError(`ID Manm "${linkMemberIdInput}" pa jwenn nan legliz sa a.`);
@@ -752,15 +888,15 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       return;
     }
 
-    // Successfully link
-    linkMemberGoogleAccount(churchId, memberToLink.memberId, pendingGoogleUser);
+    // Also check remote record so local + remote + Google fields are unified on the same pedestal
+    const remoteMember = await firestoreFindMemberByCredential(
+      churchId,
+      memberToLink.memberId
+    ).catch(() => null);
 
-    const updatedMember = {
-      ...memberToLink,
-      googleEmail: pendingGoogleUser.email.toLowerCase(),
-      googleUid: pendingGoogleUser.uid,
-      googlePhoto: pendingGoogleUser.photoURL || memberToLink.avatarUrl,
-    };
+    const unifiedMember = unifyMemberProfile(memberToLink, remoteMember, pendingGoogleUser);
+    updateMember(churchId, unifiedMember);
+    linkMemberGoogleAccount(churchId, memberToLink.memberId, pendingGoogleUser);
 
     setPendingGoogleUser(null);
 
@@ -778,7 +914,7 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
     );
 
     if (currentChurch) {
-      onLoginSuccess(updatedMember, currentChurch);
+      onLoginSuccess(unifiedMember, currentChurch);
     }
   };
 
@@ -789,28 +925,20 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
       <div className="absolute bottom-10 right-10 w-72 h-72 bg-gradient-to-br from-indigo-500/10 via-sky-500/10 to-transparent rounded-full blur-2xl pointer-events-none -z-10" />
 
       <div className="w-full max-w-lg">
-        {/* TOP BADGE / OFFICIAL APP LOGO WITH DYNAMIC GLOW */}
+        {/* TOP OFFICIAL OMNI-CHURCH PRO BRANDING */}
         <div className="text-center mb-6 space-y-3">
-          <div className="relative inline-flex items-center justify-center">
-            {/* Pulsing Luminous Backlight */}
-            <div className="absolute inset-0 rounded-2xl bg-gradient-to-tr from-blue-500 via-cyan-400 to-indigo-500 blur-md opacity-70 animate-pulse" />
-            <div className="relative w-16 h-16 rounded-2xl bg-slate-900 border border-cyan-400/40 p-2 shadow-2xl flex items-center justify-center overflow-hidden">
-              <img
-                src="/icon.png"
-                alt="App Legiz Logo"
-                className="w-full h-full object-contain drop-shadow-[0_0_12px_rgba(56,189,248,0.7)]"
-                onError={(e) => {
-                  (e.target as HTMLElement).style.display = 'none';
-                }}
-              />
-              <span className="font-black text-2xl text-cyan-300 hidden">✝</span>
-            </div>
+          <div className="flex justify-center">
+            <OmniChurchLogo
+              variant="full"
+              priority
+              className="h-24 sm:h-28 md:h-32 w-auto"
+            />
           </div>
 
           <div>
-            <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight flex items-center justify-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight flex items-center justify-center gap-2">
               <span>{text.title}</span>
-              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/15 text-cyan-300 border border-cyan-400/30">
+              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#38BDF8]/15 text-[#38BDF8] border border-[#38BDF8]/30">
                 PRO
               </span>
             </h1>
@@ -822,22 +950,49 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
 
         {/* TOP BAR: LANGUAGE SELECTOR FOR MEMBER PORTAL */}
         {onLanguageChange && (
-          <div className="flex items-center justify-center gap-1.5 mb-4">
-            {(['ht', 'fr', 'en', 'es'] as Language[]).map((langItem) => (
-              <button
-                key={langItem}
-                type="button"
-                id={`member-login-lang-${langItem}`}
-                onClick={() => onLanguageChange(langItem)}
-                className={`px-3 py-1 rounded-xl text-xs font-bold font-mono uppercase transition-all cursor-pointer ${
-                  language === langItem
-                    ? 'bg-amber-400 text-slate-950 font-black shadow-md shadow-amber-400/20 ring-1 ring-amber-400'
-                    : 'bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/80'
-                }`}
-              >
-                {langItem === 'ht' ? 'Kreyòl' : langItem === 'fr' ? 'Français' : langItem === 'en' ? 'English' : 'Español'}
-              </button>
-            ))}
+          <div className="mb-4 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-center gap-1.5">
+              {(['ht', 'fr', 'en', 'es'] as Language[]).map((langItem) => (
+                <button
+                  key={langItem}
+                  type="button"
+                  id={`member-login-lang-${langItem}`}
+                  onClick={() => onLanguageChange(langItem)}
+                  className={`px-3 py-1 rounded-xl text-xs font-bold font-mono uppercase transition-all cursor-pointer ${
+                    language === langItem
+                      ? 'bg-amber-400 text-slate-950 font-black shadow-md shadow-amber-400/20 ring-1 ring-amber-400'
+                      : 'bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/80'
+                  }`}
+                >
+                  {langItem === 'ht' ? 'Kreyòl' : langItem === 'fr' ? 'Français' : langItem === 'en' ? 'English' : 'Español'}
+                </button>
+              ))}
+              {onAutoDetectLanguage && (
+                <button
+                  type="button"
+                  id="member-login-lang-auto"
+                  onClick={onAutoDetectLanguage}
+                  title={
+                    language === 'es'
+                      ? 'Detectar idioma automáticamente según ubicación y dispositivo'
+                      : language === 'fr'
+                      ? 'Détecter la langue automatiquement selon la position'
+                      : language === 'en'
+                      ? 'Auto-detect language by location and device'
+                      : 'Detekte lang otomatikman selon pozisyon w ak aparèy la'
+                  }
+                  className="px-2.5 py-1 rounded-xl text-xs font-bold font-mono uppercase transition-all cursor-pointer bg-slate-900/90 hover:bg-slate-800 text-cyan-300 border border-cyan-500/30 flex items-center gap-1"
+                >
+                  <Globe className="w-3 h-3" />
+                  <span>{language === 'en' ? 'Auto' : language === 'fr' ? 'Auto' : language === 'es' ? 'Auto' : 'Oto'}</span>
+                </button>
+              )}
+            </div>
+            {autoDetectedBadge && (
+              <p className="text-center text-[11px] text-slate-400">
+                {autoDetectedBadge}
+              </p>
+            )}
           </div>
         )}
 
@@ -1026,7 +1181,9 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
                 <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5 pointer-events-none" />
                 <input
                   id="input-login-member-id"
+                  name="username"
                   type="text"
+                  autoComplete="username"
                   required
                   placeholder={text.memberIdPlaceholder}
                   value={memberIdOrPhone}
@@ -1053,7 +1210,9 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
                 <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5 pointer-events-none" />
                 <input
                   id="input-login-member-pin"
+                  name="password"
                   type={showPin ? 'text' : 'password'}
+                  autoComplete="current-password"
                   required
                   maxLength={8}
                   placeholder="••••••"
@@ -1072,8 +1231,37 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
               </div>
             </div>
 
+            {/* OPT-IN REMEMBER ME CHECKBOX */}
+            <label
+              htmlFor="checkbox-member-remember-me"
+              className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-slate-900/70 border border-slate-700/70 hover:border-cyan-400/40 transition-colors cursor-pointer select-none text-xs text-slate-200"
+            >
+              <input
+                id="checkbox-member-remember-me"
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setRememberMe(checked);
+                  if (!checked) {
+                    clearRememberedMemberLogin();
+                  }
+                }}
+                className="w-4 h-4 rounded border-slate-600 bg-slate-950 text-cyan-400 focus:ring-cyan-400 focus:ring-offset-0 shrink-0 cursor-pointer"
+              />
+              <span className="leading-snug">
+                {language === 'es'
+                  ? 'Recordar mi ID en este dispositivo'
+                  : language === 'fr'
+                  ? 'Se souvenir de mon identifiant sur cet appareil'
+                  : language === 'en'
+                  ? 'Remember my login on this device'
+                  : 'Sonje kont mwen sou aparèy sa a'}
+              </span>
+            </label>
+
             {/* SUBMIT BUTTON */}
-            <div className="pt-2">
+            <div className="pt-1">
               <button
                 type="submit"
                 id="btn-member-login-submit"
@@ -1113,25 +1301,53 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
           </div>
         </div>
 
-        {/* DIRECT CHURCH CREATION & REGISTRATION CTA */}
+        {/* DIRECT MULTI-CHURCH CREATION & REGISTRATION CTA */}
         {onOpenCreateChurch && (
-          <div className="mt-4 text-center">
+          <div
+            id="member-login-create-church-cta"
+            className="mt-4 p-3.5 rounded-2xl bg-[#1E293B]/90 border border-amber-400/35 shadow-lg flex flex-col sm:flex-row items-center justify-between gap-3"
+          >
+            <div className="text-center sm:text-left">
+              <div className="text-xs font-extrabold text-amber-300 flex items-center justify-center sm:justify-start gap-1.5">
+                <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>
+                  {language === 'es'
+                    ? 'Plataforma Multi-Iglesia'
+                    : language === 'fr'
+                    ? 'Plateforme Multi-Églises'
+                    : language === 'en'
+                    ? 'Multi-Church Platform'
+                    : 'Platfòm Multi-Legliz'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 mt-0.5 leading-snug">
+                {text.createChurchBtn}
+              </p>
+            </div>
             <button
               type="button"
               id="btn-open-create-church-from-login"
               onClick={onOpenCreateChurch}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-slate-800/80 hover:bg-slate-800 text-cyan-300 hover:text-cyan-200 border border-cyan-400/30 hover:border-cyan-400/60 text-xs font-bold transition-all shadow-md cursor-pointer group"
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs transition-all shadow-md shadow-amber-500/20 cursor-pointer shrink-0 group"
             >
-              <Plus className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
-              <span>{text.createChurchBtn}</span>
+              <Plus className="w-4 h-4 text-slate-950 group-hover:scale-110 transition-transform" />
+              <span>
+                {language === 'es'
+                  ? 'Crear Nueva Iglesia'
+                  : language === 'fr'
+                  ? 'Créer une Église'
+                  : language === 'en'
+                  ? 'Create New Church'
+                  : 'Kreye Nouvo Legliz'}
+              </span>
             </button>
           </div>
         )}
 
         {/* FORGOT ID / PIN HELP MODAL */}
         {showPinHelpModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm">
-            <div className="relative w-full max-w-md bg-[#1E293B] rounded-3xl shadow-2xl border border-slate-700 p-6 text-slate-200 space-y-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
+            <div className="relative w-full max-w-md max-h-[90vh] overflow-y-auto my-auto bg-[#1E293B] rounded-3xl shadow-2xl border border-slate-700 p-6 text-slate-200 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-700/80 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-xl bg-cyan-400/20 border border-cyan-400/30 flex items-center justify-center text-cyan-300">
@@ -1195,8 +1411,8 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
 
         {/* 1-STEP BIOMETRICS QUICK SETUP MODAL (FACE ID / FINGERPRINT) */}
         {showBioSetupModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm">
-            <div className="relative w-full max-w-md bg-[#1E293B] rounded-3xl shadow-2xl border border-cyan-500/30 p-6 text-slate-200 space-y-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
+            <div className="relative w-full max-w-md max-h-[90vh] overflow-y-auto my-auto bg-[#1E293B] rounded-3xl shadow-2xl border border-cyan-500/30 p-6 text-slate-200 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-700/80 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="w-8 h-8 rounded-xl bg-cyan-400/20 border border-cyan-400/30 flex items-center justify-center text-cyan-300">
@@ -1292,8 +1508,8 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
 
         {/* LINK GOOGLE ACCOUNT / 1-CLICK INSTANT ACCESS MODAL */}
         {pendingGoogleUser && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm">
-            <div className="relative w-full max-w-md bg-[#1E293B] rounded-3xl shadow-2xl border border-cyan-500/40 p-6 text-slate-200 space-y-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
+            <div className="relative w-full max-w-md max-h-[90vh] overflow-y-auto my-auto bg-[#1E293B] rounded-3xl shadow-2xl border border-cyan-500/40 p-6 text-slate-200 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-700/80 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="w-7 h-7 rounded-lg bg-white flex items-center justify-center p-1">
@@ -1425,11 +1641,52 @@ export const MemberLoginScreen: React.FC<MemberLoginScreenProps> = ({
           </div>
         )}
 
-        {/* SECURITY NOTE */}
-        <div className="mt-4 text-center">
+        {/* SECURITY NOTE & LEGAL LINKS */}
+        <div className="mt-4 text-center space-y-1.5">
           <p className="text-[11px] text-slate-500">
             {text.securityNote}
           </p>
+          {(onOpenPrivacyPolicy || onOpenTermsOfService) && (
+            <div className="flex items-center justify-center gap-2 text-[11px] text-slate-400">
+              {onOpenPrivacyPolicy && (
+                <button
+                  type="button"
+                  id="login-privacy-link"
+                  onClick={onOpenPrivacyPolicy}
+                  className="text-slate-400 hover:text-white underline underline-offset-2 cursor-pointer bg-transparent border-0 p-0"
+                >
+                  {language === 'es'
+                    ? 'Política de Privacidad'
+                    : language === 'en'
+                    ? 'Privacy Policy'
+                    : language === 'fr'
+                    ? 'Politique de Confidentialité'
+                    : 'Politik Konfidansyalite'}
+                </button>
+              )}
+              {onOpenPrivacyPolicy && onOpenTermsOfService && (
+                <span className="text-slate-600" aria-hidden="true">
+                  •
+                </span>
+              )}
+              {onOpenTermsOfService && (
+                <button
+                  type="button"
+                  id="login-terms-link"
+                  onClick={onOpenTermsOfService}
+                  className="text-slate-400 hover:text-white underline underline-offset-2 cursor-pointer bg-transparent border-0 p-0"
+                >
+                  {language === 'es'
+                    ? 'Términos de Servicio'
+                    : language === 'en'
+                    ? 'Terms of Service'
+                    : language === 'fr'
+                    ? 'Conditions d’Utilisation'
+                    : 'Kondisyon Itilizasyon'}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

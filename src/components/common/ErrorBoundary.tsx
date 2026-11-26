@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { ShieldAlert, RefreshCw, Trash2 } from 'lucide-react';
+import { OmniChurchLogo } from './OmniChurchLogo';
 
 interface Props {
   children: ReactNode;
@@ -56,8 +57,16 @@ export class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="min-h-screen bg-[#0F172A] text-slate-200 flex items-center justify-center p-4 font-sans">
           <div className="max-w-md w-full bg-[#1E293B] rounded-3xl border border-rose-500/40 p-6 sm:p-8 shadow-2xl space-y-5 text-center">
-            <div className="w-14 h-14 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto">
-              <ShieldAlert className="w-8 h-8" />
+            <div className="flex justify-center">
+              <OmniChurchLogo
+                variant="full"
+                priority
+                className="h-16 sm:h-20 w-auto"
+              />
+            </div>
+
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto">
+              <ShieldAlert className="w-6 h-6" />
             </div>
 
             <div className="space-y-2">

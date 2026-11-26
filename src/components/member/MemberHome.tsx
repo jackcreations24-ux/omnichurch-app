@@ -1,52 +1,51 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Church,
   Member,
   Announcement,
   ServiceSession,
-  AnnouncementCategory,
+  ServiceCategory,
   Language,
   DeveloperSettings,
+  AnnouncementComment,
+  AnnouncementReactionDoc,
 } from '../../types';
 import { SERVICE_CATEGORIES } from '../../utils/i18n';
 import {
-  Bell,
   Calendar,
   Clock,
   QrCode,
-  Maximize2,
-  Pin,
-  Flame,
   ChevronRight,
   ShieldCheck,
   Building2,
   Users,
-  SunMedium,
-  BookOpen,
-  Megaphone,
   Radio,
   AlertTriangle,
   Heart,
-  ThumbsUp,
   MessageSquare,
   Send,
-  Smile,
-  CheckCircle2,
   Share2,
   ExternalLink,
-  Award,
-  Trash2,
   BadgeCheck,
   Globe,
   HeartHandshake,
   DollarSign,
   Wallet,
+  Camera,
+  Crown,
+  BookOpen,
+  ScrollText,
+  Music,
+  Sparkles,
+  ZoomIn,
+  Megaphone,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { ReactionPicker, ReactionType, REACTION_LIST } from './ReactionPicker';
 import { CommentsWheel } from './CommentsWheel';
 import { DonationModal } from '../common/DonationModal';
+import { DonateButton } from '../common/DonateButton';
 import { ChurchDonationModal } from '../common/ChurchDonationModal';
 import { ChurchTermsModal } from '../common/ChurchTermsModal';
 import { PosterLightboxModal } from '../common/PosterLightboxModal';
@@ -56,31 +55,71 @@ import {
   saveAnnouncementInteraction,
   addAnnouncementComment,
   deleteAnnouncementComment,
-  getLocalizedAnnouncementTitle,
-  getLocalizedAnnouncementContent,
-  deduplicateAnnouncements,
   purgeDemoComments,
+  isServiceEnded,
+  formatAnnouncementTimestamp,
+  syncLocalCommentsFromServerSnapshot,
+  getMembersByChurch,
 } from '../../utils/storage';
-import { getDeveloperSettings, getDonationConfig, hasActiveChurchLicense } from '../../utils/developerStorage';
+import {
+  getMemberFeedServices,
+  getServiceFeedTargetId,
+  stripServiceFeedPrefix,
+  formatServiceCalendarBadge,
+  formatServiceFullDateLabel,
+  formatServiceTimeAmPm,
+  formatServiceTimeRangeAmPm,
+  buildServiceShareText,
+  buildServiceShareAnnouncement,
+  resolveServiceThumbnailUrl,
+  resolveMemberAvatarsForRole,
+  resolveMemberProfilePhoto,
+  normalizePersonNameForMatch,
+  isValidDisplayImageUrl,
+  ResolvedRoleAvatar,
+} from '../../utils/memberFeedUtils';
+import { isServiceCurrentlyActive } from '../../utils/permissions';
+import {
+  getDeveloperSettings,
+  getDonationConfig,
+  hasActiveChurchLicense,
+  sanitizeCommentModerationConfig,
+  evaluateCommentAgainstModeration,
+  CommentModerationEvaluationResult,
+} from '../../utils/developerStorage';
 import {
   subscribeToAnnouncementComments,
   subscribeToAnnouncementReactions,
+  subscribeToMemberNotifications,
   firestoreAddAnnouncementComment,
   firestoreDeleteAnnouncementComment,
   firestoreSetAnnouncementReaction,
   firestoreRemoveAnnouncementReaction,
+  firestoreGetChurchMembersList,
 } from '../../services/firestoreService';
-import { AnnouncementReactionDoc } from '../../types';
+import {
+  syncNotificationReadStatesFromCloud,
+} from '../../services/notificationCenterService';
 import { Share } from '@capacitor/share';
 import { Capacitor } from '@capacitor/core';
+
+const cachedChurchRosterMap = new Map<string, Member[]>();
 
 interface MemberHomeProps {
   church: Church;
   member?: Member | null;
+  members?: Member[];
   announcements: Announcement[];
   services: ServiceSession[];
   onOpenMyCode: () => void;
   onSelectServiceCategory: (category: any) => void;
+  isReception?: boolean;
+  onOpenReceptionDesk?: () => void;
+  onOpenReceptionScanner?: () => void;
+  isDeacon?: boolean;
+  onOpenDeaconServices?: () => void;
+  onOpenDeaconAnnouncements?: () => void;
+  onOpenDonateScreen?: () => void;
   language?: Language;
 }
 
@@ -88,23 +127,24 @@ interface AnnouncementInteraction {
   likes: number;
   userLiked: boolean;
   reaction?: ReactionType;
-  comments: {
-    id: string;
-    author: string;
-    text: string;
-    time: string;
-    avatarInitials: string;
-    isDemo?: boolean;
-  }[];
+  comments: AnnouncementComment[];
 }
 
 export const MemberHome: React.FC<MemberHomeProps> = ({
   church,
   member,
+  members: membersProp = [],
   announcements,
   services,
   onOpenMyCode,
   onSelectServiceCategory,
+  isReception = false,
+  onOpenReceptionDesk,
+  onOpenReceptionScanner,
+  isDeacon = false,
+  onOpenDeaconServices,
+  onOpenDeaconAnnouncements,
+  onOpenDonateScreen,
   language = 'ht',
 }) => {
   const toast = useToast();
@@ -129,16 +169,29 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     title: string;
     caption?: string;
   } | null>(null);
+  const [brokenImageUrls, setBrokenImageUrls] = useState<Record<string, boolean>>({});
+  const [cloudRoster, setCloudRoster] = useState<Member[]>(() =>
+    church?.id ? cachedChurchRosterMap.get(church.id) || [] : []
+  );
+
+  const markImageBroken = (url?: string | null) => {
+    if (!url) return;
+    setBrokenImageUrls((prev) => (prev[url] ? prev : { ...prev, [url]: true }));
+  };
+
+  const isUsableImageUrl = (url?: string | null): url is string =>
+    Boolean(url && isValidDisplayImageUrl(url) && !brokenImageUrls[url]);
 
   // Helper to deduplicate comments by id, text and author (prevent any duplicates)
   const deduplicateComments = (rawComments: any[] = []): any[] => {
     const clean: any[] = [];
     const seenIds = new Set<string>();
     rawComments.forEach((c) => {
-      if (!c || c.isDemo || c.id === 'c1' || c.id === 'c2' || c.id.startsWith('comm_demo') || c.id.startsWith('demo_')) {
+      const commentId = typeof c?.id === 'string' ? c.id : '';
+      if (!c || c.isDemo || commentId === 'c1' || commentId === 'c2' || commentId.startsWith('comm_demo') || commentId.startsWith('demo_')) {
         return;
       }
-      if (seenIds.has(c.id)) return;
+      if (commentId && seenIds.has(commentId)) return;
       const isDup = clean.some(
         (u) =>
           (u.author || '').trim().toLowerCase() === (c.author || '').trim().toLowerCase() &&
@@ -151,19 +204,21 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     return clean;
   };
 
-  // Load persistent interactions for announcements (100% clean & real - no test/demo artifacts)
+  // Load persistent interactions for church services (canonical key: srv-feed-{service.id})
   const [interactions, setInteractions] = useState<Record<string, AnnouncementInteraction>>(() => {
     const initial: Record<string, AnnouncementInteraction> = {};
     const allStored = getAnnouncementInteractions(church.id);
-    announcements.forEach((ann) => {
-      const stored = allStored[ann.id];
+    services.forEach((srv) => {
+      if (!srv?.id) return;
+      const feedId = getServiceFeedTargetId(srv.id);
+      const stored = allStored[feedId] || allStored[srv.id];
       if (stored) {
-        initial[ann.id] = {
+        initial[feedId] = {
           ...stored,
           comments: deduplicateComments(stored.comments),
         } as AnnouncementInteraction;
       } else {
-        initial[ann.id] = {
+        initial[feedId] = {
           likes: 0,
           userLiked: false,
           reaction: undefined,
@@ -181,15 +236,45 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     } catch (_) {}
   }, []);
 
+  // Hydrate church roster once per church so service leader/reader/worship avatars render accurately
+  useEffect(() => {
+    if (!church?.id) return;
+    const cached = cachedChurchRosterMap.get(church.id);
+    if (cached && cached.length > 0) {
+      setCloudRoster(cached);
+      return;
+    }
+    if ((membersProp?.length || 0) > 1) return;
+    const hasNamedServiceRoles = services.some((s) =>
+      Boolean(s.leader || s.preacher || s.reader || s.musicians || s.ushers || s.preacherOrLeader)
+    );
+    if (!hasNamedServiceRoles) return;
+
+    let cancelled = false;
+    firestoreGetChurchMembersList(church.id)
+      .then((fetched) => {
+        if (cancelled || !Array.isArray(fetched) || fetched.length === 0) return;
+        cachedChurchRosterMap.set(church.id, fetched);
+        setCloudRoster(fetched);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [church?.id, membersProp?.length, services]);
+
   // Sync state with storage events
   useEffect(() => {
     const refreshInteractions = () => {
       const allStored = getAnnouncementInteractions(church.id);
       const updated: Record<string, AnnouncementInteraction> = {};
-      announcements.forEach((ann) => {
-        const stored = allStored[ann.id];
+      services.forEach((srv) => {
+        if (!srv?.id) return;
+        const feedId = getServiceFeedTargetId(srv.id);
+        const stored = allStored[feedId] || allStored[srv.id];
         if (stored) {
-          updated[ann.id] = {
+          updated[feedId] = {
             ...stored,
             comments: deduplicateComments(stored.comments),
           } as AnnouncementInteraction;
@@ -210,30 +295,110 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
       window.removeEventListener('omnichurch_dev_settings_updated', refreshInteractions);
       window.removeEventListener('storage', refreshInteractions);
     };
-  }, [announcements, church.id]);
+  }, [services, church.id]);
 
   const currentMemberIdentifier =
-    member?.memberId || member?.phone || member?.fullName || 'guest_member';
+    member?.id || member?.memberId || member?.phone || member?.fullName || 'guest_member';
 
-  // Cloud Firestore Real-Time Synchronization for Comments and Reactions
-  // Ensures 100% permanence across app updates, cache clears, and native Android / Web sync
+  const lastCommentTsStorageKey = `omnichurch_last_comment_ts_${currentMemberIdentifier}`;
+  const lastCommentTimestampRef = useRef<number>(0);
+
+  useEffect(() => {
+    try {
+      const savedTs = Number(localStorage.getItem(lastCommentTsStorageKey) || 0);
+      lastCommentTimestampRef.current = Number.isFinite(savedTs) ? savedTs : 0;
+    } catch {
+      lastCommentTimestampRef.current = 0;
+    }
+  }, [lastCommentTsStorageKey]);
+
+  const getLocalizedModerationMessage = (res: CommentModerationEvaluationResult): string => {
+    if (isEs) return res.messageEs;
+    if (isFr) return res.messageFr;
+    if (isEn) return res.messageEn;
+    return res.messageHt;
+  };
+
+  const resolveCommentTargetType = (annId: string, annObj?: Announcement): 'service' | 'announcement' => {
+    if (annObj?.category === 'sevis' || Boolean(annObj?.serviceId) || annId.startsWith('srv-feed-')) {
+      return 'service';
+    }
+    return 'announcement';
+  };
+
+  const currentMemberCandidateIds = [
+    currentMemberIdentifier,
+    member?.id,
+    member?.memberId,
+    member?.userId,
+    member?.googleUid,
+    member?.email,
+    member?.phone,
+  ];
+
+  const servicesRef = useRef(services);
+  const memberRef = useRef(member);
+  servicesRef.current = services;
+  memberRef.current = member;
+
+  // Ensure new service feed items have an interaction bucket without tearing down Firestore listeners
+  useEffect(() => {
+    setInteractions((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      services.forEach((srv) => {
+        if (!srv?.id) return;
+        const feedId = getServiceFeedTargetId(srv.id);
+        if (!next[feedId]) {
+          next[feedId] = { likes: 0, userLiked: false, reaction: undefined, comments: [] };
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [services]);
+
+  // Normalize service interaction target keys so both `srv-feed-{id}` and raw `{id}` from mobile map to `srv-feed-{id}`
+  const resolveCanonicalServiceFeedTarget = (rawTargetId: string, knownServiceIds: Set<string>): string => {
+    const stripped = stripServiceFeedPrefix(rawTargetId);
+    if (knownServiceIds.has(stripped) || rawTargetId.startsWith('srv-feed-')) {
+      return getServiceFeedTargetId(stripped);
+    }
+    return rawTargetId;
+  };
+
+  // Cloud Firestore Real-Time Synchronization for Comments, Reactions, and Member Notifications
+  // Uses stable [church.id, member?.id, member?.memberId] dependencies to eliminate listener churn
   useEffect(() => {
     if (!church?.id) return;
+    const activeMember = memberRef.current;
 
     // 1. Listen for persistent comments in Cloud Firestore
-    const unsubComments = subscribeToAnnouncementComments(church.id, (firestoreComments) => {
+    const unsubComments = subscribeToAnnouncementComments(church.id, (firestoreComments, meta) => {
+      syncLocalCommentsFromServerSnapshot(church.id, firestoreComments, meta);
+
       setInteractions((prev) => {
         const next = { ...prev };
+        const knownServiceIds = new Set<string>(servicesRef.current.map((s) => s.id).filter(Boolean));
         const grouped: Record<string, any[]> = {};
         firestoreComments.forEach((c) => {
-          if (!grouped[c.announcementId]) grouped[c.announcementId] = [];
-          grouped[c.announcementId].push(c);
+          const rawTargetId = c.targetId || c.announcementId;
+          if (!rawTargetId) return;
+          const targetId = resolveCanonicalServiceFeedTarget(rawTargetId, knownServiceIds);
+          if (!grouped[targetId]) grouped[targetId] = [];
+          grouped[targetId].push(c);
         });
 
-        announcements.forEach((ann) => {
-          const current = next[ann.id] || { likes: 0, userLiked: false, comments: [] };
-          const fsComments = grouped[ann.id] || [];
-          next[ann.id] = {
+        const targetIds = new Set<string>([
+          ...servicesRef.current.map((s) => getServiceFeedTargetId(s.id)),
+          ...Object.keys(grouped),
+          ...Object.keys(prev),
+        ]);
+
+        targetIds.forEach((tid) => {
+          const current = next[tid] || { likes: 0, userLiked: false, comments: [] };
+          const fsComments = grouped[tid] || [];
+          next[tid] = {
             ...current,
             comments: deduplicateComments(fsComments),
           };
@@ -246,37 +411,69 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     const unsubReactions = subscribeToAnnouncementReactions(church.id, (firestoreReactions) => {
       setInteractions((prev) => {
         const next = { ...prev };
+        const knownServiceIds = new Set<string>(servicesRef.current.map((s) => s.id).filter(Boolean));
         const grouped: Record<string, AnnouncementReactionDoc[]> = {};
         firestoreReactions.forEach((r) => {
-          if (!grouped[r.announcementId]) grouped[r.announcementId] = [];
-          grouped[r.announcementId].push(r);
+          const rawTargetId = r.targetId || r.announcementId;
+          if (!rawTargetId) return;
+          const targetId = resolveCanonicalServiceFeedTarget(rawTargetId, knownServiceIds);
+          if (!grouped[targetId]) grouped[targetId] = [];
+          grouped[targetId].push(r);
         });
 
-        const myIdentifier = (currentMemberIdentifier || '').toLowerCase();
+        const curMember = memberRef.current;
+        const candidateIds = new Set(
+          [
+            currentMemberIdentifier,
+            curMember?.id,
+            curMember?.memberId,
+            curMember?.userId,
+            curMember?.phone,
+          ]
+            .filter(Boolean)
+            .map((v) => String(v).trim().toLowerCase())
+        );
 
-        announcements.forEach((ann) => {
-          const current = next[ann.id] || { likes: 0, userLiked: false, comments: [] };
-          const rList = grouped[ann.id] || [];
-          const userReaction = rList.find(
-            (r) => (r.memberId || '').toLowerCase() === myIdentifier
-          );
+        const targetIds = new Set<string>([
+          ...servicesRef.current.map((s) => getServiceFeedTargetId(s.id)),
+          ...Object.keys(grouped),
+          ...Object.keys(prev),
+        ]);
 
-          next[ann.id] = {
+        targetIds.forEach((tid) => {
+          const current = next[tid] || { likes: 0, userLiked: false, comments: [] };
+          const rList = grouped[tid] || [];
+          const userReaction = rList.find((r) => {
+            const rUid = String(r.userId || r.memberId || '').trim().toLowerCase();
+            return rUid && candidateIds.has(rUid);
+          });
+
+          next[tid] = {
             ...current,
             likes: rList.length,
             userLiked: !!userReaction,
-            reaction: (userReaction?.reaction as ReactionType) || current.reaction,
+            reaction: userReaction
+              ? ((userReaction.reactionType || userReaction.reaction) as ReactionType)
+              : undefined,
           };
         });
         return next;
       });
     });
 
+    // 3. Listen for member notification read/unread sync in Cloud Firestore
+    const unsubNotifs = activeMember
+      ? subscribeToMemberNotifications(church.id, activeMember, church, (fsNotifs) => {
+          syncNotificationReadStatesFromCloud(fsNotifs, church.id, activeMember);
+        })
+      : () => {};
+
     return () => {
       unsubComments();
       unsubReactions();
+      unsubNotifs();
     };
-  }, [church.id, announcements, currentMemberIdentifier]);
+  }, [church.id, member?.id, member?.memberId, currentMemberIdentifier]);
 
   // Close comment section automatically when user clicks outside
   useEffect(() => {
@@ -312,99 +509,131 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     };
   }, [openCommentBox]);
 
-  const activeService = services.find((s) => s.isOpenForAttendance);
-  const deduplicatedAnnouncements = deduplicateAnnouncements(announcements);
+  const effectiveRoster: Member[] = React.useMemo(() => {
+    const byKey = new Map<string, Member>();
+    const localChurchMembers = church?.id ? getMembersByChurch(church.id) : [];
+    const combined = [
+      ...(member ? [member] : []),
+      ...(membersProp || []),
+      ...localChurchMembers,
+      ...cloudRoster,
+    ];
+    combined.forEach((m) => {
+      if (!m) return;
+      const key = (m.id || m.memberId || m.fullName || '').trim();
+      if (!key) return;
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, m);
+      } else {
+        const existingPhoto = resolveMemberProfilePhoto(existing);
+        const nextPhoto = resolveMemberProfilePhoto(m);
+        if (!existingPhoto && nextPhoto) {
+          byKey.set(key, { ...existing, ...m });
+        }
+      }
+    });
+    return Array.from(byKey.values());
+  }, [church?.id, member, membersProp, cloudRoster]);
 
-  const filteredAnnouncements = deduplicatedAnnouncements.filter((a) => {
-    // Avètisman ofisyèl yo se notifikasyon pèsonèl/ofisyèl, yo pa dwe piblik nan fil la
-    if (a.showToastOnLogin) return false;
-    if (filterCategory === 'all') return true;
-    return a.category === filterCategory;
-  });
+  const activeService = services.find((s) => isServiceCurrentlyActive(s, isServiceEnded));
+  const feedServices = getMemberFeedServices(services, church.id, church.code, filterCategory);
 
-  // Multilingual resolution
-  const getAnnouncementTitle = (ann: Announcement): string => {
-    return getLocalizedAnnouncementTitle(ann, (language as Language) || 'ht');
+  const renderRoleAvatars = (
+    avatars: ResolvedRoleAvatar[],
+    roleKind: 'leader' | 'preacher' | 'reader' | 'musicians' | 'ushers'
+  ) => {
+    const roleTheme = {
+      leader: {
+        ring: 'ring-amber-400/50 border-amber-400/50',
+        gradient: 'from-amber-500 to-orange-600',
+        badge: 'bg-amber-400 text-slate-950',
+        Icon: Crown,
+      },
+      preacher: {
+        ring: 'ring-emerald-400/50 border-emerald-400/50',
+        gradient: 'from-emerald-500 to-teal-600',
+        badge: 'bg-emerald-400 text-slate-950',
+        Icon: BookOpen,
+      },
+      reader: {
+        ring: 'ring-cyan-400/50 border-cyan-400/50',
+        gradient: 'from-cyan-500 to-sky-600',
+        badge: 'bg-cyan-400 text-slate-950',
+        Icon: ScrollText,
+      },
+      musicians: {
+        ring: 'ring-purple-400/50 border-purple-400/50',
+        gradient: 'from-purple-500 to-fuchsia-600',
+        badge: 'bg-purple-400 text-slate-950',
+        Icon: Music,
+      },
+      ushers: {
+        ring: 'ring-rose-400/50 border-rose-400/50',
+        gradient: 'from-rose-500 to-pink-600',
+        badge: 'bg-rose-400 text-slate-950',
+        Icon: HeartHandshake,
+      },
+    }[roleKind];
+
+    const RoleIcon = roleTheme.Icon;
+    const displayList = avatars.slice(0, 3);
+
+    return (
+      <div className="relative flex items-center shrink-0">
+        <div className={`flex items-center ${displayList.length > 1 ? '-space-x-2' : ''}`}>
+          {displayList.map((person, idx) => {
+            const photoUrl = isUsableImageUrl(person.avatarUrl) ? person.avatarUrl : null;
+            return photoUrl ? (
+              <img
+                key={`${roleKind}-${person.name}-${idx}`}
+                src={photoUrl}
+                alt={person.name}
+                onError={() => markImageBroken(photoUrl)}
+                className={`w-9 h-9 rounded-full object-cover border ${roleTheme.ring} ring-2 ring-slate-950 shadow-sm bg-slate-900`}
+              />
+            ) : (
+              <div
+                key={`${roleKind}-${person.name}-${idx}`}
+                className={`w-9 h-9 rounded-full bg-gradient-to-br ${roleTheme.gradient} text-white font-black text-[11px] flex items-center justify-center ring-2 ring-slate-950 shadow-sm`}
+              >
+                {person.initials}
+              </div>
+            );
+          })}
+        </div>
+        <span
+          className={`absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full ${roleTheme.badge} border border-slate-950 flex items-center justify-center shadow-sm`}
+        >
+          <RoleIcon className="w-2.5 h-2.5" />
+        </span>
+      </div>
+    );
   };
 
-  const getAnnouncementContent = (ann: Announcement): string => {
-    return getLocalizedAnnouncementContent(ann, (language as Language) || 'ht', church);
-  };
-
-  const getAnnouncementAuthor = (ann: Announcement): string => {
-    if (ann.authorType === 'admin') {
-      return isEs
-        ? 'Administración de la Iglesia'
-        : isFr
-        ? 'L’Administration de l’Église'
-        : isEn
-        ? 'Church Administration'
-        : 'Administrasyon Legliz la';
-    }
-    if (ann.authorType === 'pastor') {
-      const pastorSuffix = church.pastor ? ` (${church.pastor})` : '';
-      return isEs
-        ? `El Pastor Principal${pastorSuffix}`
-        : isFr
-        ? `Le Pasteur Titulaire${pastorSuffix}`
-        : isEn
-        ? `Senior Pastor${pastorSuffix}`
-        : `Pastè a${pastorSuffix}`;
-    }
-    if (ann.authorType === 'secretariat') {
-      return isEs
-        ? 'Secretaría de la Iglesia'
-        : isFr
-        ? 'Secrétariat de l’Église'
-        : isEn
-        ? 'Church Secretariat'
-        : 'Sekretarya Legliz la';
-    }
-    if (ann.authorType === 'worship') {
-      return isEs
-        ? 'Ministerio de Alabanza y Música'
-        : isFr
-        ? 'Département Louange & Musique'
-        : isEn
-        ? 'Worship & Music Ministry'
-        : 'Depatman Louanj & Mizik';
-    }
-    return ann.author || (isEs ? 'Administración' : isFr ? 'Administration' : isEn ? 'Administration' : 'Administrasyon');
-  };
-
-  const getCategoryBadge = (cat: AnnouncementCategory) => {
-    switch (cat) {
-      case 'anons':
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 border border-blue-400/30 text-blue-300 flex items-center gap-1">
-            📢 {isEs ? 'Avisos' : isEn ? 'Notices' : isFr ? 'Annonces' : 'Anons'}
-          </span>
-        );
-      case 'ore':
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 border border-amber-400/30 text-amber-300 flex items-center gap-1">
-            🕐 {isEs ? 'Horarios' : isEn ? 'Schedule' : isFr ? 'Horaires' : 'Orè'}
-          </span>
-        );
-      case 'sevis':
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 flex items-center gap-1">
-            📅 {isEs ? 'Servicios' : isEn ? 'Services' : isFr ? 'Services' : 'Sèvis'}
-          </span>
-        );
-      case 'mesaj':
-        return (
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-500/20 border border-purple-400/30 text-purple-300 flex items-center gap-1">
-            📣 {isEs ? 'Mensajes' : isEn ? 'Messages' : isFr ? 'Messages' : 'Mesaj'}
-          </span>
-        );
-    }
+  const getServiceCategoryBadge = (cat: ServiceCategory | string) => {
+    const cfg = SERVICE_CATEGORIES[cat as ServiceCategory] || SERVICE_CATEGORIES.general;
+    const label = isEs
+      ? cfg.name.es || cfg.name.fr
+      : isEn
+      ? cfg.name.en || cfg.name.ht
+      : isFr
+      ? cfg.name.fr
+      : cfg.name.ht;
+    return (
+      <span
+        className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border border-white/10 inline-flex items-center gap-1 ${cfg.badgeBg} ${cfg.badgeText}`}
+      >
+        <Calendar className="w-2.5 h-2.5 shrink-0" />
+        <span>{label}</span>
+      </span>
+    );
   };
 
   // Select specific reaction via Long-Press, Swipe, or Dock Click
-  const handleSelectReaction = (annId: string, reactionType: ReactionType) => {
+  const handleSelectReaction = (targetFeedId: string, reactionType: ReactionType) => {
     setInteractions((prev) => {
-      const current = prev[annId] || { likes: 0, userLiked: false, comments: [] };
+      const current = prev[targetFeedId] || { likes: 0, userLiked: false, comments: [] };
       const isSameReaction = current.userLiked && current.reaction === reactionType;
 
       const updated = {
@@ -414,15 +643,21 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
         reaction: reactionType,
       };
 
-      saveAnnouncementInteraction(annId, updated);
+      saveAnnouncementInteraction(targetFeedId, updated);
       return {
         ...prev,
-        [annId]: updated,
+        [targetFeedId]: updated,
       };
     });
 
     // Cloud Firestore synchronization (persists across updates and native Android apps)
-    firestoreSetAnnouncementReaction(annId, currentMemberIdentifier, church.id, reactionType).catch((err) => {
+    firestoreSetAnnouncementReaction(
+      targetFeedId,
+      currentMemberIdentifier,
+      church.id,
+      reactionType,
+      member?.fullName || 'Manm Legliz'
+    ).catch((err) => {
       console.warn('Firestore reaction sync warning:', err);
     });
 
@@ -434,12 +669,12 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
   };
 
   // Toggle Default Reaction on Single Tap/Click
-  const handleToggleDefault = (annId: string) => {
+  const handleToggleDefault = (targetFeedId: string) => {
     setInteractions((prev) => {
-      const current = prev[annId] || { likes: 0, userLiked: false, comments: [] };
+      const current = prev[targetFeedId] || { likes: 0, userLiked: false, comments: [] };
       const nextUserLiked = !current.userLiked;
       const nextLikes = nextUserLiked ? current.likes + 1 : Math.max(0, current.likes - 1);
-      const nextReaction = nextUserLiked ? (current.reaction || 'amen') : undefined;
+      const nextReaction = nextUserLiked ? (current.reaction || 'pray') : undefined;
 
       const updated = {
         ...current,
@@ -448,30 +683,70 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
         reaction: nextReaction,
       };
 
-      saveAnnouncementInteraction(annId, updated);
+      saveAnnouncementInteraction(targetFeedId, updated);
 
       // Cloud Firestore synchronization
       if (nextUserLiked) {
-        firestoreSetAnnouncementReaction(annId, currentMemberIdentifier, church.id, nextReaction || 'amen').catch((err) => {
+        firestoreSetAnnouncementReaction(
+          targetFeedId,
+          currentMemberIdentifier,
+          church.id,
+          nextReaction || 'pray',
+          member?.fullName || 'Manm Legliz'
+        ).catch((err) => {
           console.warn('Firestore reaction sync warning:', err);
         });
       } else {
-        firestoreRemoveAnnouncementReaction(annId, currentMemberIdentifier).catch((err) => {
+        firestoreRemoveAnnouncementReaction(targetFeedId, currentMemberIdentifier).catch((err) => {
           console.warn('Firestore reaction removal warning:', err);
         });
       }
 
       return {
         ...prev,
-        [annId]: updated,
+        [targetFeedId]: updated,
       };
     });
   };
 
-  // Add Comment/Reply
-  const handleAddComment = (annId: string) => {
-    const text = (commentInputs[annId] || '').trim();
+  // Add Comment/Reply (Enforces Real-Time Cloud Moderation Policy from Developer Engine)
+  const handleAddComment = (feedId: string, serviceObj?: ServiceSession) => {
+    const rawInput = commentInputs[feedId] || '';
+    const text = rawInput.trim();
     if (!text) return;
+
+    const targetType = resolveCommentTargetType(
+      feedId,
+      serviceObj ? { category: 'sevis', serviceId: serviceObj.id } as Announcement : undefined
+    );
+    const modEval = evaluateCommentAgainstModeration({
+      content: text,
+      churchId: church.id,
+      userIds: currentMemberCandidateIds,
+      targetType,
+      lastCommentTimestampMs: lastCommentTimestampRef.current || undefined,
+      customConfig: devSettings.commentModeration,
+    });
+
+    if (!modEval.allowed) {
+      toast.error(
+        isEs
+          ? 'Comentario bloqueado'
+          : isFr
+          ? 'Commentaire bloqué'
+          : isEn
+          ? 'Comment blocked'
+          : 'Kòmantè Bloke',
+        getLocalizedModerationMessage(modEval)
+      );
+      return;
+    }
+
+    const nowMs = Date.now();
+    lastCommentTimestampRef.current = nowMs;
+    try {
+      localStorage.setItem(lastCommentTsStorageKey, String(nowMs));
+    } catch {}
 
     const authorName = member?.fullName || (isEs ? 'Miembro de la Iglesia' : 'Manm Legliz');
     const initials = authorName
@@ -480,9 +755,16 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
       .join('')
       .slice(0, 2)
       .toUpperCase();
+    const resolvedPhotoUrl =
+      member?.avatarUrl || member?.photoUrl || member?.googlePhoto || null;
 
     // Call storage helper which returns the saved sanitized comment
-    const saved = addAnnouncementComment(annId, {
+    const saved = addAnnouncementComment(feedId, {
+      targetId: feedId,
+      userId: currentMemberIdentifier,
+      userName: authorName,
+      userPhotoUrl: resolvedPhotoUrl,
+      content: text,
       author: authorName,
       text,
       time: isEs ? 'Ahora' : isEn ? 'Now' : isFr ? 'Maintenant' : 'Kounye a',
@@ -497,7 +779,7 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     });
 
     setInteractions((prev) => {
-      const current = prev[annId] || { likes: 0, userLiked: false, comments: [] };
+      const current = prev[feedId] || { likes: 0, userLiked: false, comments: [] };
       const existing = current.comments || [];
       // Prevent duplicate in local state if already present
       const alreadyHas = existing.some(
@@ -511,14 +793,14 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
       }
       return {
         ...prev,
-        [annId]: {
+        [feedId]: {
           ...current,
           comments: [...existing, saved],
         },
       };
     });
 
-    setCommentInputs((prev) => ({ ...prev, [annId]: '' }));
+    setCommentInputs((prev) => ({ ...prev, [feedId]: '' }));
     toast.success(
       isEs ? '¡Comentario Publicado!' : isFr ? 'Commentaire Publié !' : isEn ? 'Comment Posted!' : 'Kòmantè Pibliye!',
       isEs ? 'Gracias por tu aliento y participación activa.' : isFr ? 'Merci pour votre encouragement et participation.' : isEn ? 'Thank you for your encouragement and engagement.' : 'Mèsi pou ankourajman ak patisipasyon w.'
@@ -548,12 +830,14 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     toast.info(isEs ? 'Comentario eliminado' : isFr ? 'Commentaire supprimé' : isEn ? 'Comment deleted' : 'Kòmantè efase');
   };
 
-  // Share Announcement via navigator.share() / Capacitor Share with clean official URL: https://omnichurch.download
-  const handleShareAnnouncement = async (ann: Announcement) => {
-    const title = getAnnouncementTitle(ann);
-    const content = getAnnouncementContent(ann);
+  // Share Service via navigator.share() / Capacitor Share with clean official URL: https://omnichurch.download
+  const handleShareService = async (srv: ServiceSession) => {
+    const title = srv.title;
+    const content = buildServiceShareText(srv, church, (language as Language) || 'ht');
     const shareUrl = 'https://omnichurch.download';
-    const textToShare = `📢 *${church.name}*\n📌 *${title}*\n\n${content}\n\n📅 ${ann.date}${ann.time ? ` • ⏰ ${ann.time}` : ''}\n📍 ${church.city || ''} ${church.country || ''}`;
+    const shareDateLabel = formatServiceFullDateLabel(srv.date, (language as Language) || 'ht');
+    const shareTimeLabel = formatServiceTimeRangeAmPm(srv.startTime, srv.endTime, '');
+    const textToShare = `📢 *${church.name}*\n📅 *${title}*\n\n${content}\n\n📅 ${shareDateLabel}${shareTimeLabel ? ` • ⏰ ${shareTimeLabel}` : ''}\n📍 ${church.city || ''} ${church.country || ''}`;
 
     // 1. Native Mobile Platform (Capacitor Android / iOS)
     if (Capacitor.isNativePlatform()) {
@@ -562,7 +846,7 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
           title: `${church.name} - ${title}`,
           text: textToShare,
           url: shareUrl,
-          dialogTitle: isEs ? 'Compartir publicación' : isFr ? 'Partager la publication' : isEn ? 'Share post' : 'Pataje anons sa a',
+          dialogTitle: isEs ? 'Compartir culto' : isFr ? 'Partager le culte' : isEn ? 'Share service' : 'Pataje sèvis sa a',
         });
         return;
       } catch (err: any) {
@@ -573,8 +857,6 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
     }
 
     // 2. Web Browser Native Share (Android Chrome, iOS Safari, PWA)
-    // Passing explicit url: 'https://omnichurch.download' guarantees mobile browsers
-    // do not auto-inject window.location.href (which contains localhost:3000)
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
@@ -590,8 +872,8 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
       }
     }
 
-    // 3. Fallback: If navigator.share is not supported (Desktop browsers), open the Clean Share Modal
-    setSharingAnnouncement(ann);
+    // 3. Fallback: Desktop browsers -> open Clean Share Modal
+    setSharingAnnouncement(buildServiceShareAnnouncement(srv, church, (language as Language) || 'ht'));
   };
 
   const memberDisplayName = member?.fullName ? member.fullName.split(' ')[0] : (isEs ? 'Bienvenido' : isFr ? 'Bienvenue' : isEn ? 'Welcome' : 'Byenvini');
@@ -637,12 +919,12 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
             </h1>
             <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
               {isEs
-                ? 'Consulte los últimos avisos, interactúe con la comunidad de la iglesia y manténgase informado sobre todas las actividades.'
+                ? 'Consulte los próximos cultos y servicios de la iglesia, confirme su asistencia e interactúe con la comunidad.'
                 : isEn
-                ? 'View the latest announcements, interact with the church community, and stay informed on all activities.'
+                ? 'Follow upcoming worship services, interact with your church community, and check your schedule at a glance.'
                 : isFr
-                ? 'Consultez les dernières annonces, interagissez avec la communauté de l’église et restez informé de toutes les activités.'
-                : 'Gade dènye anons yo, patisipe nan kominikasyon legliz la, epi rete enfòme sou tout aktivite yo.'}
+                ? 'Consultez les prochains cultes et services de l’église, interagissez avec la communauté et suivez le programme.'
+                : 'Swiv dènye sèvis ak kilt legliz la, patisipe nan kominikasyon an, epi rete konekte sou tout pwogram yo.'}
             </p>
           </div>
 
@@ -659,6 +941,68 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
           </div>
         </div>
       </div>
+
+      {/* DEACON MINISTRY QUICK ACTIONS (WHEN LOGGED IN MEMBER IS AN ACTIVE DEACON) */}
+      {isDeacon && (onOpenDeaconServices || onOpenDeaconAnnouncements) && (
+        <div
+          id="deacon-home-quick-card"
+          className="p-4 rounded-2xl bg-gradient-to-r from-amber-500/15 via-slate-900/95 to-amber-950/40 border border-amber-400/40 shadow-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 backdrop-blur-md"
+        >
+          <div className="flex items-start gap-3">
+            <div className="p-2.5 rounded-xl bg-amber-400/20 border border-amber-400/40 text-amber-300 shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-xs font-extrabold uppercase tracking-wider text-amber-300">
+                {isEs
+                  ? 'Espacio de Diaconado Activo'
+                  : isEn
+                  ? 'Active Deacon Ministry Workspace'
+                  : isFr
+                  ? 'Espace Diaconat Actif'
+                  : 'Espas Sèvis Dyakonat Aktif'}
+              </div>
+              <p className="text-xs text-slate-300 mt-0.5">
+                {isEs
+                  ? 'Puede crear o programar servicios de culto y publicar avisos para toda la congregación.'
+                  : isEn
+                  ? 'Create worship services and publish church-wide announcements with your deacon role.'
+                  : isFr
+                  ? 'Créez des cultes et publiez des annonces pour la congrégation avec votre rôle de diacre.'
+                  : 'Kòm dyak aktif, ou kapab kreye pwogram sèvis epi pibliye anons pou tout legliz la.'}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {onOpenDeaconServices && (
+              <button
+                type="button"
+                id="btn-deacon-home-services"
+                onClick={onOpenDeaconServices}
+                className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow transition-colors cursor-pointer"
+              >
+                <Calendar className="w-4 h-4 text-slate-950" />
+                <span>
+                  {isEs ? 'Crear / Gestionar Cultos' : isEn ? 'Create / Manage Services' : isFr ? 'Créer / Gérer Cultes' : 'Kreye / Jere Sèvis'}
+                </span>
+              </button>
+            )}
+            {onOpenDeaconAnnouncements && (
+              <button
+                type="button"
+                id="btn-deacon-home-announcements"
+                onClick={onOpenDeaconAnnouncements}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-400/40 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <Megaphone className="w-4 h-4 text-amber-400" />
+                <span>
+                  {isEs ? 'Publicar Avisos' : isEn ? 'Publish Announcements' : isFr ? 'Publier Annonces' : 'Pibliye Anons'}
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ACTIVE SERVICE ALERT (IF OPEN) */}
       {activeService && (
@@ -678,40 +1022,71 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                 {activeService.title}
               </h3>
               <p className="text-xs text-slate-400">
-                {activeService.startTime} - {activeService.endTime} • {isEs ? 'Dirigido por:' : 'Dirije pa:'} {activeService.preacherOrLeader}
+                {formatServiceTimeRangeAmPm(activeService.startTime, activeService.endTime, '')} • {isEs ? 'Dirigido por:' : 'Dirije pa:'} {activeService.preacherOrLeader}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            id="btn-show-code-for-active"
-            onClick={onOpenMyCode}
-            className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-colors cursor-pointer"
-          >
-            <QrCode className="w-4 h-4 text-slate-950" />
-            <span>{isEs ? 'Mostrar Mi Código para Escaneo' : isEn ? 'Show My Code to Scan' : isFr ? 'Afficher Mon Code à Scanner' : 'Montre Kòd Mwen pou Scan'}</span>
-          </button>
+          <div className="w-full sm:w-auto flex flex-wrap items-center gap-2">
+            {isReception && onOpenReceptionScanner && (
+              <button
+                type="button"
+                id="btn-reception-home-scan"
+                onClick={onOpenReceptionScanner}
+                className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-md transition-colors cursor-pointer"
+              >
+                <Camera className="w-4 h-4 text-slate-950" />
+                <span>
+                  {isEs
+                    ? 'Escanear Asistencia (Recepción)'
+                    : isEn
+                    ? 'Scan Attendance (Reception)'
+                    : isFr
+                    ? 'Scanner Présence (Réception)'
+                    : 'Eskane Prezans (Resepsyon)'}
+                </span>
+              </button>
+            )}
+            {isReception && onOpenReceptionDesk && (
+              <button
+                type="button"
+                id="btn-reception-home-desk"
+                onClick={onOpenReceptionDesk}
+                className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30 font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <span>{isEs ? 'Recepción' : isEn ? 'Reception Desk' : isFr ? 'Réception' : 'Espas Resepsyon'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              id="btn-show-code-for-active"
+              onClick={onOpenMyCode}
+              className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-colors cursor-pointer"
+            >
+              <QrCode className="w-4 h-4 text-slate-950" />
+              <span>{isEs ? 'Mostrar Mi Código para Escaneo' : isEn ? 'Show My Code to Scan' : isFr ? 'Afficher Mon Code à Scanner' : 'Montre Kòd Mwen pou Scan'}</span>
+            </button>
+          </div>
         </div>
       )}
 
       {/* =========================================================================
-          3. DÈNYE ANONS YO AK ENTEAKSYON PRO MAX (LIKES, REYAKSYON, KÒMANTÈ/REPONN)
+          3. FIL AKTYALITE SÈVIS AK KILT LEGLIZ LA (SAN ANONS — ANONS YO NAN NOTIFIKASYON)
           ========================================================================= */}
       <div className="space-y-4 pt-1">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
           <div>
             <h3 className="text-lg sm:text-xl font-extrabold text-white flex items-center gap-2">
-              <Bell className="w-5 h-5 text-amber-400" />
-              {isEs ? `Últimos Avisos y Actualidades (${church.name})` : isEn ? `Latest Announcements & Feed (${church.name})` : isFr ? `Dernières Annonces & Fil d’Actualités (${church.name})` : `Dènye Anons & Fil Aktyalite (${church.name})`}
+              <Calendar className="w-5 h-5 text-amber-400" />
+              {isEs ? `Cultos y Servicios (${church.name})` : isEn ? `Services & Worship Feed (${church.name})` : isFr ? `Cultes & Services (${church.name})` : `Sèvis & Kilt Legliz la (${church.name})`}
             </h3>
             <p className="text-xs text-slate-400">
               {isEs
-                ? 'Toda la información, reuniones, mensajes y comunicados oficiales en un vistazo.'
+                ? 'Todos los cultos, horarios y programas ministeriales de la iglesia en tiempo real.'
                 : isEn
-                ? 'All information, meetings, messages, and official communications at a glance.'
+                ? 'All worship services, schedules, and ministry lineups in one live feed.'
                 : isFr
-                ? 'Toutes les informations, réunions, messages et communications officielles en un coup d’œil.'
-                : 'Tout enfòmasyon, reyinyon, mesaj ak kominikasyon ofisyèl nan yon koudèy.'}
+                ? 'Tous les cultes, horaires et responsables de service de l’église en un coup d’œil.'
+                : 'Tout sèvis kilt, orè ak ekip ki sou sèvis legliz la an dirèk nan fil aktyalite a.'}
             </p>
           </div>
 
@@ -719,10 +1094,16 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 scrollbar-none">
             {[
               { id: 'all', label: isEs ? 'Todos' : isEn ? 'All' : isFr ? 'Tout' : 'Tout' },
-              { id: 'anons', label: isEs ? 'Avisos' : isEn ? 'Notices' : isFr ? 'Annonces' : 'Anons' },
-              { id: 'ore', label: isEs ? 'Horarios' : isEn ? 'Schedule' : isFr ? 'Horaires' : 'Orè' },
-              { id: 'sevis', label: isEs ? 'Servicios' : isEn ? 'Services' : isFr ? 'Services' : 'Sèvis' },
-              { id: 'mesaj', label: isEs ? 'Mensajes' : isEn ? 'Messages' : isFr ? 'Messages' : 'Mesaj' },
+              ...Object.values(SERVICE_CATEGORIES).map((cat) => ({
+                id: cat.id,
+                label: isEs
+                  ? cat.name.es || cat.name.fr
+                  : isEn
+                  ? cat.name.en || cat.name.ht
+                  : isFr
+                  ? cat.name.fr
+                  : cat.name.ht,
+              })),
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -741,7 +1122,7 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
           </div>
         </div>
 
-        {/* Announcements List */}
+        {/* Services Feed List */}
         <AnimatePresence mode="wait">
           <motion.div
             key={filterCategory}
@@ -851,151 +1232,194 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                 </div>
 
                 <div className="shrink-0 flex items-center">
-                  <button
-                    type="button"
+                  <DonateButton
                     id="btn-member-open-donation"
-                    onClick={() => setIsDonationModalOpen(true)}
-                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-md shadow-amber-400/20 transition-all cursor-pointer transform active:scale-95"
-                  >
-                    <Heart className="w-4 h-4 fill-slate-950 text-slate-950" />
-                    <span>{isEs ? 'Hacer una Donación' : isEn ? 'Make a Donation' : isFr ? 'Faire un Don' : 'Fè yon Donasyon / Soutni'}</span>
-                  </button>
+                    size="inline"
+                    language={language}
+                    onClick={() => {
+                      if (onOpenDonateScreen) {
+                        onOpenDonateScreen();
+                      } else {
+                        setIsDonationModalOpen(true);
+                      }
+                    }}
+                  />
                 </div>
               </div>
             </div>
 
-            {filteredAnnouncements.length === 0 ? (
+            {feedServices.length === 0 ? (
               <div className="p-8 text-center bg-slate-900/60 rounded-3xl border border-slate-800 text-slate-400 backdrop-blur-md">
                 <p className="text-sm">
-                  {isEs ? 'No hay anuncios en esta categoría por el momento.' : isEn ? 'No announcements in this category for now.' : isFr ? 'Aucune annonce dans cette catégorie pour le moment.' : 'Pa gen okenn anons nan kategori sa a pou kounye a.'}
+                  {isEs
+                    ? 'No hay servicios programados en esta categoría por el momento.'
+                    : isEn
+                    ? 'No worship services scheduled in this category for now.'
+                    : isFr
+                    ? 'Aucun culte ou service dans cette catégorie pour le moment.'
+                    : 'Pa gen okenn sèvis kilt nan kategori sa a pou kounye a.'}
                 </p>
               </div>
             ) : (
               <div className="space-y-4">
-                {filteredAnnouncements.map((ann, annIndex) => {
-                  const annInteraction = interactions[ann.id] || {
+                {feedServices.map((srv, srvIndex) => {
+                  const feedId = getServiceFeedTargetId(srv.id);
+                  const srvInteraction = interactions[feedId] || {
                     likes: 0,
                     userLiked: false,
                     comments: [],
                   };
-                  const isCommentOpen = !!openCommentBox[ann.id];
-                  const cleanComments = deduplicateComments(annInteraction.comments);
+                  const isCommentOpen = !!openCommentBox[feedId];
+                  const cleanComments = deduplicateComments(srvInteraction.comments);
                   const commentCount = cleanComments.length;
-                  const localizedTitle = getAnnouncementTitle(ann);
-                  const localizedContent = getAnnouncementContent(ann);
+                  const effectiveLikesCount = srvInteraction.likes;
 
-                  const linkedService = ann.serviceId
-                    ? services.find((s) => s.id === ann.serviceId)
-                    : (ann.category === 'sevis'
-                        ? services.find(
-                            (s) =>
-                              (s && s.date === ann.date) ||
-                              (ann.title && s?.title && (ann.title || '').toLowerCase().includes((s.title || '').toLowerCase()))
-                          )
-                        : undefined);
+                  const isLive = isServiceCurrentlyActive(srv, isServiceEnded);
+                  const isEnded = isServiceEnded(srv);
+                  const calBadge = formatServiceCalendarBadge(srv.date, (language as Language) || 'ht');
+                  const formattedServiceDate = formatServiceFullDateLabel(srv.date, (language as Language) || 'ht');
 
-                  const serviceLeader = ann.leader || linkedService?.leader;
-                  const servicePreacher = ann.preacher || linkedService?.preacher || (!serviceLeader ? linkedService?.preacherOrLeader : undefined);
-                  const serviceReader = ann.reader || linkedService?.reader;
-                  const serviceMusicians = ann.musicians || linkedService?.musicians;
-                  const serviceUshers = ann.ushers || linkedService?.ushers;
+                  const formattedTimestamp = formatAnnouncementTimestamp(
+                    srv.createdAt,
+                    srv.date,
+                    srv.startTime,
+                    (language as Language) || 'ht'
+                  );
+
+                  const serviceLeader = srv.leader?.trim() || undefined;
+                  const rawFallbackPreacher =
+                    srv.preacher?.trim() || (!serviceLeader ? srv.preacherOrLeader?.trim() : undefined);
+                  const servicePreacher =
+                    rawFallbackPreacher &&
+                    (!serviceLeader ||
+                      normalizePersonNameForMatch(rawFallbackPreacher) !==
+                        normalizePersonNameForMatch(serviceLeader))
+                      ? rawFallbackPreacher
+                      : undefined;
+                  const serviceReader = srv.reader;
+                  const serviceMusicians = srv.musicians;
+                  const serviceUshers = srv.ushers;
                   const hasServiceRoles = !!(serviceLeader || servicePreacher || serviceReader || serviceMusicians || serviceUshers);
 
-                  const getAuthorIcon = () => {
-                    if (ann.authorType === 'pastor') return '✝️';
-                    if (ann.authorType === 'secretariat') return '📜';
-                    if (ann.authorType === 'worship') return '🎵';
-                    if (ann.authorType === 'admin') return '🏛️';
-                    return '📢';
-                  };
+                  const leaderAvatars = serviceLeader
+                    ? resolveMemberAvatarsForRole(serviceLeader, effectiveRoster, church, 1)
+                    : [];
+                  const preacherAvatars = servicePreacher
+                    ? resolveMemberAvatarsForRole(servicePreacher, effectiveRoster, church, 1)
+                    : [];
+                  const readerAvatars = serviceReader
+                    ? resolveMemberAvatarsForRole(serviceReader, effectiveRoster, church, 1)
+                    : [];
+                  const musiciansAvatars = serviceMusicians
+                    ? resolveMemberAvatarsForRole(serviceMusicians, effectiveRoster, church, 3)
+                    : [];
+                  const ushersAvatars = serviceUshers
+                    ? resolveMemberAvatarsForRole(serviceUshers, effectiveRoster, church, 3)
+                    : [];
+
+                  const usableChurchLogo = isUsableImageUrl(church.logoUrl) ? church.logoUrl : null;
+                  const usableChurchBanner = isUsableImageUrl(church.bannerUrl) ? church.bannerUrl : null;
+                  const churchInitials =
+                    church.name
+                      .trim()
+                      .split(/\s+/)
+                      .filter(Boolean)
+                      .slice(0, 2)
+                      .map((w) => w[0] || '')
+                      .join('')
+                      .toUpperCase() ||
+                    church.name.slice(0, 2).toUpperCase() ||
+                    'OM';
+
+                  const rawServiceThumb = resolveServiceThumbnailUrl(srv);
+                  const serviceThumbUrl = isUsableImageUrl(rawServiceThumb) ? rawServiceThumb : null;
+                  const programMiniThumb = serviceThumbUrl || usableChurchBanner || usableChurchLogo;
 
                   return (
-                    <React.Fragment key={ann.id}>
+                    <React.Fragment key={srv.id}>
                       <div
-                        id={`announcement-card-${ann.id}`}
+                        id={`service-feed-card-${srv.id}`}
                         className={`ios-glass-card ios-specular-highlight rounded-2xl sm:rounded-3xl transition-all duration-300 overflow-hidden ${
-                          ann.isPinned
-                            ? 'ring-1 ring-amber-400/50 shadow-[0_16px_45px_rgba(251,191,36,0.18)]'
+                          isLive
+                            ? 'ring-1 ring-emerald-400/60 shadow-[0_16px_45px_rgba(16,185,129,0.18)]'
+                            : !isEnded
+                            ? 'ring-1 ring-amber-400/35 shadow-[0_14px_40px_rgba(251,191,36,0.10)]'
                             : 'hover:shadow-[0_22px_55px_rgba(0,0,0,0.65)]'
                         }`}
                       >
                         {/* =========================================================================
-                            1. FACEBOOK-STYLE POST HEADER
+                            1. FACEBOOK-STYLE SERVICE POST HEADER
                             ========================================================================= */}
                         <div className="p-3.5 sm:p-5 pb-2.5 sm:pb-3 flex items-start justify-between gap-2.5 sm:gap-3">
                           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
-                            {/* Author / Church Avatar */}
+                            {/* Church Profile Avatar */}
                             <div className="relative shrink-0">
-                              {church.logoUrl ? (
+                              {usableChurchLogo ? (
                                 <img
-                                  src={church.logoUrl}
+                                  src={usableChurchLogo}
                                   alt={church.name}
-                                  className="w-9 h-9 sm:w-11 sm:h-11 rounded-full object-cover border border-indigo-400/40 shadow-md ring-1 ring-white/10"
+                                  onError={() => markImageBroken(usableChurchLogo)}
+                                  className="w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border border-indigo-400/40 shadow-md ring-1 ring-white/10 bg-slate-900"
                                 />
                               ) : (
-                                <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-full bg-gradient-to-br from-indigo-600 via-purple-600 to-amber-500 text-white font-black text-xs sm:text-sm flex items-center justify-center shadow-md ring-1 ring-white/10">
-                                  {church.name.slice(0, 2).toUpperCase()}
+                                <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-gradient-to-br from-indigo-600 via-purple-600 to-amber-500 text-white font-black text-xs sm:text-sm flex items-center justify-center shadow-md ring-1 ring-white/10">
+                                  {churchInitials}
                                 </div>
                               )}
-                              <span className="absolute -bottom-1 -right-1 text-xs select-none">
-                                {getAuthorIcon()}
+                              <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-indigo-600 text-white border border-slate-950 flex items-center justify-center shadow-sm">
+                                <Building2 className="w-2.5 h-2.5" />
                               </span>
                             </div>
 
-                            {/* Author Name, Verified Badge & Metadata */}
+                            {/* Church Name, Verified Badge & Metadata */}
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="font-bold text-white text-xs sm:text-base hover:underline cursor-pointer truncate max-w-[150px] xs:max-w-[200px] sm:max-w-none">
-                                  {getAnnouncementAuthor(ann) || church.name}
+                                <span className="font-bold text-white text-xs sm:text-base truncate max-w-[160px] xs:max-w-[220px] sm:max-w-none">
+                                  {church.name}
                                 </span>
                                 {isChurchLicensed && (
                                   <BadgeCheck
                                     className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-sky-400 fill-sky-400/20 shrink-0"
-                                    title={isEs ? 'Publicación Oficial Verificada (Iglesia con Licencia)' : isFr ? 'Publication Officielle Vérifiée' : isEn ? 'Verified Official Post' : 'Piblikasyon Ofisyèl Verifye (Legliz ak Lisans)'}
+                                    title={isEs ? 'Culto Oficial Verificado (Iglesia con Licencia)' : isFr ? 'Culte Officiel Vérifié' : isEn ? 'Verified Official Service' : 'Sèvis Ofisyèl Verifye (Legliz ak Lisans)'}
                                   />
                                 )}
-                                {getCategoryBadge(ann.category)}
+                                {getServiceCategoryBadge(srv.category)}
+                                {isLive ? (
+                                  <span className="px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-wider bg-emerald-500 text-slate-950 shadow-sm animate-pulse">
+                                    {isEs ? 'EN VIVO' : isFr ? 'EN DIRECT' : isEn ? 'LIVE' : 'AN DIRÈK'}
+                                  </span>
+                                ) : isEnded ? (
+                                  <span className="px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700">
+                                    {isEs ? 'FINALIZADO' : isFr ? 'TERMINÉ' : isEn ? 'ENDED' : 'FINI'}
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full text-[9px] sm:text-[10px] font-bold uppercase tracking-wider bg-amber-400/20 text-amber-300 border border-amber-400/30">
+                                    {isEs ? 'PRÓXIMO' : isFr ? 'À VENIR' : isEn ? 'UPCOMING' : 'PWOGRAME'}
+                                  </span>
+                                )}
                               </div>
 
                               <div className="flex items-center gap-1.5 sm:gap-2 text-[11px] sm:text-xs text-slate-400 mt-0.5 flex-wrap">
-                                <span className="font-medium">{ann.date}</span>
-                                {ann.time && (
-                                  <>
-                                    <span>•</span>
-                                    <span className="flex items-center gap-1">
-                                      <Clock className="w-3 h-3 text-slate-500" />
-                                      {ann.time}
-                                    </span>
-                                  </>
-                                )}
+                                <span className="font-medium flex items-center gap-1 text-slate-300">
+                                  <Clock className="w-3 h-3 text-amber-400/80 shrink-0" />
+                                  {formattedTimestamp}
+                                </span>
                                 <span>•</span>
                                 <span className="flex items-center gap-1 text-slate-400" title={isEs ? 'Público para todos los miembros' : isFr ? 'Public pour tous les membres' : isEn ? 'Public to all members' : 'Piblik pou tout manm'}>
                                   <Globe className="w-3 h-3 text-slate-400" />
                                   <span className="text-[10px] sm:text-[11px]">{isEs ? 'Público' : isFr ? 'Public' : isEn ? 'Public' : 'Piblik'}</span>
                                 </span>
-                                {ann.showToastOnLogin && (
-                                  <span className="px-2 py-0.2 rounded-full text-[9px] font-black uppercase tracking-wider bg-amber-400 text-slate-950 flex items-center gap-1 shadow-sm">
-                                    <Radio className="w-2.5 h-2.5 text-slate-950 animate-pulse" />
-                                    {isEs ? 'Aviso' : isEn ? 'Notice' : isFr ? 'Avis' : 'Alèt'}
-                                  </span>
-                                )}
                               </div>
                             </div>
                           </div>
 
-                          {/* Right Controls: Pinned Badge & Share Button */}
+                          {/* Right Controls: Share Button */}
                           <div className="flex items-center gap-1 shrink-0">
-                            {ann.isPinned && (
-                              <span className="px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-full text-[9px] sm:text-[10px] font-black bg-amber-400 text-slate-950 flex items-center gap-1 shadow-sm">
-                                <Pin className="w-3 h-3 fill-slate-950" />
-                                <span className="hidden xs:inline">{isEs ? 'Fijado' : isEn ? 'Pinned' : isFr ? 'Épinglé' : 'Epengle'}</span>
-                              </span>
-                            )}
                             <button
                               type="button"
-                              onClick={() => handleShareAnnouncement(ann)}
+                              onClick={() => handleShareService(srv)}
                               className="p-1.5 rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                              title={isEs ? 'Compartir publicación' : isFr ? 'Partager publication' : isEn ? 'Share post' : 'Pataje anons sa a'}
+                              title={isEs ? 'Compartir culto' : isFr ? 'Partager le culte' : isEn ? 'Share service' : 'Pataje sèvis sa a'}
                             >
                               <Share2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                             </button>
@@ -1003,179 +1427,218 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                         </div>
 
                         {/* =========================================================================
-                            2. POST TITLE & TEXT CONTENT
+                            2. SERVICE TITLE, THEME, PASSAGE & NOTES
                             ========================================================================= */}
-                        <div className="px-3.5 sm:px-5 pb-3">
-                          <h4 className="text-sm sm:text-lg font-bold text-white mb-1.5 sm:mb-2 leading-snug">
-                            {localizedTitle}
+                        <div className="px-3.5 sm:px-5 pb-3 space-y-1.5">
+                          <h4 className="text-sm sm:text-lg font-bold text-white leading-snug">
+                            {srv.title}
                           </h4>
 
-                          <p className="text-xs sm:text-sm text-slate-200 whitespace-pre-line leading-relaxed">
-                            {localizedContent}
-                          </p>
+                          {srv.theme && (
+                            <p className="text-xs sm:text-sm text-amber-300 font-semibold flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <span>{isEs ? 'Tema:' : isFr ? 'Thème :' : isEn ? 'Theme:' : 'Tèm:'} {srv.theme}</span>
+                            </p>
+                          )}
 
-                          {ann.targetAudience && (
-                            <div className="mt-2 text-[10px] sm:text-[11px] text-amber-300/90 font-medium">
-                              {isEs ? 'Destinado a:' : isEn ? 'Audience:' : isFr ? 'Public cible :' : 'Konsène:'}{' '}
-                              <span className="font-bold underline">{ann.targetAudience}</span>
-                            </div>
+                          {srv.passage && (
+                            <p className="text-xs sm:text-sm text-sky-300 font-medium flex items-center gap-1.5">
+                              <BookOpen className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                              <span>{isEs ? 'Lectura bíblica:' : isFr ? 'Texte biblique :' : isEn ? 'Scripture:' : 'Pasaj Biblik:'} {srv.passage}</span>
+                            </p>
+                          )}
+
+                          {srv.notes ? (
+                            <p className="text-xs sm:text-sm text-slate-200 whitespace-pre-line leading-relaxed">
+                              {srv.notes}
+                            </p>
+                          ) : (
+                            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                              {buildServiceShareText(srv, church, (language as Language) || 'ht')}
+                            </p>
                           )}
                         </div>
 
                         {/* =========================================================================
-                            3. CHURCH SERVICE & WORSHIP PROGRAM (FACEBOOK EVENT STYLE)
+                            2B. SERVICE COVER / THUMBNAIL (MINYATI SÈVIS)
                             ========================================================================= */}
-                        {(hasServiceRoles || ann.category === 'sevis' || linkedService) && (
+                        {serviceThumbUrl && (
                           <div className="px-3.5 sm:px-5 pb-3">
-                            <div className="ios-glass-pill rounded-2xl p-3 sm:p-4 shadow-inner space-y-3">
-                              {/* Event Header Banner */}
-                              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                <div className="flex items-center gap-3">
-                                  {/* Visual Calendar Tile */}
-                                  <div className="w-11 h-12 sm:w-12 sm:h-13 rounded-xl bg-slate-900 border border-indigo-400/40 overflow-hidden flex flex-col items-center justify-center text-center shrink-0 shadow">
-                                    <div className="bg-indigo-600 w-full py-0.5 text-[8px] sm:text-[9px] font-black uppercase text-white tracking-wider">
-                                      {ann.date ? ann.date.slice(0, 3).toUpperCase() : 'KILT'}
-                                    </div>
-                                    <div className="text-sm sm:text-lg font-black text-white leading-none py-1">
-                                      {ann.date && ann.date.match(/\d+/) ? ann.date.match(/\d+/)![0] : '★'}
-                                    </div>
-                                  </div>
-
-                                  <div>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                      <span className="text-[11px] sm:text-xs font-black uppercase tracking-wider text-amber-400">
-                                        📅 {isEs ? 'Programa del Culto' : isFr ? 'Programme du Culte' : isEn ? 'Service Program' : 'Pwogram Sèvis Kilt la'}
-                                      </span>
-                                      {(linkedService?.isOpenForAttendance || activeService?.id === linkedService?.id) && (
-                                        <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 flex items-center gap-1 animate-pulse">
-                                          🟢 {isEs ? 'En vivo' : isFr ? 'En direct' : isEn ? 'Live now' : 'An dirèk'}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <h5 className="font-extrabold text-white text-xs sm:text-sm mt-0.5">
-                                      {linkedService?.title || localizedTitle}
-                                    </h5>
-                                    <div className="text-[10px] sm:text-[11px] text-slate-300 flex items-center gap-2 mt-0.5 font-medium">
-                                      <span className="flex items-center gap-1">
-                                        <Clock className="w-3 h-3 text-indigo-400" />
-                                        {ann.time || linkedService?.startTime || '08:30 AM'} {linkedService?.endTime ? `- ${linkedService.endTime}` : ''}
-                                      </span>
-                                    </div>
-                                  </div>
-                                </div>
-
-                                {/* Quick Scan presence button if service is active */}
-                                {(linkedService?.isOpenForAttendance || activeService?.id === linkedService?.id) && (
-                                  <button
-                                    type="button"
-                                    onClick={onOpenMyCode}
-                                    className="w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 shadow-lg cursor-pointer transition-all active:scale-95"
-                                  >
-                                    <QrCode className="w-3.5 h-3.5" />
-                                    <span>{isEs ? 'Confirmar Asistencia' : isFr ? 'Confirmer Présence' : isEn ? 'Check-in Now' : 'Scan Prezans Mwen'}</span>
-                                  </button>
-                                )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setActiveLightboxImage({
+                                  url: serviceThumbUrl,
+                                  title: srv.title,
+                                  caption: `${church.name} • ${formattedServiceDate}${srv.startTime ? ` (${formatServiceTimeRangeAmPm(srv.startTime, srv.endTime, '')})` : ''}`,
+                                })
+                              }
+                              className="relative w-full rounded-2xl overflow-hidden border-0 bg-slate-950/70 group block text-left cursor-pointer shadow-lg"
+                            >
+                              <img
+                                src={serviceThumbUrl}
+                                alt={srv.title}
+                                onError={() => markImageBroken(serviceThumbUrl)}
+                                className="w-full h-auto max-h-[520px] object-contain mx-auto block transition-transform duration-300 group-hover:scale-[1.01] border-0"
+                              />
+                              <div className="absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-slate-950/80 via-slate-950/25 to-transparent pointer-events-none" />
+                              <div className="absolute bottom-2.5 left-3 right-3 flex items-center justify-between gap-2">
+                                <span className="px-2.5 py-1 rounded-full bg-slate-950/80 backdrop-blur-md border border-white/15 text-[10px] font-bold text-amber-300 truncate max-w-[75%]">
+                                  {formattedServiceDate} {srv.startTime ? `• ${formatServiceTimeAmPm(srv.startTime)}` : ''}
+                                </span>
+                                <span className="w-7 h-7 rounded-full bg-slate-950/80 backdrop-blur-md border border-white/15 text-white flex items-center justify-center opacity-85 group-hover:opacity-100 transition-opacity">
+                                  <ZoomIn className="w-3.5 h-3.5" />
+                                </span>
                               </div>
-
-                              {/* Service Roles & Leaders Team Grid */}
-                              {hasServiceRoles && (
-                                <div className="pt-2 border-t border-indigo-500/20">
-                                  <div className="text-[11px] font-bold text-indigo-300 mb-2 flex items-center gap-1.5">
-                                    <Users className="w-3.5 h-3.5 text-indigo-400" />
-                                    <span>{isEs ? 'Equipo y Responsables en Servicio:' : isFr ? 'Équipe et Responsables en Service :' : isEn ? 'Ministry Team in Service:' : 'Ekip & Responsab ki sou Sèvis:'}</span>
-                                  </div>
-                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                                    {serviceLeader && (
-                                      <div className="p-2 rounded-xl bg-slate-950/80 border border-indigo-400/20 flex items-center gap-2">
-                                        <span className="text-amber-400 text-sm">👑</span>
-                                        <div className="min-w-0">
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider">{isEs ? 'Dirigente' : isFr ? 'Dirigeant' : isEn ? 'Leader' : 'Dirijan'}</span>
-                                          <span className="font-bold text-white truncate block">{serviceLeader}</span>
-                                        </div>
-                                      </div>
-                                    )}
-                                    {servicePreacher && (
-                                      <div className="p-2 rounded-xl bg-slate-950/80 border border-indigo-400/20 flex items-center gap-2">
-                                        <span className="text-emerald-400 text-sm">📖</span>
-                                        <div className="min-w-0">
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider">{isEs ? 'Predicador' : isFr ? 'Prédicateur' : isEn ? 'Preacher' : 'Predikatè'}</span>
-                                          <span className="font-bold text-white truncate block">{servicePreacher}</span>
-                                        </div>
-                                      </div>
-                                    )}
-                                    {serviceReader && (
-                                      <div className="p-2 rounded-xl bg-slate-950/80 border border-indigo-400/20 flex items-center gap-2">
-                                        <span className="text-cyan-400 text-sm">📜</span>
-                                        <div className="min-w-0">
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider">{isEs ? 'Lectura Bíblica' : isFr ? 'Lecture Biblique' : isEn ? 'Scripture Reading' : 'Lektè Pawòl la'}</span>
-                                          <span className="font-bold text-white truncate block">{serviceReader}</span>
-                                        </div>
-                                      </div>
-                                    )}
-                                    {serviceMusicians && (
-                                      <div className="p-2 rounded-xl bg-slate-950/80 border border-indigo-400/20 flex items-center gap-2">
-                                        <span className="text-purple-400 text-sm">🎵</span>
-                                        <div className="min-w-0">
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider">{isEs ? 'Música y Coro' : isFr ? 'Musique & Chorale' : isEn ? 'Music & Choir' : 'Mizisyen & Koral'}</span>
-                                          <span className="font-bold text-white truncate block">{serviceMusicians}</span>
-                                        </div>
-                                      </div>
-                                    )}
-                                    {serviceUshers && (
-                                      <div className="p-2 rounded-xl bg-slate-950/80 border border-indigo-400/20 flex items-center gap-2 sm:col-span-2">
-                                        <span className="text-rose-400 text-sm">🤝</span>
-                                        <div className="min-w-0">
-                                          <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider">{isEs ? 'Protocolo y Bienvenida' : isFr ? 'Accueil & Protocole' : isEn ? 'Ushers & Hospitality' : 'Akèy & Pwotokòl'}</span>
-                                          <span className="font-bold text-white truncate block">{serviceUshers}</span>
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                </div>
-                              )}
-                            </div>
+                            </button>
                           </div>
                         )}
 
                         {/* =========================================================================
-                            4. POST IMAGE / FLYER (ATTACHMENT)
+                            3. CHURCH SERVICE & WORSHIP PROGRAM (FACEBOOK EVENT STYLE)
                             ========================================================================= */}
-                        {ann.imageUrl && (
-                          <div className="relative overflow-hidden bg-black/40 border-y border-white/10 group">
-                            <img
-                              src={ann.imageUrl}
-                              alt={localizedTitle}
-                              onClick={() =>
-                                setActiveLightboxImage({
-                                  url: ann.imageUrl!,
-                                  title: localizedTitle,
-                                  caption: ann.imageCaption,
-                                })
-                              }
-                              className="w-full max-h-[420px] object-cover cursor-pointer hover:opacity-95 transition-opacity"
-                            />
-                            <div
-                              onClick={() =>
-                                setActiveLightboxImage({
-                                  url: ann.imageUrl!,
-                                  title: localizedTitle,
-                                  caption: ann.imageCaption,
-                                })
-                              }
-                              className="absolute inset-0 bg-black/0 group-hover:bg-black/25 transition-all flex items-center justify-center cursor-pointer pointer-events-none group-hover:pointer-events-auto"
-                            >
-                              <span className="opacity-0 group-hover:opacity-100 transition-all px-3 py-1.5 rounded-xl bg-black/80 backdrop-blur-md border border-white/20 text-white text-xs font-bold flex items-center gap-1.5 shadow-xl">
-                                <Maximize2 className="w-3.5 h-3.5 text-amber-400" />
-                                {isEs ? 'Ver en Grande' : isFr ? 'Agrandir' : isEn ? 'Enlarge' : 'Gade an Gwo'}
-                              </span>
+                        <div className="px-0 pb-3">
+                          <div className="w-full px-3.5 sm:px-5 py-3 space-y-3 bg-transparent border-0 rounded-none shadow-none">
+                            {/* Event Header Banner with Minyati Thumbnail */}
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                              <div className="flex items-center gap-3 min-w-0">
+                                {/* Service Thumbnail Tile (displays uploaded minyati or church visual cover + clean date chip) */}
+                                {programMiniThumb ? (
+                                  <button
+                                    type="button"
+                                    disabled={!serviceThumbUrl}
+                                    onClick={() => {
+                                      if (serviceThumbUrl) {
+                                        setActiveLightboxImage({
+                                          url: serviceThumbUrl,
+                                          title: srv.title,
+                                          caption: `${church.name} • ${formattedServiceDate}`,
+                                        });
+                                      }
+                                    }}
+                                    className={`relative w-14 h-14 sm:w-16 sm:h-16 rounded-xl bg-slate-950 border-0 overflow-hidden shrink-0 shadow-md flex items-center justify-center ${
+                                      serviceThumbUrl ? 'cursor-pointer group' : 'cursor-default'
+                                    }`}
+                                  >
+                                    <img
+                                      src={programMiniThumb}
+                                      alt={srv.title}
+                                      onError={() => markImageBroken(programMiniThumb)}
+                                      className="w-full h-full object-contain object-center border-0"
+                                    />
+                                    <div className="absolute inset-x-0 bottom-0 bg-slate-950/85 backdrop-blur-sm py-0.5 px-1 text-center">
+                                      <span className="text-[8px] font-black uppercase text-amber-300 tracking-wider block leading-tight">
+                                        {calBadge.day} {calBadge.month}
+                                      </span>
+                                    </div>
+                                  </button>
+                                ) : (
+                                  <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl bg-slate-900 border-0 overflow-hidden flex flex-col items-center justify-center text-center shrink-0 shadow">
+                                    <div className="bg-indigo-600 w-full py-0.5 text-[9px] font-black uppercase text-white tracking-wider">
+                                      {calBadge.month}
+                                    </div>
+                                    <div className="text-base sm:text-lg font-black text-white leading-none py-1 flex-1 flex items-center justify-center">
+                                      {calBadge.day}
+                                    </div>
+                                  </div>
+                                )}
+
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-[11px] sm:text-xs font-black uppercase tracking-wider text-amber-400 inline-flex items-center gap-1">
+                                      <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                      <span>{isEs ? 'Programa del Culto' : isFr ? 'Programme du Culte' : isEn ? 'Service Program' : 'Pwogram Sèvis Kilt la'}</span>
+                                    </span>
+                                    {isLive && (
+                                      <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 inline-flex items-center gap-1.5 animate-pulse">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                                        <span>{isEs ? 'En vivo' : isFr ? 'En direct' : isEn ? 'Live now' : 'An dirèk'}</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <h5 className="font-extrabold text-white text-xs sm:text-sm mt-0.5 truncate">
+                                    {srv.title}
+                                  </h5>
+                                  <div className="text-[10px] sm:text-[11px] text-slate-300 flex items-center gap-2 mt-0.5 font-medium">
+                                    <span className="flex items-center gap-1">
+                                      <Clock className="w-3 h-3 text-indigo-400" />
+                                      {formattedServiceDate} • {formatServiceTimeRangeAmPm(srv.startTime, srv.endTime, '08:30')}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Quick Scan presence button if service is active */}
+                              {isLive && (
+                                <button
+                                  type="button"
+                                  onClick={onOpenMyCode}
+                                  className="w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 shadow-lg cursor-pointer transition-all active:scale-95 shrink-0"
+                                >
+                                  <QrCode className="w-3.5 h-3.5" />
+                                  <span>{isEs ? 'Confirmar Asistencia' : isFr ? 'Confirmer Présence' : isEn ? 'Check-in Now' : 'Scan Prezans Mwen'}</span>
+                                </button>
+                              )}
                             </div>
-                            {ann.imageCaption && (
-                              <div className="px-4 py-2 bg-slate-950/90 text-xs text-slate-300 text-center font-medium">
-                                {ann.imageCaption}
+
+                            {/* Service Roles & Leaders Team Grid with Real Member Profile Avatars */}
+                            {hasServiceRoles && (
+                              <div className="pt-1 border-0">
+                                <div className="text-[11px] font-bold text-indigo-300/90 mb-2 flex items-center gap-1.5">
+                                  <Users className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                  <span>{isEs ? 'Equipo y Responsables en Servicio:' : isFr ? 'Équipe et Responsables en Service :' : isEn ? 'Ministry Team in Service:' : 'Ekip & Responsab ki sou Sèvis:'}</span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
+                                  {serviceLeader && (
+                                    <div className="py-0.5 bg-transparent border-0 flex items-center gap-2 min-w-0">
+                                      {renderRoleAvatars(leaderAvatars, 'leader')}
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider leading-tight">{isEs ? 'Dirigente' : isFr ? 'Dirigeant' : isEn ? 'Leader' : 'Dirijan'}</span>
+                                        <span className="font-bold text-white truncate block leading-snug">{serviceLeader}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {servicePreacher && (
+                                    <div className="py-0.5 bg-transparent border-0 flex items-center gap-2 min-w-0">
+                                      {renderRoleAvatars(preacherAvatars, 'preacher')}
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider leading-tight">{isEs ? 'Predicador' : isFr ? 'Prédicateur' : isEn ? 'Preacher' : 'Predikatè'}</span>
+                                        <span className="font-bold text-white truncate block leading-snug">{servicePreacher}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {serviceReader && (
+                                    <div className="py-0.5 bg-transparent border-0 flex items-center gap-2 min-w-0">
+                                      {renderRoleAvatars(readerAvatars, 'reader')}
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider leading-tight">{isEs ? 'Lectura Bíblica' : isFr ? 'Lecture Biblique' : isEn ? 'Scripture Reading' : 'Lektè Pawòl la'}</span>
+                                        <span className="font-bold text-white truncate block leading-snug">{serviceReader}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {serviceMusicians && (
+                                    <div className="py-0.5 bg-transparent border-0 flex items-center gap-2 min-w-0">
+                                      {renderRoleAvatars(musiciansAvatars, 'musicians')}
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider leading-tight">{isEs ? 'Adoradores y Música' : isFr ? 'Adoration & Chorale' : isEn ? 'Worship & Choir' : 'Adoratè & Mizisyen'}</span>
+                                        <span className="font-bold text-white truncate block leading-snug">{serviceMusicians}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                  {serviceUshers && (
+                                    <div className="py-0.5 bg-transparent border-0 flex items-center gap-2 min-w-0 col-span-2">
+                                      {renderRoleAvatars(ushersAvatars, 'ushers')}
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-slate-400 block text-[9px] uppercase font-bold tracking-wider leading-tight">{isEs ? 'Protocolo y Bienvenida' : isFr ? 'Accueil & Protocole' : isEn ? 'Ushers & Hospitality' : 'Akèy & Pwotokòl'}</span>
+                                        <span className="font-bold text-white truncate block leading-snug">{serviceUshers}</span>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             )}
                           </div>
-                        )}
+                        </div>
 
                         {/* =========================================================================
                             5. FACEBOOK SOCIAL PROOF BAR (REACTIONS COUNT & COMMENT COUNT)
@@ -1183,20 +1646,32 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                         <div className="px-3.5 sm:px-5 py-2 sm:py-2.5 flex items-center justify-between text-xs text-slate-400 border-t border-white/10 bg-white/[0.01]">
                           {/* Left: Reaction Icons & Count */}
                           <div className="flex items-center gap-1.5 min-w-0">
-                            {(annInteraction.likes > 0 || annInteraction.userLiked) ? (
+                            {(effectiveLikesCount > 0 || srvInteraction.userLiked) ? (
                               <>
                                 <div className="flex -space-x-1 items-center shrink-0">
                                   <span className="w-5 h-5 rounded-full bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-xs shadow-sm">
-                                    {annInteraction.reaction === 'heart' ? '❤️' : annInteraction.reaction === 'fire' ? '🔥' : annInteraction.reaction === 'praise' ? '🙌' : '🙏'}
+                                    {srvInteraction.reaction === 'love' || srvInteraction.reaction === 'heart'
+                                      ? '❤️'
+                                      : srvInteraction.reaction === 'like'
+                                      ? '👍'
+                                      : srvInteraction.reaction === 'clap' || srvInteraction.reaction === 'praise'
+                                      ? '👏'
+                                      : srvInteraction.reaction === 'haha'
+                                      ? '😄'
+                                      : srvInteraction.reaction === 'wow' || srvInteraction.reaction === 'fire'
+                                      ? '😮'
+                                      : srvInteraction.reaction === 'sad'
+                                      ? '😢'
+                                      : '🙏'}
                                   </span>
-                                  {annInteraction.likes > 1 && (
+                                  {effectiveLikesCount > 1 && (
                                     <span className="w-5 h-5 rounded-full bg-rose-500/20 border border-rose-400/40 flex items-center justify-center text-xs shadow-sm">
                                       ❤️
                                     </span>
                                   )}
                                 </div>
                                 <span className="font-semibold text-slate-200 ml-0.5 truncate text-[11px] sm:text-xs">
-                                  {annInteraction.likes > 0 ? `${annInteraction.likes} ${isEs ? 'reacciones' : isFr ? 'réactions' : isEn ? 'reactions' : 'reyaksyon'}` : (isEs ? '1 reacción' : isFr ? '1 réaction' : isEn ? '1 reaction' : '1 reyaksyon')}
+                                  {effectiveLikesCount > 0 ? `${effectiveLikesCount} ${isEs ? 'reacciones' : isFr ? 'réactions' : isEn ? 'reactions' : 'reyaksyon'}` : (isEs ? '1 reacción' : isFr ? '1 réaction' : isEn ? '1 reaction' : '1 reyaksyon')}
                                 </span>
                               </>
                             ) : (
@@ -1206,17 +1681,17 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                             )}
                           </div>
 
-                          {/* Right: Comments Count & Share Count */}
+                          {/* Right: Comments Count */}
                           <div className="flex items-center gap-2 shrink-0">
                             <button
                               type="button"
-                              data-comment-toggle={ann.id}
-                              onClick={() =>
+                              data-comment-toggle={feedId}
+                              onClick={() => {
                                 setOpenCommentBox((prev) => ({
                                   ...prev,
-                                  [ann.id]: !prev[ann.id],
-                                }))
-                              }
+                                  [feedId]: !prev[feedId],
+                                }));
+                              }}
                               className="hover:underline cursor-pointer text-slate-300 hover:text-white font-medium text-[11px] sm:text-xs"
                             >
                               {commentCount > 0 ? (
@@ -1237,10 +1712,10 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                           {/* 1. Like / React Action Button */}
                           <div className="flex items-center justify-center p-0.5 min-w-0">
                             <ReactionPicker
-                              announcementId={ann.id}
-                              userLiked={annInteraction.userLiked}
-                              currentReaction={annInteraction.reaction}
-                              likesCount={annInteraction.likes}
+                              announcementId={feedId}
+                              userLiked={srvInteraction.userLiked}
+                              currentReaction={srvInteraction.reaction}
+                              likesCount={effectiveLikesCount}
                               onSelectReaction={handleSelectReaction}
                               onToggleDefault={handleToggleDefault}
                               variant="facebook"
@@ -1251,12 +1726,12 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                           <div className="flex items-center justify-center p-0.5 min-w-0">
                             <button
                               type="button"
-                              id={`btn-toggle-comments-${ann.id}`}
-                              data-comment-toggle={ann.id}
+                              id={`btn-toggle-comments-${feedId}`}
+                              data-comment-toggle={feedId}
                               onClick={() =>
                                 setOpenCommentBox((prev) => ({
                                   ...prev,
-                                  [ann.id]: !prev[ann.id],
+                                  [feedId]: !prev[feedId],
                                 }))
                               }
                               className={`w-full py-2 px-1 sm:px-2 rounded-xl flex items-center justify-center gap-1 sm:gap-2 text-xs sm:text-sm font-bold transition-all cursor-pointer ${
@@ -1274,7 +1749,7 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                           <div className="flex items-center justify-center p-0.5 min-w-0">
                             <button
                               type="button"
-                              onClick={() => handleShareAnnouncement(ann)}
+                              onClick={() => handleShareService(srv)}
                               className="w-full py-2 px-1 sm:px-2 rounded-xl flex items-center justify-center gap-1 sm:gap-2 text-xs sm:text-sm font-bold text-slate-300 hover:text-white hover:bg-white/[0.06] transition-all cursor-pointer active:scale-[0.98]"
                             >
                               <Share2 className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400 shrink-0" />
@@ -1286,65 +1761,132 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
                         {/* =========================================================================
                             7. FACEBOOK-STYLE COMMENTS THREAD WITH iOS WHEEL ROLLER
                             ========================================================================= */}
-                        {isCommentOpen && (
-                          <div
-                            data-comment-box={ann.id}
-                            className="p-4 sm:p-5 bg-slate-950/75 backdrop-blur-xl border-t border-white/10 space-y-3.5 transition-all"
-                          >
-                            {/* Input Form at Top (Avatar + rounded pill input) */}
-                            <div className="flex items-center gap-2.5">
-                              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-md ring-1 ring-white/20">
-                                {memberDisplayName.slice(0, 2).toUpperCase()}
-                              </div>
-                              <div className="flex-1 relative flex items-center">
-                                <input
-                                  type="text"
-                                  id={`input-comment-${ann.id}`}
-                                  placeholder={isEs ? 'Escribe una bendición o comentario...' : isEn ? 'Write a blessing or comment...' : isFr ? 'Écrivez une bénédiction ou un commentaire...' : 'Ekri yon benediksyon oswa kòmantè...'}
-                                  value={commentInputs[ann.id] || ''}
-                                  onChange={(e) =>
-                                    setCommentInputs((prev) => ({
-                                      ...prev,
-                                      [ann.id]: e.target.value,
-                                    }))
-                                  }
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      e.preventDefault();
-                                      handleAddComment(ann.id);
-                                    }
-                                  }}
-                                  className="w-full pl-4 pr-10 py-2 rounded-full ios-glass-pill text-white placeholder:text-slate-400 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-amber-400/60 transition-all shadow-inner"
-                                />
-                                <button
-                                  type="button"
-                                  id={`btn-send-comment-${ann.id}`}
-                                  onClick={() => handleAddComment(ann.id)}
-                                  disabled={!commentInputs[ann.id]?.trim()}
-                                  className="absolute right-1.5 p-1.5 rounded-full bg-amber-400 hover:bg-amber-300 disabled:opacity-30 disabled:pointer-events-none text-slate-950 font-bold transition-all cursor-pointer active:scale-95 shadow-sm"
-                                  title={isEs ? 'Publicar' : isFr ? 'Publier' : isEn ? 'Post' : 'Voye'}
-                                >
-                                  <Send className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
+                        {isCommentOpen && (() => {
+                          const modConfig = sanitizeCommentModerationConfig(devSettings.commentModeration);
+                          const targetType = resolveCommentTargetType(feedId, { category: 'sevis', serviceId: srv.id } as Announcement);
+                          const gateCheck = evaluateCommentAgainstModeration({
+                            content: 'ok',
+                            churchId: church.id,
+                            userIds: currentMemberCandidateIds,
+                            targetType,
+                            customConfig: { ...modConfig, enabled: false },
+                          });
+                          const isPostingLocked = !gateCheck.allowed;
+                          const memberPhoto =
+                            member?.avatarUrl || member?.photoUrl || member?.googlePhoto;
+                          const currentInputVal = commentInputs[feedId] || '';
 
-                            {/* iOS Wheel Drum View: Reading item magnified, scrolls smoothly without affecting feed */}
-                            <CommentsWheel
-                              announcementId={ann.id}
-                              comments={cleanComments}
-                              currentMemberName={member?.fullName || memberDisplayName}
-                              onDeleteComment={handleDeleteComment}
-                              language={language}
-                            />
-                          </div>
-                        )}
+                          return (
+                            <div
+                              data-comment-box={feedId}
+                              className="p-4 sm:p-5 bg-slate-950/75 backdrop-blur-xl border-t border-white/10 space-y-3.5 transition-all"
+                            >
+                              {isPostingLocked ? (
+                                <div
+                                  role="status"
+                                  className="px-3.5 py-2.5 rounded-2xl bg-amber-500/10 border border-amber-400/30 text-amber-200 text-xs font-semibold flex items-center gap-2.5"
+                                >
+                                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                                  <span>{getLocalizedModerationMessage(gateCheck)}</span>
+                                </div>
+                              ) : null}
+
+                              {/* Input Form at Top (Avatar + rounded pill input) */}
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2.5">
+                                  {memberPhoto ? (
+                                    <img
+                                      src={memberPhoto}
+                                      alt={memberDisplayName}
+                                      className="w-8 h-8 rounded-full object-cover shrink-0 shadow-md ring-1 ring-white/20"
+                                    />
+                                  ) : (
+                                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-md ring-1 ring-white/20">
+                                      {memberDisplayName.slice(0, 2).toUpperCase()}
+                                    </div>
+                                  )}
+                                  <div className="flex-1 relative flex items-center">
+                                    <input
+                                      type="text"
+                                      id={`input-comment-${feedId}`}
+                                      disabled={isPostingLocked}
+                                      maxLength={modConfig.maxCommentLength}
+                                      placeholder={
+                                        isPostingLocked
+                                          ? getLocalizedModerationMessage(gateCheck)
+                                          : isEs
+                                          ? 'Escribe una bendición o comentario...'
+                                          : isEn
+                                          ? 'Write a blessing or comment...'
+                                          : isFr
+                                          ? 'Écrivez une bénédiction ou un commentaire...'
+                                          : 'Ekri yon benediksyon oswa kòmantè...'
+                                      }
+                                      value={currentInputVal}
+                                      onChange={(e) =>
+                                        setCommentInputs((prev) => ({
+                                          ...prev,
+                                          [feedId]: e.target.value,
+                                        }))
+                                      }
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !isPostingLocked) {
+                                          e.preventDefault();
+                                          handleAddComment(feedId, srv);
+                                        }
+                                      }}
+                                      className="w-full pl-4 pr-10 py-2 rounded-full ios-glass-pill text-white placeholder:text-slate-400 text-xs sm:text-sm focus:outline-none focus:ring-1 focus:ring-amber-400/60 transition-all shadow-inner disabled:opacity-45 disabled:cursor-not-allowed"
+                                    />
+                                    <button
+                                      type="button"
+                                      id={`btn-send-comment-${feedId}`}
+                                      onClick={() => handleAddComment(feedId, srv)}
+                                      disabled={isPostingLocked || !currentInputVal.trim()}
+                                      className="absolute right-1.5 p-1.5 rounded-full bg-amber-400 hover:bg-amber-300 disabled:opacity-30 disabled:pointer-events-none text-slate-950 font-bold transition-all cursor-pointer active:scale-95 shadow-sm"
+                                      title={isEs ? 'Publicar' : isFr ? 'Publier' : isEn ? 'Post' : 'Voye'}
+                                    >
+                                      <Send className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {!isPostingLocked && (currentInputVal.length > 0 || modConfig.slowModeCooldownSeconds > 0) && (
+                                  <div className="flex items-center justify-between text-[10px] text-slate-400 px-11">
+                                    <span>
+                                      {modConfig.slowModeCooldownSeconds > 0
+                                        ? isEs
+                                          ? `Modo lento: ${modConfig.slowModeCooldownSeconds}s entre comentarios`
+                                          : isFr
+                                          ? `Mode lent : ${modConfig.slowModeCooldownSeconds}s entre commentaires`
+                                          : isEn
+                                          ? `Slow mode: ${modConfig.slowModeCooldownSeconds}s cooldown`
+                                          : `Slow Mode: ${modConfig.slowModeCooldownSeconds}s ant 2 kòmantè`
+                                        : ''}
+                                    </span>
+                                    <span className="font-mono">
+                                      {currentInputVal.length}/{modConfig.maxCommentLength}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* iOS Wheel Drum View: Reading item magnified, scrolls smoothly without affecting feed */}
+                              <CommentsWheel
+                                announcementId={feedId}
+                                comments={cleanComments}
+                                currentMemberName={member?.fullName || memberDisplayName}
+                                onDeleteComment={handleDeleteComment}
+                                language={language}
+                              />
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* =========================================================================
                           DEDICATED ADVERTISEMENT & VERIFIED PARTNER SECTION IN FEED
                           ========================================================================= */}
-                      {annIndex === 0 && (
+                      {srvIndex === 0 && (
                         <div className="p-5 sm:p-6 rounded-3xl bg-gradient-to-br from-slate-950 via-[#0a1128] to-slate-900 border border-emerald-500/30 shadow-2xl relative overflow-hidden space-y-4">
                           <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none" />
 
@@ -1526,16 +2068,6 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
         </div>
       </div>
 
-      {/* POSTER LIGHTBOX MODAL */}
-      <PosterLightboxModal
-        isOpen={!!activeLightboxImage}
-        imageUrl={activeLightboxImage?.url || ''}
-        title={activeLightboxImage?.title || ''}
-        caption={activeLightboxImage?.caption}
-        language={language}
-        onClose={() => setActiveLightboxImage(null)}
-      />
-
       {/* CHURCH-SPECIFIC DONATION MODAL */}
       <ChurchDonationModal
         isOpen={isChurchDonationModalOpen}
@@ -1567,6 +2099,16 @@ export const MemberHome: React.FC<MemberHomeProps> = ({
         church={church}
         language={language}
         onClose={() => setSharingAnnouncement(null)}
+      />
+
+      {/* SERVICE THUMBNAIL / POSTER LIGHTBOX MODAL */}
+      <PosterLightboxModal
+        isOpen={!!activeLightboxImage}
+        imageUrl={activeLightboxImage?.url || ''}
+        title={activeLightboxImage?.title || ''}
+        caption={activeLightboxImage?.caption}
+        language={language}
+        onClose={() => setActiveLightboxImage(null)}
       />
     </div>
   );

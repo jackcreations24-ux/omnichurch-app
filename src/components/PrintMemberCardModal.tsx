@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Member, Church, Language } from '../types';
 import { generateQrDataUrl, getMemberVerificationUrl, saveChurch, getSavedLanguage } from '../utils/storage';
+import { buildCanonicalBarcodeToken } from '../utils/qrSyncLayer';
 import { churchHasValidRnc, getChurchRnc } from '../utils/rncValidator';
 import { useToast } from '../context/ToastContext';
 import { CARD_STYLES, CardStyleDefinition } from '../data/cardStyles';
@@ -170,21 +171,29 @@ export const PrintMemberCardModal: React.FC<PrintMemberCardModalProps> = ({
     return CARD_STYLES.find((s) => s.id === selectedStyleId) || CARD_STYLES[0];
   }, [selectedStyleId]);
 
-  // Generate QR codes for active members with zero-freeze caching
+  const getQrCacheKey = (m: Member) =>
+    `${m.id}::${m.churchId || church.id}::${m.memberId || ''}`;
+
+  // Generate QR codes for active members with composite key caching
   useEffect(() => {
     let isMounted = true;
-    const missingMembers = activeMembersToPrint.filter(
-      (m) => m && !qrMap[m.id] && (m.barcodeToken || m.memberId || m.id)
-    );
+    const missingMembers = activeMembersToPrint.filter((m) => {
+      if (!m || !(m.barcodeToken || m.memberId || m.id)) return false;
+      const key = getQrCacheKey(m);
+      return !qrMap[key];
+    });
 
     if (missingMembers.length === 0) return;
 
     const generateMissing = async () => {
       const results = await Promise.all(
         missingMembers.map(async (m) => {
-          const token = getMemberVerificationUrl(m) || (m.barcodeToken || m.memberId || m.id || 'MB001').trim();
+          const memberWithChurch = { ...m, churchId: m.churchId || church.id };
+          const token =
+            getMemberVerificationUrl(memberWithChurch) ||
+            (m.barcodeToken || buildCanonicalBarcodeToken(church.id, m.memberId || m.id || 'MB001')).trim();
           const url = await generateQrDataUrl(token);
-          return { id: m.id, url };
+          return { key: getQrCacheKey(m), url };
         })
       );
 
@@ -193,8 +202,8 @@ export const PrintMemberCardModal: React.FC<PrintMemberCardModalProps> = ({
           const updated = { ...prev };
           let changed = false;
           for (const item of results) {
-            if (updated[item.id] !== item.url) {
-              updated[item.id] = item.url;
+            if (updated[item.key] !== item.url) {
+              updated[item.key] = item.url;
               changed = true;
             }
           }
@@ -208,7 +217,7 @@ export const PrintMemberCardModal: React.FC<PrintMemberCardModalProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [activeMembersToPrint, qrMap]);
+  }, [activeMembersToPrint, qrMap, church.id]);
 
   const handlePrint = () => {
     if (activeMembersToPrint.length === 0) {
@@ -1159,7 +1168,7 @@ export const PrintMemberCardModal: React.FC<PrintMemberCardModalProps> = ({
                   key={member.id}
                   member={member}
                   church={church}
-                  qrUrl={qrMap[member.id] || ''}
+                  qrUrl={qrMap[getQrCacheKey(member)] || ''}
                   styleDef={currentStyle}
                   side={layoutSide}
                   showCropMarks={showCropMarks}
@@ -1479,7 +1488,10 @@ const PrintableCardUnit: React.FC<PrintableCardUnitProps> = ({
 
   // Barcode generator
   const renderBarcodeLines = () => {
-    const code = String(member?.barcodeToken || member?.memberId || 'MB1234');
+    const code = String(
+      member?.barcodeToken ||
+        buildCanonicalBarcodeToken(member?.churchId || church.id, member?.memberId || 'MB1234')
+    );
     const bars: boolean[] = [];
     for (let i = 0; i < code.length; i++) {
       const charCode = code.charCodeAt(i);
@@ -1605,9 +1617,9 @@ const PrintableCardUnit: React.FC<PrintableCardUnitProps> = ({
                     styleDef.photoBorder
                   } ${getPhotoShapeClass()} ${styleDef.isDark ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-900'}`}
                 >
-                  {member.googlePhoto || member.avatarUrl ? (
+                  {member.avatarUrl || member.photoUrl || member.googlePhoto ? (
                     <img
-                      src={member.googlePhoto || member.avatarUrl}
+                      src={member.avatarUrl || member.photoUrl || member.googlePhoto}
                       alt={member.fullName}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"

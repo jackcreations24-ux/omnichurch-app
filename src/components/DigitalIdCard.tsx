@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Member, Church, Language } from '../types';
 import { generateQrDataUrl, getMemberVerificationUrl, getSavedLanguage } from '../utils/storage';
+import { buildCanonicalBarcodeToken } from '../utils/qrSyncLayer';
 import { useToast } from '../context/ToastContext';
 import { PrintMemberCardModal } from './PrintMemberCardModal';
 import { churchHasValidRnc, getChurchRnc, getRncI18n } from '../utils/rncValidator';
@@ -85,10 +86,17 @@ export const DigitalIdCard: React.FC<DigitalIdCardProps> = ({
 
   const cardContainerRef = useRef<HTMLDivElement>(null);
 
+  const memberWithChurch: Member = {
+    ...member,
+    churchId: member?.churchId || church.id,
+  };
+  const canonicalBarcodeToken =
+    member?.barcodeToken || buildCanonicalBarcodeToken(church.id, member?.memberId || 'MB001');
+
   useEffect(() => {
     let isMounted = true;
     if (member) {
-      const verifyUrl = getMemberVerificationUrl(member);
+      const verifyUrl = getMemberVerificationUrl(memberWithChurch);
       if (verifyUrl) {
         generateQrDataUrl(verifyUrl).then((url) => {
           if (isMounted) setQrUrl(url);
@@ -98,7 +106,7 @@ export const DigitalIdCard: React.FC<DigitalIdCardProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [member?.churchId, member?.memberId, member?.id]);
+  }, [church.id, member?.churchId, member?.memberId, member?.id]);
 
   const handleCopyId = (e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -442,9 +450,9 @@ export const DigitalIdCard: React.FC<DigitalIdCardProps> = ({
                       : undefined
                   }
                 >
-                  {member.googlePhoto || member.avatarUrl ? (
+                  {member.avatarUrl || member.photoUrl || member.googlePhoto ? (
                     <img
-                      src={member.googlePhoto || member.avatarUrl}
+                      src={member.avatarUrl || member.photoUrl || member.googlePhoto}
                       alt={member.fullName}
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover rounded-xl"
@@ -674,10 +682,12 @@ export const DigitalIdCard: React.FC<DigitalIdCardProps> = ({
                 {/* Barcode Strip */}
                 <div className="space-y-0.5">
                   {renderBarcodeLines()}
-                  <div className="flex items-center justify-between text-[8px] font-mono text-slate-400 px-0.5">
-                    <span>{church.code}</span>
-                    <span className="text-amber-300 font-bold">{member.memberId}</span>
-                    <span>{member.barcodeToken}</span>
+                  <div className="flex items-center justify-between gap-2 text-[8px] font-mono text-slate-400 px-0.5">
+                    <span className="shrink-0">{church.code}</span>
+                    <span className="text-amber-300 font-bold shrink-0">{member.memberId}</span>
+                    <span className="truncate max-w-[120px] text-slate-400/90" title={canonicalBarcodeToken}>
+                      {canonicalBarcodeToken}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -819,7 +829,7 @@ export const DigitalIdCard: React.FC<DigitalIdCardProps> = ({
 
         {!compact && (
           <a
-            href={getMemberVerificationUrl(member)}
+            href={getMemberVerificationUrl(memberWithChurch)}
             target="_blank"
             rel="noopener noreferrer"
             id={`btn-verify-preview-${member.id}`}

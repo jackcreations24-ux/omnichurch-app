@@ -7,12 +7,14 @@ interface AdMobBannerAdProps {
   churchId?: string;
   placement?: 'home' | 'navbar_bottom' | 'footer';
   className?: string;
+  showWebPreview?: boolean;
 }
 
 export const AdMobBannerAd: React.FC<AdMobBannerAdProps> = ({
   churchId,
   placement = 'home',
   className = '',
+  showWebPreview = false,
 }) => {
   const [settings, setSettings] = useState(() => getDeveloperSettings());
   const [isDismissed, setIsDismissed] = useState(false);
@@ -85,6 +87,10 @@ export const AdMobBannerAd: React.FC<AdMobBannerAdProps> = ({
         </span>
       </div>
     );
+  }
+
+  if (!showWebPreview) {
+    return null;
   }
 
   return (

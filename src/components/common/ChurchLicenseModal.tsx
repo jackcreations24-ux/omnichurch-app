@@ -30,6 +30,7 @@ import {
   getDonationConfig,
 } from '../../utils/developerStorage';
 import { useToast } from '../../context/ToastContext';
+import { OmniChurchLogo } from './OmniChurchLogo';
 
 interface ChurchLicenseModalProps {
   isOpen: boolean;
@@ -185,9 +186,11 @@ export const ChurchLicenseModal: React.FC<ChurchLicenseModalProps> = ({
         {/* MODAL HEADER */}
         <div className="p-4 sm:p-5 bg-gradient-to-r from-slate-900 via-[#1E293B] to-slate-900 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl overflow-hidden bg-slate-950 border border-blue-500/40 flex items-center justify-center shrink-0 shadow-md shadow-blue-500/20">
-              <img src="/icon.png" alt="OmniChurch" className="w-full h-full object-cover" />
-            </div>
+            <OmniChurchLogo
+              variant="icon"
+              priority
+              className="h-10 w-10"
+            />
             <div>
               <h3 className="font-extrabold text-base sm:text-lg text-white flex items-center gap-2">
                 <span>{isEs ? 'Licencia Oficial y Soporte del Desarrollador' : isFr ? 'Licence Officielle & Support Développeur' : isEn ? 'Official License & Developer Support' : 'Lisans Ofisyèl & Sipò Devlopè'}</span>

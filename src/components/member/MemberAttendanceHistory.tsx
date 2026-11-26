@@ -1,15 +1,15 @@
 import React, { useState } from 'react';
-import { Church, Member, AttendanceRecord, ServiceCategory } from '../../types';
+import { Church, Member, AttendanceRecord } from '../../types';
 import { SERVICE_CATEGORIES } from '../../utils/i18n';
+import { isVisitorMember } from '../../utils/permissions';
 import {
-  Calendar,
   CheckCircle2,
-  Clock,
   Filter,
   BarChart3,
   Flame,
   Award,
-  Sparkles,
+  Building2,
+  Globe,
 } from 'lucide-react';
 
 interface MemberAttendanceHistoryProps {
@@ -17,6 +17,7 @@ interface MemberAttendanceHistoryProps {
   member: Member;
   attendanceRecords?: AttendanceRecord[];
   attendance?: AttendanceRecord[];
+  visitorVisits?: AttendanceRecord[];
   language?: string;
 }
 
@@ -25,6 +26,7 @@ export const MemberAttendanceHistory: React.FC<MemberAttendanceHistoryProps> = (
   member,
   attendanceRecords,
   attendance,
+  visitorVisits = [],
   language = 'ht',
 }) => {
   const [filterCategory, setFilterCategory] = useState<string>('all');
@@ -68,6 +70,11 @@ export const MemberAttendanceHistory: React.FC<MemberAttendanceHistoryProps> = (
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {isVisitorMember(member) && (
+            <span className="px-2.5 py-1 rounded-lg bg-sky-500/15 border border-sky-500/30 text-sky-300 font-bold text-xs">
+              {isEs ? 'Visitante' : isEn ? 'Visitor' : isFr ? 'Visiteur' : 'Vizitè'}
+            </span>
+          )}
           <span className="font-mono text-xs bg-slate-900 px-3 py-1 rounded-lg border border-slate-700 font-bold text-amber-300">
             {member.memberId}
           </span>
@@ -218,6 +225,94 @@ export const MemberAttendanceHistory: React.FC<MemberAttendanceHistoryProps> = (
                     </tr>
                   );
                 })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* CROSS-CHURCH VISITS SECTION (STRICTLY ISOLATED FROM HOME ATTENDANCE TOTALS) */}
+      <div className="bg-[#1E293B] rounded-2xl border border-sky-500/25 shadow-sm overflow-hidden text-slate-200">
+        <div className="p-4 border-b border-slate-700/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-sky-950/20">
+          <div>
+            <h3 className="font-bold text-sm text-white flex items-center gap-2">
+              <Globe className="w-4 h-4 text-sky-400" />
+              {isEs
+                ? `Mis Visitas en Otras Iglesias (${visitorVisits.length})`
+                : isEn
+                ? `My Visits to Other Churches (${visitorVisits.length})`
+                : isFr
+                ? `Mes Visites dans d'Autres Églises (${visitorVisits.length})`
+                : `Vizit Mwen nan Lòt Legliz (${visitorVisits.length})`}
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              {isEs
+                ? 'Registro separado como Visitante cuando presentas tu tarjeta QR en otra iglesia.'
+                : isEn
+                ? 'Separately tracked as Visitor whenever your QR card is scanned at another church.'
+                : isFr
+                ? 'Suivi séparé en tant que Visiteur lorsque votre carte QR est scannée dans une autre église.'
+                : 'Anrejistre separe kòm Vizitè lè ou prezante kat QR ou nan yon lòt legliz — san melanje done yo.'}
+            </p>
+          </div>
+          <span className="self-start sm:self-center inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-500/15 border border-sky-500/30 text-sky-300 font-bold text-[11px]">
+            {isEs ? 'Rol: Visitante' : isEn ? 'Role: Visitor' : isFr ? 'Rôle : Visiteur' : 'Wòl: Vizitè'}
+          </span>
+        </div>
+
+        {visitorVisits.length === 0 ? (
+          <div className="p-8 text-center text-slate-400">
+            <p className="text-xs sm:text-sm">
+              {isEs
+                ? 'Aún no tienes visitas registradas en otras iglesias.'
+                : isEn
+                ? 'No visits recorded at other churches yet.'
+                : isFr
+                ? 'Aucune visite enregistrée dans une autre église pour le moment.'
+                : 'Ou poko gen okenn vizit ki anrejistre nan yon lòt legliz.'}
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs text-slate-300">
+              <thead className="bg-[#0F172A] text-slate-400 font-bold uppercase text-[10px] tracking-wider border-b border-slate-700/80">
+                <tr>
+                  <th className="py-3 px-4">{isEs ? 'Fecha' : isEn ? 'Date' : isFr ? 'Date' : 'Dat'}</th>
+                  <th className="py-3 px-4">{isEs ? 'Iglesia Visitada' : isEn ? 'Host Church' : isFr ? 'Église Visitée' : 'Legliz Vizite a'}</th>
+                  <th className="py-3 px-4">{isEs ? 'Servicio / Culto' : isEn ? 'Service' : isFr ? 'Culte / Service' : 'Sèvis'}</th>
+                  <th className="py-3 px-4">{isEs ? 'Hora' : isEn ? 'Time' : isFr ? 'Heure' : 'Lè Scan'}</th>
+                  <th className="py-3 px-4 text-center">{isEs ? 'Estado' : isEn ? 'Status' : isFr ? 'Statut' : 'Estati'}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800 font-medium">
+                {visitorVisits.map((visit) => (
+                  <tr key={visit.id} className="hover:bg-slate-800/60 transition-colors">
+                    <td className="py-3.5 px-4 font-mono font-semibold text-white whitespace-nowrap">
+                      {visit.serviceDate}
+                    </td>
+                    <td className="py-3.5 px-4 font-bold text-sky-300">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Building2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                        {visit.hostChurchName || visit.churchId}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 font-semibold text-white">
+                      {visit.serviceTitle}
+                    </td>
+                    <td className="py-3.5 px-4 font-mono text-slate-400 whitespace-nowrap">
+                      {new Date(visit.timestamp).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </td>
+                    <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-sky-500/20 border border-sky-500/30 text-sky-300 font-bold text-[11px]">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        {isEs ? 'Visitante ✓' : isEn ? 'Visitor ✓' : isFr ? 'Visiteur ✓' : 'Vizitè ✓'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>

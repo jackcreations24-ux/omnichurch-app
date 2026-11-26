@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Bell } from 'lucide-react';
 import {
   Church,
@@ -13,10 +13,12 @@ import {
   getContextualNotifications,
   getUnreadNotificationsCount,
 } from '../../services/notificationCenterService';
+import { getAnnouncementsByChurch } from '../../utils/storage';
 
 export interface NotificationBellProps {
   church?: Church;
   member?: Member | null;
+  userRole?: 'admin' | 'member';
   announcements?: Announcement[];
   services?: ServiceSession[];
   attendanceRecords?: AttendanceRecord[];
@@ -30,6 +32,7 @@ export interface NotificationBellProps {
 export const NotificationBell: React.FC<NotificationBellProps> = ({
   church,
   member,
+  userRole = 'member',
   announcements = [],
   services = [],
   attendanceRecords = [],
@@ -44,22 +47,24 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
   const isEn = language === 'en';
   const isFr = language === 'fr';
 
-  // Load and refresh notifications
-  const reloadNotifications = () => {
-    if (!church) {
+  const reloadNotifications = useCallback(() => {
+    if (!church || userRole === 'admin' || !member) {
       setNotifications([]);
       return;
     }
+    const effectiveAnnouncements =
+      announcements.length > 0 ? announcements : getAnnouncementsByChurch(church.id);
     const notifs = getContextualNotifications({
       church,
       member,
-      announcements,
+      userRole,
+      announcements: effectiveAnnouncements,
       services,
       attendanceRecords,
       language: (language as Language) || 'ht',
     });
     setNotifications(notifs);
-  };
+  }, [church, member, userRole, announcements, services, attendanceRecords, language]);
 
   useEffect(() => {
     reloadNotifications();
@@ -69,10 +74,12 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
     };
 
     window.addEventListener('omnichurch_notifications_updated', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
     return () => {
       window.removeEventListener('omnichurch_notifications_updated', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
     };
-  }, [church, member, announcements, services, attendanceRecords, language]);
+  }, [reloadNotifications]);
 
   const unreadCount = getUnreadNotificationsCount(notifications);
 
@@ -91,17 +98,16 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
 
   return (
     <div className="relative inline-block">
-      {/* Integrated Notification Bell Button */}
       <button
         type="button"
         id="navbar-notifications-bell-btn"
         onClick={handleClick}
-        className={`relative p-2 rounded-xl border transition-all duration-200 cursor-pointer flex items-center justify-center select-none shadow-sm ${
+        className={`relative p-2 rounded-xl border transition-colors duration-200 cursor-pointer flex items-center justify-center select-none shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 ${
           isOpenPage
-            ? 'bg-amber-400 text-slate-950 border-amber-400 shadow-amber-400/25 scale-105 font-black'
+            ? 'bg-amber-400 text-slate-950 border-amber-400 font-bold'
             : unreadCount > 0
-            ? 'bg-slate-900/90 hover:bg-slate-800 border-amber-400/40 text-amber-300'
-            : 'bg-slate-900/80 hover:bg-slate-800 border-slate-700/80 text-slate-300 hover:text-white'
+            ? 'bg-[#0F172A]/95 hover:bg-slate-800 border-amber-400/50 text-amber-300'
+            : 'bg-[#0F172A]/85 hover:bg-slate-800 border-slate-700/80 text-slate-300 hover:text-white'
         }`}
         title={
           isOpenPage
@@ -118,28 +124,31 @@ export const NotificationBell: React.FC<NotificationBellProps> = ({
             ? `Open Notifications (${unreadCount} unread)`
             : isFr
             ? `Ouvrir les Notifications (${unreadCount} non lues)`
-            : `Ouvri Notifikasyon yo (${unreadCount} nouvo)`
+            : `Ouvri Notifikasyon yo (${unreadCount} pa li)`
         }
-        aria-label="Notifications"
+        aria-label={
+          isEs
+            ? `Notificaciones (${unreadCount} sin leer)`
+            : isFr
+            ? `Notifications (${unreadCount} non lues)`
+            : isEn
+            ? `Notifications (${unreadCount} unread)`
+            : `Notifikasyon (${unreadCount} pa li)`
+        }
         aria-pressed={isOpenPage}
       >
-        <Bell
-          className={`w-4 h-4 transition-transform duration-300 ${
-            unreadCount > 0 && !isOpenPage ? 'rotate-[-10deg]' : ''
-          }`}
-        />
+        <Bell className="w-4 h-4" />
 
-        {/* Shiny Pill Unread Count Badge */}
         {unreadCount > 0 && (
           <span
             id="navbar-notifications-badge"
-            className={`absolute -top-1.5 -right-1.5 min-w-[19px] h-[19px] px-1 rounded-full font-mono font-black text-[10px] flex items-center justify-center shadow-lg border border-slate-900 ${
+            className={`absolute -top-1.5 -right-1.5 min-w-[19px] h-[19px] px-1 rounded-full font-mono tabular-nums font-bold text-[10px] flex items-center justify-center shadow-md border ${
               isOpenPage
                 ? 'bg-slate-950 text-amber-400 border-amber-400'
-                : 'bg-gradient-to-r from-red-500 to-amber-500 text-white shadow-red-500/30 animate-pulse'
+                : 'bg-red-600 text-white border-[#07152F]'
             }`}
           >
-            {unreadCount > 9 ? '9+' : unreadCount}
+            {unreadCount > 99 ? '99+' : unreadCount}
           </span>
         )}
       </button>

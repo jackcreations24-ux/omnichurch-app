@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Language } from '../../types';
-import { Globe, Check, ArrowRight, X } from 'lucide-react';
+import { Globe, Check, ArrowRight, X, Sparkles } from 'lucide-react';
+import { OmniChurchLogo } from './OmniChurchLogo';
 
 interface LanguageSelectionModalProps {
   isOpen: boolean;
@@ -8,6 +9,9 @@ interface LanguageSelectionModalProps {
   onSelectLanguage: (lang: Language) => void;
   onClose?: () => void;
   isFirstStart?: boolean;
+  onAutoDetectLanguage?: () => void;
+  detectedCountryCode?: string | null;
+  isAutoDetected?: boolean;
 }
 
 interface LanguageOption {
@@ -60,8 +64,17 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
   onSelectLanguage,
   onClose,
   isFirstStart = false,
+  onAutoDetectLanguage,
+  detectedCountryCode,
+  isAutoDetected = false,
 }) => {
   const [selected, setSelected] = useState<Language>(currentLanguage || 'ht');
+
+  useEffect(() => {
+    if (isOpen) {
+      setSelected(currentLanguage || 'ht');
+    }
+  }, [currentLanguage, isOpen]);
 
   if (!isOpen) return null;
 
@@ -80,6 +93,8 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
           subtitle: 'Selecciona tu idioma para comenzar la aplicación',
           confirmBtn: 'Comenzar con Español',
           note: 'Podrás cambiar el idioma en cualquier momento desde la barra superior.',
+          autoDetectedLabel: detectedCountryCode ? `Detectado (${detectedCountryCode})` : 'Detectado automáticamente',
+          autoDetectBtn: 'Detectar Automático',
         };
       case 'en':
         return {
@@ -87,6 +102,8 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
           subtitle: 'Choose your language to start the application',
           confirmBtn: 'Get Started with English',
           note: 'You can change the language anytime from the top bar.',
+          autoDetectedLabel: detectedCountryCode ? `Auto-detected (${detectedCountryCode})` : 'Auto-detected',
+          autoDetectBtn: 'Auto Detect',
         };
       case 'fr':
         return {
@@ -94,6 +111,8 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
           subtitle: 'Choisissez votre langue pour démarrer l’application',
           confirmBtn: 'Démarrer en Français',
           note: 'Vous pourrez modifier la langue à tout moment.',
+          autoDetectedLabel: detectedCountryCode ? `Détecté (${detectedCountryCode})` : 'Détecté automatiquement',
+          autoDetectBtn: 'Détecter Auto',
         };
       case 'ht':
       default:
@@ -102,6 +121,8 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
           subtitle: 'Chwazi nan ki lang ou vle kòmanse platfòm nan',
           confirmBtn: 'Kòmanse ak Kreyòl',
           note: 'Ou kapab toujou chanje lang lan nenpòt kilè nan ba ki anwo a.',
+          autoDetectedLabel: detectedCountryCode ? `Detekte (${detectedCountryCode})` : 'Detekte Otomatikman',
+          autoDetectBtn: 'Detekte Oto',
         };
     }
   };
@@ -122,7 +143,7 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="absolute top-4 right-4 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors"
+            className="absolute top-4 right-4 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors cursor-pointer"
             title="Fèmen"
           >
             <X className="w-5 h-5" />
@@ -131,12 +152,14 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
 
         {/* Header */}
         <div className="flex items-center gap-3.5 mb-5">
-          <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0 shadow-inner">
-            <Globe className="w-6 h-6 animate-pulse" />
-          </div>
+          <OmniChurchLogo
+            variant="icon"
+            priority
+            className="h-12 w-12"
+          />
           <div>
-            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-amber-400/10 text-amber-300 font-mono text-[10px] font-bold tracking-wider uppercase mb-1">
-              OmniChurch • Multi-Language
+            <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#FBBF24]/10 text-[#FBBF24] font-mono text-[10px] font-bold tracking-wider uppercase mb-1">
+              OmniChurch PRO • Multi-Language
             </div>
             <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
               {text.title}
@@ -151,6 +174,7 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 my-6">
           {LANGUAGE_OPTIONS.map((opt) => {
             const isSelected = selected === opt.code;
+            const showAutoBadge = isAutoDetected && opt.code === currentLanguage;
             return (
               <button
                 key={opt.code}
@@ -169,20 +193,25 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
                       {opt.flag}
                     </span>
                     <div>
-                      <div className="font-black text-sm sm:text-base text-slate-100 flex items-center gap-1.5">
-                        {opt.nativeName}
+                      <div className="font-black text-sm sm:text-base text-slate-100 flex items-center gap-1.5 flex-wrap">
+                        <span>{opt.nativeName}</span>
                         <span className="text-[10px] font-mono text-slate-400 uppercase">
                           ({opt.code})
                         </span>
                       </div>
-                      <div className="text-[11px] text-slate-400 font-medium">
-                        {opt.name}
+                      <div className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5 flex-wrap">
+                        <span>{opt.name}</span>
+                        {showAutoBadge && (
+                          <span className="text-[10px] font-bold text-emerald-300">
+                            • ✓ {text.autoDetectedLabel}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
 
                   <div
-                    className={`w-5 h-5 rounded-full flex items-center justify-center border transition-all ${
+                    className={`w-5 h-5 rounded-full flex items-center justify-center border transition-all shrink-0 ${
                       isSelected
                         ? 'bg-amber-400 border-amber-400 text-slate-950 shadow-sm'
                         : 'border-slate-600 bg-slate-800/50 text-transparent'
@@ -202,15 +231,28 @@ export const LanguageSelectionModal: React.FC<LanguageSelectionModalProps> = ({
 
         {/* Footer & Action Buttons */}
         <div className="pt-4 border-t border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <p className="text-[11px] text-slate-400 text-center sm:text-left">
-            {text.note}
-          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 text-center sm:text-left">
+            <p className="text-[11px] text-slate-400">
+              {text.note}
+            </p>
+            {onAutoDetectLanguage && (
+              <button
+                type="button"
+                id="btn-modal-auto-detect-lang"
+                onClick={onAutoDetectLanguage}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-cyan-300 font-bold text-[11px] whitespace-nowrap cursor-pointer transition-colors"
+              >
+                <Sparkles className="w-3 h-3" />
+                <span>{text.autoDetectBtn}</span>
+              </button>
+            )}
+          </div>
 
           <button
             type="button"
             id="btn-confirm-start-language"
             onClick={handleConfirm}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black text-sm shadow-md hover:shadow-amber-500/20 active:scale-95 transition-all cursor-pointer"
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black text-sm shadow-md hover:shadow-amber-500/20 active:scale-95 transition-all cursor-pointer shrink-0"
           >
             <span>{text.confirmBtn}</span>
             <ArrowRight className="w-4 h-4" />

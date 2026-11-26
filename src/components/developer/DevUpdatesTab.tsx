@@ -208,8 +208,8 @@ export const DevUpdatesTab: React.FC<DevUpdatesTabProps> = ({
       notifyAppUpdateChanged();
 
       toast.success(
-        'Tout Vèsyon Reyinisyalize sou v1.0.0 ✓',
-        'Tout sistèm nan mete sou menm pye egalite (1.0.0). Popup la pa bloke ankò!'
+        `Tout Vèsyon Reyinisyalize sou v${APP_BASE_VERSION} ✓`,
+        `Tout sistèm nan mete sou menm pye egalite (${APP_BASE_VERSION}). Popup la pa bloke ankò!`
       );
     } catch (err: any) {
       toast.error('Erè pandan reyinisyalizasyon an', err?.message || 'Erè enprevizib.');
@@ -414,7 +414,7 @@ export const DevUpdatesTab: React.FC<DevUpdatesTabProps> = ({
                 onClick={handleResetAllToBaseline}
                 disabled={isSaving}
                 className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer hover:scale-105 active:scale-95 disabled:opacity-50"
-                title="Reyinisyalize tout vèsyon yo sou 1.0.0 pou mete tout sou menm pye egalite epi debloke popup la"
+                title={`Reyinisyalize tout vèsyon yo sou ${APP_BASE_VERSION} pou mete tout sou menm pye egalite epi debloke popup la`}
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isSaving ? 'animate-spin' : ''}`} />
                 <span>Reyinisyalize sou v{APP_BASE_VERSION}</span>
@@ -452,7 +452,7 @@ export const DevUpdatesTab: React.FC<DevUpdatesTabProps> = ({
               />
               <div className="flex items-center justify-between">
                 <p className="text-[10px] text-slate-400">
-                  Egzanp: <code className="text-amber-300">1.0.1</code>. Sistèm nan detekte otomatikman si l pi wo pase vèsyon aktyèl la.
+                  Egzanp: <code className="text-amber-300">1.1.1</code>. Sistèm nan detekte otomatikman si l pi wo pase vèsyon aktyèl la.
                 </p>
                 <button
                   type="button"
@@ -528,7 +528,7 @@ export const DevUpdatesTab: React.FC<DevUpdatesTabProps> = ({
                   className="text-[11px] text-amber-400 hover:underline flex items-center gap-1 font-mono font-normal"
                 >
                   <ExternalLink className="w-3 h-3" />
-                  <span>Teste Lyen</span>
+                  <span>Ouvri Lyen</span>
                 </a>
               </label>
               <div className="relative">
@@ -556,7 +556,7 @@ export const DevUpdatesTab: React.FC<DevUpdatesTabProps> = ({
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white text-xs focus:outline-none focus:border-amber-400 transition-colors cursor-pointer"
               >
                 <option value="stable">Stable (Ofisyèl Pwodiksyon)</option>
-                <option value="beta">Beta (Piblik Tès)</option>
+                <option value="beta">Beta (Pre-release)</option>
                 <option value="rc">Release Candidate (RC)</option>
               </select>
             </div>

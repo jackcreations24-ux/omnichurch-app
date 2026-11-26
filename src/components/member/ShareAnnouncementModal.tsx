@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Announcement, Church, Language } from '../../types';
 import { useToast } from '../../context/ToastContext';
+import { openExternalUrlSafely } from '../../utils/safeExternalLink';
 
 interface ShareAnnouncementModalProps {
   isOpen: boolean;
@@ -73,7 +74,11 @@ ${content}
     try {
       const shareMessage = `${textToShare}\n\n🔗 ${OFFICIAL_SHARE_URL}`;
       const whatsappUrl = `https://api.whatsapp.com/send?text=${encodeURIComponent(shareMessage)}`;
-      window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+      const opened = openExternalUrlSafely(whatsappUrl);
+      if (!opened) {
+        handleCopyText();
+        return;
+      }
       toast.success(
         isEs ? 'Abriendo WhatsApp...' : isFr ? 'Ouverture de WhatsApp...' : isEn ? 'Opening WhatsApp...' : 'Ouvèti WhatsApp...',
         isEs

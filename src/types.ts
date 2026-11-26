@@ -2,6 +2,8 @@ export type Language = 'ht' | 'es' | 'en' | 'fr';
 
 export type UserRole = 'admin' | 'member';
 
+export type MemberType = 'member' | 'visitor';
+
 export type ServiceCategory =
   | 'general'      // 01 — Service Général
   | 'dominical'    // 02 — Dominical (Sèvis Dimanch)
@@ -100,6 +102,7 @@ export interface Church {
   logoIcon: string;
   logoUrl?: string;
   createdAt: string;
+  updatedAt?: string;
   rnc?: string;        // Registre National des Contribuables (RNC) / Numéro Fiscal Eclésiastique Officiel
   rncNumber?: string;  // Alias for compatibility
   rncDocumentPhoto?: string; // Photo of church legal document (DGI/DGII tax cert, ministry decree, incorporation)
@@ -113,7 +116,14 @@ export interface Church {
   adminGoogleUid?: string;
   adminGoogleName?: string;
   adminGooglePhoto?: string;
+  adminAuthMethod?: 'email_password' | 'google' | 'both' | 'legacy_pin';
+  adminVerified?: boolean;
+  adminVerifiedAt?: string;
+  adminVerifiedBy?: string;
   adminPasscode?: string;
+  adminPasscodeUpdatedAt?: string;
+  quickPinEnabled?: boolean;
+  autoLockMinutes?: number;
   customCardTitle?: string;
   signatureUrl?: string; // Electronic signature data URL or image link of the admin/pastor
   website?: string;
@@ -121,10 +131,14 @@ export interface Church {
   desktopAppVersion?: string;
   donationInfo?: ChurchDonationInfo;
   churchRules?: ChurchRules;
+  status?: 'active' | 'archived';
+  archivedAt?: string;
+  isLegacy?: boolean;
 }
 
 export interface Member {
   id: string;
+  userId?: string;        // Optional linked Firebase Auth UID / userId for cross-platform notification parity
   churchId: string;       // Multi-tenant isolation key
   memberId: string;       // Unique ID like "CH001-JD4827"
   pin?: string;           // 4-6 digit security PIN for member login (default: last 4 digits of memberId or phone)
@@ -147,7 +161,8 @@ export interface Member {
   city?: string;
   zone?: string;
   department: string;     // e.g., 'Jeunesse', 'Chorale', 'Accueil', 'Intercession', 'Enfants', 'Général'
-  role: string;           // e.g., 'Manm', 'Diacre', 'Responsable', 'Chantre', 'Monitè'
+  role: string;           // e.g., 'Manm', 'Diacre', 'Responsable', 'Chantre', 'Monitè', 'Vizitè'
+  memberType?: MemberType;// 'member' | 'visitor'
   cellGroup?: string;     // Cell or Prayer Group
   joinedDate: string;     // YYYY-MM-DD
   status: 'active' | 'inactive';
@@ -179,12 +194,23 @@ export interface ServiceSession {
   notes?: string;
   status?: string;
   isOpenForAttendance: boolean; // Is this currently active for QR scanning?
+  wasOpenedForAttendance?: boolean; // Tracks whether attendance scanning was ever activated for this service
   isPermanentlyEnded?: boolean; // Lè li fini, li pase epi li pa kapab reouvri ankò
   endedAt?: string;             // Dat ak lè egzak kilt la fini
   sendReminder24h?: boolean;   // Voye notifikasyon Rapèl 24 èdtan anvan sèvis la
   reminderSentAt?: string;     // Dat ak lè rapèl la te pwograme/voye
   lateToleranceMinutes?: number; // Minit tolerans anvan yo konsidere kòm reta
   lateThresholdMinutes?: number;
+  posterUrl?: string | null;
+  imageUrl?: string | null;
+  bannerUrl?: string | null;
+  thumbnailUrl?: string | null;
+  coverUrl?: string | null;
+  photoUrl?: string | null;
+  authorId?: string;
+  authorName?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   isDemo?: boolean;
 }
@@ -196,19 +222,23 @@ export interface Announcement {
   churchId: string;
   title: string;
   content: string;
+  department?: string;   // e.g. "Depatman Administrasyon"
   category: AnnouncementCategory | string;
   date: string;          // YYYY-MM-DD
   time?: string;
   isPinned?: boolean;
   pinned?: boolean;
   author: string;
-  authorType?: 'admin' | 'pastor' | 'secretariat' | 'worship' | 'custom';
+  authorId?: string;
+  authorName?: string;
+  authorType?: 'admin' | 'pastor' | 'secretariat' | 'worship' | 'deacon' | 'custom';
+  createdBy?: string;
   targetAudience?: string; // 'Tout moun', 'Jeunesse', 'Dames', 'Hommes', 'Enfants'
   showToastOnLogin?: boolean; // When true, triggers a special alert toast when members log in
   toastAlertLevel?: 'urgent' | 'info' | 'warning' | 'celebration';
   // Pwogramasyon Notifikasyon Push / Toast Otomatik pou Dat Espesifik
   isScheduledNotification?: boolean; // Si notifikasyon an pwograme pou yon dat espesifik
-  scheduledNotificationDate?: string; // Dat kòmansman / dat espesifik pou voye notifikasyon an (YYYY-MM-DD)
+  scheduledNotificationDate?: string | null; // Dat kòmansman / dat espesifik pou voye notifikasyon an (YYYY-MM-DD)
   scheduledNotificationEndDate?: string; // Dat limit / fen peryòd notifikasyon an (opsyonèl YYYY-MM-DD)
   scheduledTargetAudience?: string; // Odyans oswa depatman espesifik (opsyonèl, default: 'Tout moun')
   // Sipò Milti-lang pou Anons Ofisyèl yo
@@ -221,25 +251,34 @@ export interface Announcement {
   content_es?: string;
   content_ht?: string;
   // Wòl & Moun ki sou Sèvis nan Kilt la (Dirijan, Predikatè, Lektè, elatriye)
-  serviceId?: string;
+  serviceId?: string | null;
   leader?: string;       // Dirijan / Worship Leader / Dirigeant
   preacher?: string;     // Predikatè / Preacher / Prédicateur
   reader?: string;       // Lektè / Scripture Reader / Lecteur
   musicians?: string;    // Mizisyen & Koral / Musicians & Choir / Musiciens
   ushers?: string;       // Akèy & Pwotokòl / Ushers & Hospitality / Accueil
   // Postè & Imaj Vizyèl pou Fil Aktyalite Dinamik (Banner / Poster image)
-  imageUrl?: string;     // Base64 WebP/JPEG data URL or external image URL
+  posterUrl?: string | null;
+  imageUrl?: string | null;     // Base64 WebP/JPEG data URL or external image URL
   imageCaption?: string; // Ti tit oswa deskripsyon pou postè a
-  createdAt?: string;
+  reactionsCount?: number;
+  commentsCount?: number;
+  createdAt?: any;
+  updatedAt?: any;
   isDemo?: boolean;
 }
 
 export interface AnnouncementComment {
   id: string;
+  targetId?: string;
   announcementId?: string;
   announcementTitle?: string;
   churchId?: string;
   churchName?: string;
+  userId?: string;
+  userName?: string;
+  userPhotoUrl?: string | null;
+  content?: string;
   author: string;
   authorMemberId?: string;
   memberId?: string;
@@ -247,17 +286,21 @@ export interface AnnouncementComment {
   time: string;
   avatarInitials: string;
   isDemo?: boolean;
-  createdAt?: string;
+  createdAt?: any;
 }
 
 export interface AnnouncementReactionDoc {
   id: string;
+  targetId?: string;
   announcementId: string;
   churchId: string;
+  userId?: string;
+  userName?: string;
   memberId: string;
+  reactionType?: string;
   reaction: string;
-  createdAt: string;
-  updatedAt?: string;
+  createdAt: any;
+  updatedAt?: any;
 }
 
 export interface AnnouncementInteractionData {
@@ -286,6 +329,11 @@ export interface AttendanceRecord {
   attendanceStatus?: 'on_time' | 'late' | 'excused';
   lateMinutes?: number;
   lateToleranceMinutes?: number;
+  attendanceRole?: 'member' | 'visitor';
+  isVisitor?: boolean;
+  homeChurchId?: string;
+  homeChurchName?: string;
+  hostChurchName?: string;
   isDemo?: boolean;
 }
 
@@ -357,6 +405,17 @@ export interface AdMobConfig {
   enableInterstitialOnScan: boolean;
   interstitialScanFrequency: number; // e.g. every 5 scans
   adFreeForLicensedChurches: boolean;
+  // Remote-control fields for Native Android Kotlin App (com.zoutiw.omnichurch)
+  mobileEnabled?: boolean;
+  mobileForceTestIds?: boolean;
+  mobileShowBannerHome?: boolean;
+  mobileShowBannerAnnouncements?: boolean;
+  mobileShowBannerServices?: boolean;
+  mobileEnableInterstitialAfterScanClose?: boolean;
+  mobileInterstitialCooldownSeconds?: number;
+  mobileRewardedEnabled?: boolean;
+  mobileNativeFeedEnabled?: boolean;
+  lastCloudPushAt?: string;
 }
 
 export type SponsorTier = 'platinum' | 'gold' | 'silver' | 'bronze' | 'partner';
@@ -374,6 +433,14 @@ export interface SponsorItem {
   displayOrder: number;
   churchId?: string;          // Optional church scope, or 'global'
   createdAt: string;
+}
+
+export interface LocalizedDonationCopy {
+  screenTitle: string;
+  screenSubtitle: string;
+  developerRole: string;
+  developerBio: string;
+  customNote: string;
 }
 
 export interface DeveloperDonationConfig {
@@ -411,6 +478,14 @@ export interface DeveloperDonationConfig {
   zelleInfo: string;
 
   customNote?: string;
+  screenTitle?: string;
+  screenSubtitle?: string;
+  localizedCopy?: Record<Language, LocalizedDonationCopy>;
+  buttonImageUrl?: string;
+  enableShakeAnimation?: boolean;
+  shakeIntervalSeconds?: number;
+  lastDonationsPushAt?: string;
+  userCustomizedChannels?: boolean;
 }
 
 export interface DeveloperAuditLog {
@@ -448,6 +523,63 @@ export interface DeveloperAppUpdateConfig {
   lastBroadcastedAt?: string;
 }
 
+export interface RemoteCommentModerationConfig {
+  enabled: boolean;                    // Default: true — Master switch for automatic moderation filters
+  allowMemberCommentsGlobal: boolean;  // Default: true — Global kill-switch to pause/resume all new comments across churches
+  allowServiceComments: boolean;       // Default: true — Allow comments on worship services
+  allowAnnouncementComments: boolean;  // Default: true — Allow comments on official church announcements
+  autoBlockProfanity: boolean;         // Default: true — Block or mask comments containing banned words (HT / FR / EN)
+  blockExternalLinks: boolean;         // Default: true — Block comments containing http://, https://, www., or spam links
+  maxCommentLength: number;            // Default: 500 (max 1000 per firestore.rules)
+  slowModeCooldownSeconds: number;     // Default: 15 — Minimum seconds between two comments by the same member
+  blockedKeywords: string[];           // Default list of customizable banned/spam keywords (Haitian Creole, French, English)
+  mutedMemberIds: string[];            // List of member IDs / userIds temporarily muted from posting comments
+  disabledChurchIds: string[];         // Optional list of churchIds where comments are disabled remotely
+  lastModerationPushAt?: string;       // ISO timestamp of last cloud sync
+}
+
+export interface RemoteMemberVerificationConfig {
+  enabled: boolean;                    // Default: true — Master switch for public Member Verification page
+  verificationBaseUrl?: string;        // Default: "https://verify.omnichurch.download" — Official public verification base URL
+  enforceActiveStatusCheck: boolean;   // Default: true — Flag inactive members / archived churches instead of showing ACTIVE
+  showMemberPhoto: boolean;            // Default: true — Show member profile portrait on public verification page
+  showLegalDocuments: boolean;         // Default: true — Show Legal ID (CIN / NIF / Passport) card
+  maskLegalDocumentNumber: boolean;    // Default: false — Mask legal ID digits (show last 4 characters only)
+  showChurchContactInfo: boolean;      // Default: true — Show church phone & email on public verification certificate
+  showChurchRncBadge: boolean;         // Default: true — Show institutional RNC badge when valid
+  allowPrintAndShare: boolean;         // Default: true — Show Print Certificate & Copy Link buttons
+  disabledChurchIds: string[];         // Optional list of churchIds where public verification is disabled
+  customAuthorityNotice?: string;      // Optional authority attestation notice managed remotely
+  lastVerificationPushAt?: string;     // ISO timestamp of last cloud push
+}
+
+export interface LegalDocCustomText {
+  title?: string;
+  lastUpdatedDate?: string;
+  content?: string;
+}
+
+export interface DeveloperLegalConfig {
+  officialPrivacyUrl: string;
+  officialTermsUrl: string;
+  useExternalLinksOnClick?: boolean;
+  customPrivacy?: Partial<Record<Language, LegalDocCustomText>>;
+  customTerms?: Partial<Record<Language, LegalDocCustomText>>;
+  lastLegalUpdatedAt?: string;
+}
+
+export type LanguageSelectionMode = 'auto' | 'manual';
+
+export interface DeveloperLanguageConfig {
+  mode: LanguageSelectionMode;
+  defaultLanguage: Language;
+  autoDetectByCountry: boolean;
+  autoDetectByBrowser: boolean;
+  useNetworkGeoFallback: boolean;
+  showInitialModalOnFirstVisit: boolean;
+  lastLanguageConfigUpdatedAt?: string;
+}
+
 export interface DeveloperSettings {
   masterPin: string;          // Default: "7799"
   maintenanceMode: boolean;
@@ -458,6 +590,10 @@ export interface DeveloperSettings {
   enforceLicenseLockout: boolean;
   adMob: AdMobConfig;
   admob?: AdMobConfig;
+  commentModeration?: RemoteCommentModerationConfig;
+  memberVerification?: RemoteMemberVerificationConfig;
+  legalConfig?: DeveloperLegalConfig;
+  languageConfig?: DeveloperLanguageConfig;
   sponsors: SponsorItem[];
   licenses: ChurchLicense[];
   donations?: DeveloperDonationConfig;
@@ -470,18 +606,33 @@ export interface DeveloperSettings {
 export type AppNotificationType =
   | 'official_alert'   // Avètisman Ofisyèl oswa Alèt Ijan Administrasyon Legliz la
   | 'announcement'      // Anons ofisyèl oswa kominike legliz
+  | 'service'          // Nouvo sèvis legliz pibliye
   | 'service_reminder' // Rapèl kilt oswa kilt aktif kounye a
   | 'attendance'       // Konfimasyon prezans eskane
   | 'interaction'      // Nouvo kòmantè oswa reyaksyon sou yon anons
   | 'system';          // Alèt sistèm oswa sekirite legliz
 
+export interface FirestoreNotificationDoc {
+  id: string;
+  userId: string;
+  churchId: string;
+  title: string;
+  message: string;
+  type: 'announcement' | 'service';
+  isRead: boolean;
+  createdAt: any;
+}
+
 export interface AppNotification {
   id: string;
+  userId?: string;
   churchId: string;
   type: AppNotificationType;
   title: string;
+  message?: string;
   body: string;
-  createdAt: string; // ISO date string or formatted date
+  createdAt: any; // ISO date string, Firestore Timestamp, or formatted date
+  isRead?: boolean;
   read: boolean;
   priority?: 'normal' | 'high' | 'urgent';
   author?: string;
@@ -493,4 +644,8 @@ export interface AppNotification {
   };
   badgeText?: string;
   iconType?: string;
+  imageUrl?: string | null;
+  imageCaption?: string;
+  targetAudience?: string;
+  department?: string;
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Church, Member, Language } from '../../types';
 import { deleteMember, updateMemberNotes, getMemberAttendanceHistory } from '../../utils/storage';
 import { DigitalIdCard } from '../DigitalIdCard';
@@ -179,6 +179,34 @@ export const AdminMembers: React.FC<AdminMembersProps> = ({
   const [pastoralNoteText, setPastoralNoteText] = useState<string>('');
   const [isSavingNote, setIsSavingNote] = useState<boolean>(false);
   const [noteSaveSuccess, setNoteSaveSuccess] = useState<boolean>(false);
+
+  useEffect(() => {
+    const byId = new Map(members.map((m) => [m.id, m]));
+    if (memberToDelete && !byId.has(memberToDelete.id)) {
+      setMemberToDelete(null);
+    }
+    if (editingMember && !byId.has(editingMember.id)) {
+      setEditingMember(null);
+    }
+    if (notingMember && !byId.has(notingMember.id)) {
+      setNotingMember(null);
+    }
+    if (roleChangingMember && !byId.has(roleChangingMember.id)) {
+      setRoleChangingMember(null);
+    }
+    if (printingMember && !byId.has(printingMember.id)) {
+      setPrintingMember(null);
+      setIsPrintModalOpen(false);
+    }
+    if (viewingMember) {
+      const fresh = byId.get(viewingMember.id);
+      if (!fresh) {
+        setViewingMember(null);
+      } else if (fresh !== viewingMember && JSON.stringify(fresh) !== JSON.stringify(viewingMember)) {
+        setViewingMember(fresh);
+      }
+    }
+  }, [members, memberToDelete, editingMember, notingMember, roleChangingMember, printingMember, viewingMember]);
 
   const handleOpenPastoralNotes = (member: Member) => {
     setNotingMember(member);

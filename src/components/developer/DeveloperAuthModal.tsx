@@ -23,6 +23,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { OmniChurchLogo } from '../common/OmniChurchLogo';
 
 interface DeveloperAuthModalProps {
   isOpen: boolean;
@@ -134,14 +135,14 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
         await recordSuccessfulMasterAuth();
         setIsChecking(false);
         toast.success(
-          isEs ? 'Acceso Autorizado' : isEn ? 'Access Granted' : isFr ? 'Accès Autorisé' : 'Aksè Devlopè Otorize ✓',
+          isEs ? 'Acceso Autorizado' : isEn ? 'Access Granted' : isFr ? 'Accès Autorisé' : 'Aksè Otorize ✓',
           isEs
-            ? 'Bienvenido al Developer Engine Panel.'
+            ? 'Bienvenido al Panel de Administración General.'
             : isEn
-            ? 'Welcome to the Developer Engine Panel.'
+            ? 'Welcome to the System Administration Panel.'
             : isFr
-            ? 'Bienvenue dans le Developer Engine Panel.'
-            : 'Byenvini nan Panèl Devlopè Engine lan.'
+            ? 'Bienvenue dans le Panneau d’Administration Générale.'
+            : 'Byenvini nan Panèl Administrasyon Jeneral la.'
         );
         onSuccess();
       } else {
@@ -166,10 +167,10 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
             isEs
               ? `Clave incorrecta. ${attemptsLeft > 0 ? `Quedan ${attemptsLeft} intentos antes del bloqueo.` : 'Acceso denegado.'}`
               : isEn
-              ? `Incorrect password. ${attemptsLeft > 0 ? `${attemptsLeft} attempts remaining before lockout.` : 'Access denied.'}`
+              ? `Incorrect security code. ${attemptsLeft > 0 ? `${attemptsLeft} attempts remaining before lockout.` : 'Access denied.'}`
               : isFr
-              ? `Mot de passe incorrect. ${attemptsLeft > 0 ? `${attemptsLeft} tentatives restantes avant blocage.` : 'Accès refusé.'}`
-              : `Modpas sa a pa kòrèk. ${attemptsLeft > 0 ? `Rete sèlman ${attemptsLeft} tantativ anvan sistèm nan bloke.` : 'Aksè refize.'}`
+              ? `Code incorrect. ${attemptsLeft > 0 ? `${attemptsLeft} tentatives restantes avant blocage.` : 'Accès refusé.'}`
+              : `Kòd sekirite a pa kòrèk. ${attemptsLeft > 0 ? `Rete sèlman ${attemptsLeft} tantativ anvan sistèm nan bloke.` : 'Aksè refize.'}`
           );
         }
         setTimeout(() => setShake(false), 600);
@@ -178,7 +179,7 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md overflow-y-auto">
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 15 }}
         animate={{
@@ -188,40 +189,58 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
           x: shake ? [-8, 8, -6, 6, -3, 3, 0] : 0,
         }}
         transition={{ duration: 0.25 }}
-        className="w-full max-w-sm rounded-3xl bg-[#0B1120] border border-amber-500/40 p-6 text-white shadow-2xl shadow-amber-500/10 relative overflow-hidden"
+        className="w-full max-w-sm rounded-3xl bg-[#0B1120] border border-amber-500/40 p-6 sm:p-7 text-white shadow-2xl shadow-amber-500/15 relative overflow-hidden my-auto"
       >
         {/* Top Glow Bar */}
-        <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 via-emerald-400 to-amber-500" />
+        <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-amber-500 via-emerald-400 to-amber-500" />
 
         {/* Close Button */}
         <button
           type="button"
           onClick={onClose}
-          className="absolute top-4 right-4 p-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          className="absolute top-4 right-4 p-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
         >
           <X className="w-5 h-5" />
         </button>
 
         {/* Header */}
         <div className="text-center space-y-2 mb-5">
-          <div className="mx-auto w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner">
-            <Cpu className="w-7 h-7" />
+          <div className="flex justify-center">
+            <OmniChurchLogo
+              variant="full"
+              priority
+              className="h-20 sm:h-24 w-auto"
+            />
           </div>
-          <div className="flex items-center justify-center gap-1.5 text-[10px] font-mono font-bold text-amber-400 uppercase tracking-widest">
-            <Terminal className="w-3.5 h-3.5" />
-            <span>Developer Engine Gate</span>
+          <div className="flex items-center justify-center gap-1.5 text-[11px] font-semibold text-amber-400 uppercase tracking-wider">
+            <KeyRound className="w-3.5 h-3.5" />
+            <span>
+              {isEs
+                ? 'Portal de Administración General'
+                : isEn
+                ? 'System Administration Portal'
+                : isFr
+                ? 'Portail d’Administration Générale'
+                : 'Pòtay Administrasyon Jeneral'}
+            </span>
           </div>
           <h3 className="text-xl font-black text-white tracking-tight">
-            {isEs ? 'Acceso Ultra Seguro' : isEn ? 'Secure Developer Gate' : isFr ? 'Portail Sécurisé' : 'Aksè Devlopè Ultra Sekirize'}
+            {isEs
+              ? 'Centro de Gestión del Sistema'
+              : isEn
+              ? 'System Management Center'
+              : isFr
+              ? 'Centre de Gestion du Système'
+              : 'Sant Administrasyon Sistèm'}
           </h3>
           <p className="text-xs text-slate-400 leading-relaxed">
             {isEs
-              ? 'Ingrese la clave maestra o PIN para autenticar su sesión de desarrollo.'
+              ? 'Ingrese su código de seguridad o contraseña principal para abrir el panel de administración.'
               : isEn
-              ? 'Enter master password or PIN to authenticate developer session.'
+              ? 'Enter your master security code or password to open the administration panel.'
               : isFr
-              ? 'Saisissez le mot de passe maître pour authentifier la session développeur.'
-              : 'Antre modpas mèt la oswa PIN sekirite pou debloke panèl devlopè a.'}
+              ? 'Saisissez votre code de sécurité ou mot de passe principal pour ouvrir le panneau.'
+              : 'Antre kòd sekirite oswa modpas administrasyon an pou ouvri panèl jeneral la.'}
           </p>
         </div>
 
@@ -231,7 +250,7 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
             <ShieldAlert className="w-6 h-6 text-rose-400 shrink-0" />
             <div>
               <div className="font-extrabold text-rose-300">
-                {isEs ? 'Sistema Bloqueado por Seguridad' : isEn ? 'System Locked for Security' : isFr ? 'Système Bloqué' : 'Sistèm Bloke pou Sekirite'}
+                {isEs ? 'Acceso Temporalmente Protegido' : isEn ? 'Access Temporarily Locked' : isFr ? 'Accès Temporairement Verrouillé' : 'Aksè Bloke pou Sekirite'}
               </div>
               <div className="text-[11px] text-rose-300/90 font-mono mt-0.5 flex items-center gap-1">
                 <Clock className="w-3 h-3 text-rose-400" />
@@ -260,16 +279,24 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleVerify();
             }}
-            placeholder={isEs ? 'Contraseña o PIN' : isEn ? 'Password or PIN' : isFr ? 'Mot de passe ou PIN' : 'Modpas oswa PIN'}
-            className="w-full py-3 pl-4 pr-20 rounded-2xl bg-slate-900/90 border border-slate-700 text-white font-mono text-base tracking-wider focus:outline-none focus:border-amber-400 transition-all placeholder:text-slate-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            placeholder={
+              isEs
+                ? 'Código de seguridad o contraseña'
+                : isEn
+                ? 'Security code or password'
+                : isFr
+                ? 'Code de sécurité ou mot de passe'
+                : 'Kòd sekirite oswa modpas'
+            }
+            className="w-full py-3.5 pl-4 pr-20 rounded-2xl bg-slate-900/95 border border-slate-700/90 text-white font-semibold text-base tracking-wide focus:outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-400/20 transition-all placeholder:text-slate-500 placeholder:font-normal disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
             <button
               type="button"
               onClick={() => setShowPassword((prev) => !prev)}
               tabIndex={-1}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-              title={showPassword ? 'Kache modpas' : 'Montre modpas'}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              title={showPassword ? 'Kache kòd la' : 'Montre kòd la'}
             >
               {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
@@ -278,7 +305,7 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
                 type="button"
                 onClick={handleClear}
                 tabIndex={-1}
-                className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-slate-800 transition-colors"
+                className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-slate-800 transition-colors cursor-pointer"
                 title="Efase tout"
               >
                 <X className="w-4 h-4" />
@@ -304,10 +331,10 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
           >
             {showKeypad
               ? (isEs ? 'Ocultar teclado numérico' : isEn ? 'Hide numeric keypad' : isFr ? 'Masquer le pavé' : 'Kache klavye nimerik')
-              : (isEs ? 'Mostrar teclado numérico' : isEn ? 'Show numeric keypad' : isFr ? 'Afficher le pavé' : 'Sèvi ak klavye nimerik pou PIN')}
+              : (isEs ? 'Mostrar teclado numérico' : isEn ? 'Show numeric keypad' : isFr ? 'Afficher le pavé' : 'Sèvi ak klavye nimerik')}
           </button>
-          <span className="font-mono text-[10px] text-slate-500">
-            SHA-256 Protected
+          <span className="text-[10px] text-slate-400 font-medium">
+            {isEs ? 'Protección Activa' : isEn ? 'Security Active' : isFr ? 'Protection Active' : 'Pwoteksyon Aktif'}
           </span>
         </div>
 
@@ -357,23 +384,23 @@ export const DeveloperAuthModal: React.FC<DeveloperAuthModalProps> = ({
             ) : (
               <>
                 <Unlock className="w-4 h-4" />
-                <span>{isEs ? 'Desbloquear Panel' : isEn ? 'Unlock Panel' : isFr ? 'Déverrouiller' : 'Debloke Panèl'}</span>
+                <span>{isEs ? 'Abrir Panel' : isEn ? 'Open Panel' : isFr ? 'Ouvrir le Panneau' : 'Ouvri Panèl la'}</span>
               </>
             )}
           </button>
         </div>
 
         {/* Security Note */}
-        <div className="mt-3 text-center flex items-center justify-center gap-1.5 text-slate-500">
-          <Shield className="w-3 h-3 text-amber-500/60" />
-          <span className="text-[10px] font-mono tracking-wider">
+        <div className="mt-3 text-center flex items-center justify-center gap-1.5 text-slate-400">
+          <Shield className="w-3.5 h-3.5 text-amber-500/70" />
+          <span className="text-[10px] font-medium tracking-wide">
             {isEs
-              ? 'Área Protegida • Bloqueo Automático contra Fuerza Bruta'
+              ? 'Acceso Exclusivo • Cuenta Independiente de Iglesias'
               : isEn
-              ? 'Protected Area • Anti-Brute-Force Lockout Active'
+              ? 'Exclusive Access • Isolated from Church Accounts'
               : isFr
-              ? 'Zone Protégée • Verrouillage Anti-Force Brute'
-              : 'Espas Pwoteje • Pwoteksyon Fòs Brital Aktif'}
+              ? 'Accès Exclusif • Compte Isolé des Églises'
+              : 'Espas Rezève • Kont Endepandan de Tout Legliz'}
           </span>
         </div>
       </motion.div>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Church, ServiceSession, ServiceCategory, Language, Member } from '../../types';
 import {
   addServiceSession,
@@ -8,6 +8,7 @@ import {
   sendServiceReminderNotification,
   isServiceEnded,
   permanentlyEndService,
+  formatLocalDateYmd,
 } from '../../utils/storage';
 import { SERVICE_CATEGORIES } from '../../utils/i18n';
 import { useToast } from '../../context/ToastContext';
@@ -33,12 +34,28 @@ import {
   BarChart3,
   StopCircle,
   RefreshCw,
+  Image as ImageIcon,
+  Upload,
+  Globe,
+  ShieldCheck,
+  AlertCircle,
 } from 'lucide-react';
+import { optimizeImageFile } from '../../utils/imageOptimizer';
+import { resolveServiceThumbnailUrl, formatServiceTimeAmPm } from '../../utils/memberFeedUtils';
+import {
+  isServiceCurrentlyActive,
+  isServiceBeforeStart,
+  isDeaconAuthorOfRecord,
+} from '../../utils/permissions';
+import { auth } from '../../lib/firebase';
+import { firestoreGetChurchMembersList } from '../../services/firestoreService';
 
 interface AdminServicesProps {
   church: Church;
   services: ServiceSession[];
   members?: Member[];
+  currentMember?: Member | null;
+  isDeaconMode?: boolean;
   onServicesChange?: () => void;
   onServicesUpdated?: () => void;
   onOpenScanner?: () => void;
@@ -51,6 +68,8 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
   church,
   services,
   members = [],
+  currentMember = null,
+  isDeaconMode = false,
   onServicesChange,
   onServicesUpdated,
   onOpenScanner,
@@ -81,7 +100,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
   const [editingService, setEditingService] = useState<ServiceSession | null>(null);
   const [category, setCategory] = useState<ServiceCategory>('dominical');
   const [title, setTitle] = useState<string>('');
-  const [date, setDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState<string>(formatLocalDateYmd());
   const [startTime, setStartTime] = useState<string>('08:30');
   const [endTime, setEndTime] = useState<string>('11:30');
   const [lateToleranceMinutes, setLateToleranceMinutes] = useState<number>(15);
@@ -93,9 +112,87 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
   const [theme, setTheme] = useState<string>('');
   const [passage, setPassage] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
-  const [isOpenForAttendance, setIsOpenForAttendance] = useState<boolean>(true);
+  const [posterImageUrl, setPosterImageUrl] = useState<string>('');
+  const [isCompressingPoster, setIsCompressingPoster] = useState<boolean>(false);
+  const [isOpenForAttendance, setIsOpenForAttendance] = useState<boolean>(
+    () =>
+      !isServiceEnded({ date: formatLocalDateYmd(), startTime: '08:30', endTime: '11:30' }) &&
+      !isServiceBeforeStart({ date: formatLocalDateYmd(), startTime: '08:30' })
+  );
   const [sendReminder24h, setSendReminder24h] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [deaconRosterOptions, setDeaconRosterOptions] = useState<Member[]>([]);
+
+  const authUid = auth.currentUser?.uid || null;
+  const rosterMembers =
+    members.length > 1 ? members : deaconRosterOptions.length > 0 ? deaconRosterOptions : members;
+
+  const canDeleteServiceItem = (srv: ServiceSession): boolean =>
+    !isDeaconMode ||
+    (isDeaconAuthorOfRecord(currentMember, srv, authUid) &&
+      !isServiceEnded(srv) &&
+      !srv.isPermanentlyEnded);
+
+  useEffect(() => {
+    if (!isDeaconMode || !church?.id || members.length > 1) return;
+    let cancelled = false;
+    firestoreGetChurchMembersList(church.id)
+      .then((fetched) => {
+        if (!cancelled && Array.isArray(fetched) && fetched.length > 0) {
+          setDeaconRosterOptions(fetched);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isDeaconMode, church?.id, members.length]);
+
+  const isFormScheduleAlreadyEnded = Boolean(
+    date &&
+      startTime &&
+      endTime &&
+      endTime > startTime &&
+      isServiceEnded({
+        date,
+        startTime,
+        endTime,
+        isOpenForAttendance: false,
+        isPermanentlyEnded: false,
+      })
+  );
+
+  const isFormScheduleBeforeStart = Boolean(
+    !isFormScheduleAlreadyEnded &&
+      date &&
+      startTime &&
+      isServiceBeforeStart({
+        date,
+        startTime,
+      })
+  );
+
+  const isFormOpenAttendanceBlocked = isFormScheduleAlreadyEnded || isFormScheduleBeforeStart;
+
+  useEffect(() => {
+    if (isFormOpenAttendanceBlocked && isOpenForAttendance) {
+      setIsOpenForAttendance(false);
+    }
+  }, [isFormOpenAttendanceBlocked, isOpenForAttendance]);
+
+  useEffect(() => {
+    const activeIds = new Set(services.map((s) => s.id));
+    if (serviceToDelete && !activeIds.has(serviceToDelete.id)) {
+      setServiceToDelete(null);
+    }
+    if (serviceToEndPermanently && !activeIds.has(serviceToEndPermanently.id)) {
+      setServiceToEndPermanently(null);
+    }
+    if (editingService && !activeIds.has(editingService.id)) {
+      setEditingService(null);
+      setIsModalOpen(false);
+    }
+  }, [services, serviceToDelete, serviceToEndPermanently, editingService]);
 
   const handleRefreshServices = () => {
     setIsRefreshing(true);
@@ -116,12 +213,22 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
   };
 
   const handleOpenCreate = () => {
+    const todayLocal = formatLocalDateYmd();
+    const defaultStart = '08:30';
+    const defaultEnd = '11:30';
+    const defaultSlotAlreadyEnded = isServiceEnded({
+      date: todayLocal,
+      startTime: defaultStart,
+      endTime: defaultEnd,
+      isOpenForAttendance: false,
+      isPermanentlyEnded: false,
+    });
     setEditingService(null);
     setCategory('dominical');
     setTitle('');
-    setDate(new Date().toISOString().split('T')[0]);
-    setStartTime('08:30');
-    setEndTime('11:30');
+    setDate(todayLocal);
+    setStartTime(defaultStart);
+    setEndTime(defaultEnd);
     setLateToleranceMinutes(15);
     setLeader('');
     setPreacher(church.pastor || '');
@@ -131,9 +238,51 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
     setTheme('');
     setPassage('');
     setNotes('');
-    setIsOpenForAttendance(true);
-    setSendReminder24h(true);
+    setPosterImageUrl('');
+    setIsOpenForAttendance(!defaultSlotAlreadyEnded);
+    setSendReminder24h(!defaultSlotAlreadyEnded);
     setIsModalOpen(true);
+  };
+
+  const handleServicePosterUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error(
+        isEs ? 'Archivo muy grande' : isFr ? 'Fichier trop volumineux' : isEn ? 'File too large' : 'Fichye a twò gwo',
+        isEs ? 'El tamaño máximo es de 10 MB.' : isFr ? 'La taille maximale est de 10 Mo.' : isEn ? 'Max size is 10 MB.' : 'Gwosè maksimòm se 10 MB.'
+      );
+      return;
+    }
+    try {
+      setIsCompressingPoster(true);
+      let optimized = await optimizeImageFile(file, {
+        maxWidth: 1080,
+        maxHeight: 1080,
+        quality: 0.8,
+        format: 'image/webp',
+      });
+      if (optimized.length > 550000) {
+        optimized = await optimizeImageFile(file, {
+          maxWidth: 800,
+          maxHeight: 800,
+          quality: 0.65,
+          format: 'image/webp',
+        });
+      }
+      setPosterImageUrl(optimized);
+      toast.success(
+        isEs ? '¡Miniatura cargada!' : isFr ? 'Miniature chargée !' : isEn ? 'Thumbnail uploaded!' : 'Minyati Sèvis Chaje!',
+        isEs ? 'La miniatura del servicio se optimizó correctamente.' : isFr ? 'La miniature du culte a été optimisée.' : isEn ? 'Service thumbnail optimized.' : 'Minyati sèvis la optimize avèk siksè.'
+      );
+    } catch {
+      toast.error(
+        isEs ? 'Error al procesar imagen' : isFr ? 'Erreur de traitement' : isEn ? 'Image processing error' : 'Erè nan trete imaj la',
+        isEs ? 'No se pudo cargar la miniatura.' : 'Pa t kapab chaje minyati a.'
+      );
+    } finally {
+      setIsCompressingPoster(false);
+    }
   };
 
   const handleOpenEdit = (service: ServiceSession) => {
@@ -167,6 +316,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
     setTheme(service.theme || '');
     setPassage(service.passage || '');
     setNotes(service.notes || '');
+    setPosterImageUrl(resolveServiceThumbnailUrl(service) || '');
     setIsOpenForAttendance(service.isOpenForAttendance);
     setSendReminder24h(service.sendReminder24h ?? false);
     setIsModalOpen(true);
@@ -192,15 +342,38 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
       return;
     }
 
+    if (!srv.isOpenForAttendance && isServiceBeforeStart(srv)) {
+      const startLabel = formatServiceTimeAmPm(srv.startTime);
+      toast.error(
+        isEs
+          ? 'Servicio Aún No Inicia'
+          : isEn
+          ? 'Service Has Not Started Yet'
+          : isFr
+          ? 'Culte Pas Encore Commencé'
+          : 'Sèvis la Poko Kòmanse',
+        isEs
+          ? `Este servicio inicia a las ${startLabel}. No se puede activar ni verificar asistencia antes de la hora del servicio.`
+          : isEn
+          ? `This service starts at ${startLabel}. Attendance cannot be activated or verified before the scheduled start time.`
+          : isFr
+          ? `Ce culte commence à ${startLabel}. L’activation et la vérification des présences sont bloquées avant l’heure du service.`
+          : `Sèvis sa a ap kòmanse a ${startLabel}. Ou pa kapab aktive oswa verifye okenn prezans anvan lè sèvis la!`
+      );
+      return;
+    }
+
     const ok = setServiceActiveStatus(church.id, srv.id, !srv.isOpenForAttendance);
     if (!ok) {
       toast.error(
-        isEs ? 'No se puede reabrir' : isEn ? 'Cannot Reopen' : isFr ? 'Impossible de rouvrir' : 'Pa kapab reouvri',
+        isEs ? 'No se puede abrir' : isEn ? 'Cannot Open' : isFr ? 'Impossible d’ouvrir' : 'Pa kapab louvri',
         isEs
-          ? '¡Este servicio ha finalizado y ya pasó. No se puede volver a abrir!'
+          ? 'Este servicio ya finalizó o aún no alcanza su hora de inicio.'
           : isEn
-          ? 'This service has ended and passed. It cannot be reopened!'
-          : 'Kilt sa a fin ekoule epi li pase. Li pa kapab reouvri ankò!'
+          ? 'This service has ended or has not reached its scheduled start time yet.'
+          : isFr
+          ? 'Ce culte est terminé ou n’a pas encore atteint son heure de début.'
+          : 'Sèvis sa a deja fini oswa poko rive nan lè kòmansman li.'
       );
       return;
     }
@@ -262,6 +435,19 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
   };
 
   const handleDelete = (service: ServiceSession) => {
+    if (!canDeleteServiceItem(service)) {
+      toast.warning(
+        isEs ? 'Acción Restringida' : isEn ? 'Restricted Action' : isFr ? 'Action Restreinte' : 'Aksyon Limite',
+        isEs
+          ? 'Como Diácono, solo puede eliminar servicios activos que usted mismo haya creado.'
+          : isEn
+          ? 'As a Deacon, you can only delete active services that you created yourself.'
+          : isFr
+          ? 'En tant que Diacre, vous ne pouvez supprimer que les cultes actifs que vous avez créés.'
+          : 'Kòm Dyak, ou kapab efase sèlman sèvis aktif ou menm te kreye yo.'
+      );
+      return;
+    }
     setServiceToDelete(service);
   };
 
@@ -308,6 +494,58 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
       return;
     }
 
+    const scheduleAlreadyEnded = isServiceEnded({
+      date,
+      startTime,
+      endTime,
+      isOpenForAttendance: false,
+      isPermanentlyEnded: false,
+    });
+    const scheduleBeforeStart = !scheduleAlreadyEnded && isServiceBeforeStart({ date, startTime });
+    const effectiveIsOpenForAttendance = (scheduleAlreadyEnded || scheduleBeforeStart) ? false : isOpenForAttendance;
+    const effectiveSendReminder24h = scheduleAlreadyEnded ? false : sendReminder24h;
+
+    if (scheduleAlreadyEnded && isOpenForAttendance) {
+      toast.error(
+        isEs
+          ? 'Horario Ya Finalizado'
+          : isEn
+          ? 'Schedule Already Passed'
+          : isFr
+          ? 'Horaire Déjà Passé'
+          : 'Lè Finisman Deja Pase',
+        isEs
+          ? 'No se puede abrir para asistencia un servicio cuya fecha u hora de fin ya pasó. Ajuste la fecha/hora o desmarque la apertura.'
+          : isEn
+          ? 'Cannot open attendance for a service whose date or end time has already passed. Adjust the schedule or uncheck open attendance.'
+          : isFr
+          ? 'Impossible d’ouvrir les présences pour un service dont la date ou l’heure de fin est déjà passée. Modifiez l’horaire ou décochez l’ouverture.'
+          : 'Ou pa kapab kreye oswa louvri pou prezans yon sèvis ki gen dat oswa lè finisman ki deja pase. Ajiste dat/lè a oswa dekoche opsyon ouvèti a.'
+      );
+      return;
+    }
+
+    if (scheduleBeforeStart && isOpenForAttendance) {
+      const startLabel = formatServiceTimeAmPm(startTime);
+      toast.error(
+        isEs
+          ? 'Horario Futuro'
+          : isEn
+          ? 'Service Has Not Started'
+          : isFr
+          ? 'Horaire Futur'
+          : 'Lè Sèvis la Poko Rive',
+        isEs
+          ? `Este servicio inicia a las ${startLabel}. No se puede activar el escaneo antes de la hora programada.`
+          : isEn
+          ? `This service starts at ${startLabel}. Attendance scanning cannot be activated before the scheduled start time.`
+          : isFr
+          ? `Ce culte commence à ${startLabel}. Le scan de présence ne peut pas être activé avant l’heure prévue.`
+          : `Sèvis sa a ap kòmanse a ${startLabel}. Ou pa kapab aktive eskanè prezans lan anvan lè kòmansman sèvis la.`
+      );
+      return;
+    }
+
     const finalLeader = leader.trim();
     const finalPreacher = preacher.trim();
     const finalReader = reader.trim();
@@ -332,6 +570,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
         return;
       }
 
+      const cleanPoster = posterImageUrl.trim() || null;
       updateServiceSession(church.id, editingService.id, {
         category,
         title: title.trim(),
@@ -348,11 +587,14 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
         theme: theme.trim() || undefined,
         passage: passage.trim() || undefined,
         notes: notes.trim() || undefined,
-        isOpenForAttendance,
-        sendReminder24h,
+        posterUrl: cleanPoster,
+        imageUrl: cleanPoster,
+        isOpenForAttendance: effectiveIsOpenForAttendance,
+        sendReminder24h: effectiveSendReminder24h,
+        updatedBy: currentMember?.id || currentMember?.memberId || authUid || undefined,
       });
 
-      if (sendReminder24h && !editingService.sendReminder24h) {
+      if (effectiveSendReminder24h && !editingService.sendReminder24h) {
         sendServiceReminderNotification(church, {
           ...editingService,
           category,
@@ -379,6 +621,11 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
       return;
     }
 
+    const initialReminderSentAt = effectiveSendReminder24h ? new Date().toISOString() : undefined;
+    const cleanPoster = posterImageUrl.trim() || null;
+    const deaconAuthorName = currentMember
+      ? `${currentMember.titlePrefix ? `${currentMember.titlePrefix} ` : ''}${currentMember.fullName}`.trim()
+      : undefined;
     const createdService = addServiceSession(church.id, {
       category,
       title: title.trim(),
@@ -395,11 +642,22 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
       theme: theme.trim() || undefined,
       passage: passage.trim() || undefined,
       notes: notes.trim() || undefined,
-      isOpenForAttendance,
-      sendReminder24h,
+      ...(cleanPoster ? { posterUrl: cleanPoster, imageUrl: cleanPoster } : {}),
+      ...(isDeaconMode || authUid
+        ? {
+            authorId: authUid || currentMember?.id || undefined,
+            ...(deaconAuthorName ? { authorName: deaconAuthorName } : {}),
+            ...(currentMember?.id || currentMember?.memberId
+              ? { createdBy: currentMember?.id || currentMember?.memberId }
+              : {}),
+          }
+        : {}),
+      isOpenForAttendance: effectiveIsOpenForAttendance,
+      sendReminder24h: effectiveSendReminder24h,
+      ...(initialReminderSentAt ? { reminderSentAt: initialReminderSentAt } : {}),
     });
 
-    if (sendReminder24h) {
+    if (effectiveSendReminder24h) {
       sendServiceReminderNotification(church, createdService);
     }
 
@@ -432,6 +690,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
     setTheme('');
     setPassage('');
     setNotes('');
+    setPosterImageUrl('');
     setSendReminder24h(true);
   };
 
@@ -440,13 +699,22 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
       {/* HEADER */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
               {isEs ? 'Servicios & Cultos de la Iglesia (6 Secciones)' : isEn ? 'Church Services & Worship (6 Sections)' : isFr ? 'Services & Cultes de l’Église (6 Sections)' : 'Sèvis & Kilt Legliz la (6 Seksyon)'}
             </h2>
             <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-bold font-mono">
               {services.length} {isEs ? 'Sesiones' : isEn ? 'Sessions' : isFr ? 'Sessions' : 'Sesyon'}
             </span>
+            {isDeaconMode && (
+              <span
+                id="deacon-services-role-badge"
+                className="px-2.5 py-0.5 rounded-full bg-amber-500/15 border border-amber-400/40 text-amber-300 text-xs font-bold inline-flex items-center gap-1"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                {isEs ? 'Diácono / Diaconisa' : isEn ? 'Deacon Ministry' : isFr ? 'Diacre / Diaconesse' : 'Dyak / Dyakonès'}
+              </span>
+            )}
           </div>
           <p className="text-xs sm:text-sm text-slate-400">
             {isEs
@@ -505,6 +773,24 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
         </div>
       </div>
 
+      {isDeaconMode && !authUid && (
+        <div
+          id="deacon-services-cloud-sync-banner"
+          className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/35 flex items-start gap-2.5 text-xs text-amber-200"
+        >
+          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <p className="leading-relaxed">
+            {isEs
+              ? 'Para que los servicios creados como Diácono se sincronicen en tiempo real en los teléfonos de todos los miembros, vincule su cuenta de Google desde "Mi Perfil".'
+              : isEn
+              ? 'To sync services you create as a Deacon directly to all members’ phones in real time, link your Google account in "My Profile".'
+              : isFr
+              ? 'Pour synchroniser en temps réel les cultes créés en tant que Diacre vers tous les membres, reliez votre compte Google dans "Mon Profil".'
+              : 'Pou sèvis ou kreye kòm Dyak yo senkronize an tan reyèl nan nwaj la pou tout manm yo wè yo, konekte kont Google ou nan "Profil Mwen".'}
+          </p>
+        </div>
+      )}
+
       {/* 6 SECTION FILTER PILLS */}
       <div className="flex items-center gap-2 overflow-x-auto pb-2">
         <button
@@ -547,12 +833,14 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
           const catConfig = SERVICE_CATEGORIES[srv.category];
           const catName = catConfig ? (isEs ? catConfig.name.es : isEn ? (catConfig.name as any).en || catConfig.name.ht : isFr ? (catConfig.name as any).fr || catConfig.name.ht : catConfig.name.ht) : srv.category;
           const ended = isServiceEnded(srv) || srv.isPermanentlyEnded;
+          const liveNow = isServiceCurrentlyActive(srv, isServiceEnded);
+          const beforeStart = !ended && isServiceBeforeStart(srv);
           return (
             <div
               key={srv.id}
               id={`admin-service-card-${srv.id}`}
               className={`p-5 rounded-2xl bg-[#1E293B] border transition-all flex flex-col justify-between ${
-                srv.isOpenForAttendance
+                liveNow
                   ? 'border-emerald-500/80 shadow-md ring-1 ring-emerald-500/50 bg-gradient-to-br from-[#1E293B] to-emerald-950/20'
                   : 'border-slate-700/80 shadow-sm hover:border-slate-600'
               }`}
@@ -570,10 +858,21 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                         <Lock className="w-3 h-3 text-slate-400" />
                         {isEs ? 'CULTO FINALIZADO' : isEn ? 'SERVICE ENDED' : isFr ? 'CULTE TERMINÉ' : 'SÈVIS FINI & PASE'}
                       </span>
-                    ) : srv.isOpenForAttendance ? (
+                    ) : liveNow ? (
                       <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-extrabold flex items-center gap-1">
                         <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
                         {isEs ? 'ACTIVO PARA ESCANEO' : isEn ? 'ACTIVE FOR SCAN' : isFr ? 'ACTIF POUR LE SCAN' : 'AKTIF POU SCAN'}
+                      </span>
+                    ) : beforeStart ? (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-bold flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-amber-400" />
+                        {isEs
+                          ? `INICIA ${formatServiceTimeAmPm(srv.startTime)}`
+                          : isEn
+                          ? `STARTS ${formatServiceTimeAmPm(srv.startTime)}`
+                          : isFr
+                          ? `DÉBUT ${formatServiceTimeAmPm(srv.startTime)}`
+                          : `KÒMANSE ${formatServiceTimeAmPm(srv.startTime)}`}
                       </span>
                     ) : null}
                     {srv.sendReminder24h && (
@@ -606,21 +905,39 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                         <Pencil className="w-4 h-4" />
                       </button>
                     )}
-                    <button
-                      type="button"
-                      id={`btn-delete-service-${srv.id}`}
-                      onClick={() => handleDelete(srv)}
-                      className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded-lg cursor-pointer transition-colors"
-                      title={isEs ? 'Eliminar Servicio' : isEn ? 'Delete Service' : isFr ? 'Supprimer le Service' : 'Efase Sèvis'}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {canDeleteServiceItem(srv) && (
+                      <button
+                        type="button"
+                        id={`btn-delete-service-${srv.id}`}
+                        onClick={() => handleDelete(srv)}
+                        className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 rounded-lg cursor-pointer transition-colors"
+                        title={isEs ? 'Eliminar Servicio' : isEn ? 'Delete Service' : isFr ? 'Supprimer le Service' : 'Efase Sèvis'}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
-                <h3 className="text-base font-bold text-white mb-2 leading-snug">
-                  {srv.title}
-                </h3>
+                {(() => {
+                  const thumbUrl = resolveServiceThumbnailUrl(srv);
+                  return (
+                    <div className="flex items-start gap-3 mb-2.5">
+                      {thumbUrl && (
+                        <div className="w-16 h-12 rounded-xl overflow-hidden border border-slate-700 bg-slate-950 shrink-0 shadow-sm flex items-center justify-center">
+                          <img
+                            src={thumbUrl}
+                            alt={srv.title}
+                            className="w-full h-full object-contain"
+                          />
+                        </div>
+                      )}
+                      <h3 className="text-base font-bold text-white leading-snug">
+                        {srv.title}
+                      </h3>
+                    </div>
+                  );
+                })()}
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-slate-300 mb-3">
                   <div className="flex items-center gap-1.5">
@@ -755,7 +1072,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                   </div>
                 )}
 
-                {!ended && srv.isOpenForAttendance && onOpenScanner && (
+                {!ended && liveNow && onOpenScanner && (
                   <button
                     type="button"
                     onClick={onOpenScanner}
@@ -953,7 +1270,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       <span>{isEs ? 'Director del Servicio' : isEn ? 'Service Leader' : isFr ? 'Dirigeant du Culte' : 'Dirijan Sèvis la'}</span>
                     </label>
                   </div>
-                  {members.length > 0 && (
+                  {rosterMembers.length > 0 && (
                     <select
                       id="select-quick-srv-leader"
                       onChange={(e) => {
@@ -965,7 +1282,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       className="w-full text-[11px] py-1 px-2 rounded-md bg-slate-950/80 border border-slate-700 text-amber-300 font-medium focus:ring-1 focus:ring-amber-400 focus:outline-none cursor-pointer mb-1"
                     >
                       <option value="">{isEs ? '⚡ Asignar Miembro Registrado...' : isFr ? '⚡ Assigner Membre Enregistré...' : isEn ? '⚡ Assign Registered Member...' : '⚡ Chwazi yon Manm ki anrejistre...'}</option>
-                      {members.map((m) => {
+                      {rosterMembers.map((m) => {
                         const formatted = `${m.titlePrefix ? `${m.titlePrefix} ` : ''}${m.fullName}`;
                         return (
                           <option key={`lead-${m.id}`} value={formatted}>
@@ -992,7 +1309,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       <span>{isEs ? 'Predicador' : isEn ? 'Preacher' : isFr ? 'Prédicateur' : 'Predikatè'}</span>
                     </label>
                   </div>
-                  {members.length > 0 && (
+                  {rosterMembers.length > 0 && (
                     <select
                       id="select-quick-srv-preacher"
                       onChange={(e) => {
@@ -1009,7 +1326,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                           ★ {church.pastor} (Pastor Titular)
                         </option>
                       )}
-                      {members.map((m) => {
+                      {rosterMembers.map((m) => {
                         const formatted = `${m.titlePrefix ? `${m.titlePrefix} ` : ''}${m.fullName}`;
                         return (
                           <option key={`preach-${m.id}`} value={formatted}>
@@ -1036,7 +1353,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       <span>{isEs ? 'Lector Bíblico' : isEn ? 'Bible Reader' : isFr ? 'Lecteur (Lecture)' : 'Lektè (Lekti Biblik)'}</span>
                     </label>
                   </div>
-                  {members.length > 0 && (
+                  {rosterMembers.length > 0 && (
                     <select
                       id="select-quick-srv-reader"
                       onChange={(e) => {
@@ -1048,7 +1365,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       className="w-full text-[11px] py-1 px-2 rounded-md bg-slate-950/80 border border-slate-700 text-cyan-300 font-medium focus:ring-1 focus:ring-cyan-400 focus:outline-none cursor-pointer mb-1"
                     >
                       <option value="">{isEs ? '⚡ Asignar Lector de la Palabra...' : isFr ? '⚡ Assigner Lecteur...' : isEn ? '⚡ Assign Scripture Reader...' : '⚡ Chwazi Lektè Pawòl la...'}</option>
-                      {members.map((m) => {
+                      {rosterMembers.map((m) => {
                         const formatted = `${m.titlePrefix ? `${m.titlePrefix} ` : ''}${m.fullName}`;
                         return (
                           <option key={`read-${m.id}`} value={formatted}>
@@ -1078,7 +1395,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       <span>{isEs ? 'Música, Coro y Alabanza' : isEn ? 'Musicians & Worship Team' : isFr ? 'Musiciens & Chorale' : 'Mizisyen, Koral & Louanj'}</span>
                     </label>
                   </div>
-                  {members.length > 0 && (
+                  {rosterMembers.length > 0 && (
                     <select
                       id="select-quick-srv-musicians"
                       onChange={(e) => {
@@ -1090,7 +1407,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       className="w-full text-[11px] py-1 px-2 rounded-md bg-slate-950/80 border border-slate-700 text-purple-300 font-medium focus:ring-1 focus:ring-purple-400 focus:outline-none cursor-pointer mb-1"
                     >
                       <option value="">{isEs ? '+ Agregar Músico / Corista...' : isFr ? '+ Ajouter Musicien / Choriste...' : isEn ? '+ Add Musician / Vocalist...' : '+ Ajoute Chantre / Mizisyen...'}</option>
-                      {members.map((m) => {
+                      {rosterMembers.map((m) => {
                         const formatted = `${m.titlePrefix ? `${m.titlePrefix} ` : ''}${m.fullName}`;
                         return (
                           <option key={`mus-${m.id}`} value={formatted}>
@@ -1117,7 +1434,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       <span>{isEs ? 'Protocolo y Bienvenida' : isEn ? 'Ushers & Hospitality Team' : isFr ? 'Accueil & Protocole' : 'Akèy & Pwotokòl'}</span>
                     </label>
                   </div>
-                  {members.length > 0 && (
+                  {rosterMembers.length > 0 && (
                     <select
                       id="select-quick-srv-ushers"
                       onChange={(e) => {
@@ -1129,7 +1446,7 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                       className="w-full text-[11px] py-1 px-2 rounded-md bg-slate-950/80 border border-slate-700 text-rose-300 font-medium focus:ring-1 focus:ring-rose-400 focus:outline-none cursor-pointer mb-1"
                     >
                       <option value="">{isEs ? '+ Agregar Protocolo / Diácono...' : isFr ? '+ Ajouter Protocole / Diacre...' : isEn ? '+ Add Usher / Deacon...' : '+ Ajoute Akèy / Dyak...'}</option>
-                      {members.map((m) => {
+                      {rosterMembers.map((m) => {
                         const formatted = `${m.titlePrefix ? `${m.titlePrefix} ` : ''}${m.fullName}`;
                         return (
                           <option key={`ush-${m.id}`} value={formatted}>
@@ -1180,6 +1497,71 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
                 </div>
               </div>
 
+              {/* Service Thumbnail / Poster Image (Optional) */}
+              <div className="p-3 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                    <ImageIcon className="w-4 h-4 text-amber-400" />
+                    <span>
+                      {isEs
+                        ? 'Miniatura / Póster del Servicio (Opcional)'
+                        : isFr
+                        ? 'Miniature / Affiche du Culte (Optionnel)'
+                        : isEn
+                        ? 'Service Thumbnail / Poster (Optional)'
+                        : 'Minyati / Postè Sèvis la (Opsyonèl)'}
+                    </span>
+                  </span>
+                  {posterImageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setPosterImageUrl('')}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 font-semibold cursor-pointer"
+                    >
+                      {isEs ? 'Quitar' : isFr ? 'Retirer' : isEn ? 'Remove' : 'Retire'}
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <label className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-dashed border-slate-700 hover:border-amber-400/60 bg-slate-950/80 cursor-pointer text-slate-300 hover:text-white transition-colors">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleServicePosterUpload}
+                      disabled={isCompressingPoster}
+                      className="hidden"
+                    />
+                    <Upload className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span className="text-[11px] font-medium truncate">
+                      {isCompressingPoster
+                        ? isEs ? 'Optimizando...' : isFr ? 'Optimisation...' : isEn ? 'Optimizing...' : 'Ap optimize...'
+                        : isEs ? 'Subir miniatura' : isFr ? 'Choisir une image' : isEn ? 'Upload thumbnail' : 'Chwazi foto minyati'}
+                    </span>
+                  </label>
+                  <div className="relative flex items-center">
+                    <Globe className="w-3.5 h-3.5 text-cyan-400 absolute left-2.5 pointer-events-none" />
+                    <input
+                      type="url"
+                      placeholder="https://... (URL imaj)"
+                      value={posterImageUrl}
+                      onChange={(e) => setPosterImageUrl(e.target.value)}
+                      className="w-full pl-8 pr-3 py-2 rounded-lg border border-slate-700 bg-slate-950 text-white placeholder:text-slate-500 focus:ring-1 focus:ring-amber-400 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {posterImageUrl && (
+                  <div className="rounded-xl overflow-hidden border border-slate-700 bg-slate-950 flex items-center justify-center">
+                    <img
+                      src={posterImageUrl}
+                      alt="Minyati Sèvis"
+                      className="w-full h-auto max-h-56 object-contain mx-auto block"
+                    />
+                  </div>
+                )}
+              </div>
+
               {/* 24h Reminder Notification Toggle */}
               <div className="p-3 bg-amber-500/10 rounded-xl border border-amber-500/30">
                 <label className="flex items-start gap-2.5 cursor-pointer">
@@ -1217,20 +1599,72 @@ export const AdminServices: React.FC<AdminServicesProps> = ({
               </div>
 
               {/* Open for Attendance Checkbox */}
-              <div className="p-3 bg-emerald-500/10 rounded-xl border border-emerald-500/30">
-                <label className="flex items-center gap-2 cursor-pointer">
+              <div
+                className={`p-3 rounded-xl border ${
+                  isFormOpenAttendanceBlocked
+                    ? 'bg-amber-500/10 border-amber-500/30'
+                    : 'bg-emerald-500/10 border-emerald-500/30'
+                }`}
+              >
+                <label
+                  className={`flex items-start gap-2.5 ${
+                    isFormOpenAttendanceBlocked ? 'cursor-not-allowed opacity-85' : 'cursor-pointer'
+                  }`}
+                >
                   <input
                     type="checkbox"
-                    checked={isOpenForAttendance}
+                    id="checkbox-open-service-attendance"
+                    checked={!isFormOpenAttendanceBlocked && isOpenForAttendance}
+                    disabled={isFormOpenAttendanceBlocked}
                     onChange={(e) => setIsOpenForAttendance(e.target.checked)}
-                    className="rounded text-amber-400 focus:ring-amber-400 bg-slate-900 border-slate-700"
+                    className="mt-0.5 rounded text-amber-400 focus:ring-amber-400 bg-slate-900 border-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
                   />
                   <div>
-                    <span className="font-bold text-emerald-300 block">
-                      {isEs ? 'Abrir este servicio inmediatamente para asistencia (Activo)' : isEn ? 'Open this service immediately for check-in (Active)' : isFr ? 'Ouvrir ce culte immédiatement pour l’enregistrement des présences (Actif)' : 'Louvri sèvis sa a imedyatman pou prezans (Aktif)'}
+                    <span
+                      className={`font-bold block ${
+                        isFormOpenAttendanceBlocked ? 'text-amber-300' : 'text-emerald-300'
+                      }`}
+                    >
+                      {isFormScheduleAlreadyEnded
+                        ? isEs
+                          ? 'Horario pasado — No se puede abrir para asistencia'
+                          : isEn
+                          ? 'Schedule already passed — Cannot open for attendance'
+                          : isFr
+                          ? 'Horaire dépassé — Ouverture des présences bloquée'
+                          : 'Dat oswa lè finisman an deja pase — Pa ka louvri pou prezans'
+                        : isFormScheduleBeforeStart
+                        ? isEs
+                          ? `Inicia a las ${formatServiceTimeAmPm(startTime)} — El escaneo se habilitará a la hora del servicio`
+                          : isEn
+                          ? `Starts at ${formatServiceTimeAmPm(startTime)} — Check-in cannot open before start time`
+                          : isFr
+                          ? `Début à ${formatServiceTimeAmPm(startTime)} — Le scan ouvrira à l’heure du service`
+                          : `Kòmanse a ${formatServiceTimeAmPm(startTime)} — Eskanè prezans pa ka aktive anvan lè sèvis la`
+                        : isEs
+                        ? 'Abrir este servicio inmediatamente para asistencia (Activo)'
+                        : isEn
+                        ? 'Open this service immediately for check-in (Active)'
+                        : isFr
+                        ? 'Ouvrir ce culte immédiatement pour l’enregistrement des présences (Actif)'
+                        : 'Louvri sèvis sa a imedyatman pou prezans (Aktif)'}
                     </span>
                     <span className="text-[11px] text-slate-400">
-                      {isEs ? 'El escáner QR se conectará automáticamente a esta sesión.' : isEn ? 'The QR scanner will connect automatically to this session.' : isFr ? 'Le scanner QR se connectera automatiquement à cette session.' : 'Scanner QR la ap konekte otomatikman sou sesyon sa a.'}
+                      {isFormScheduleAlreadyEnded
+                        ? isEs
+                          ? 'El servicio se guardará cerrado/archivado. Ajuste la fecha o la hora de fin al futuro para abrirlo.'
+                          : isEn
+                          ? 'This service will be saved as closed/archived. Choose a future date or end time to open attendance.'
+                          : isFr
+                          ? 'Ce service sera enregistré fermé/archivé. Choisissez une date ou heure de fin future pour ouvrir le pointage.'
+                          : 'Sèvis sa a ap anrejistre kòm fèmen/achive sèlman. Chwazi yon dat oswa lè finisman ki poko pase pou w kapab louvri l.'
+                        : isEs
+                        ? 'El escáner QR se conectará automáticamente a esta sesión.'
+                        : isEn
+                        ? 'The QR scanner will connect automatically to this session.'
+                        : isFr
+                        ? 'Le scanner QR se connectera automatiquement à cette session.'
+                        : 'Scanner QR la ap konekte otomatikman sou sesyon sa a.'}
                     </span>
                   </div>
                 </label>

@@ -12,6 +12,7 @@ import {
   DEFAULT_DEVELOPER_APP_UPDATE_CONFIG,
 } from '../utils/developerStorage';
 import { APP_BASE_VERSION } from '../version';
+import { openExternalUrlSafely } from '../utils/safeExternalLink';
 
 export interface AppVersionInfo {
   currentVersion: string;
@@ -378,6 +379,6 @@ export function verifyAndRestoreSessionIntegrity(): void {
 export function executeAppUpdateDownload(): void {
   preserveSessionBeforeUpdate();
   if (typeof window !== 'undefined') {
-    window.open(OFFICIAL_UPDATE_DOWNLOAD_URL, '_blank', 'noopener,noreferrer');
+    openExternalUrlSafely(OFFICIAL_UPDATE_DOWNLOAD_URL);
   }
 }

@@ -143,7 +143,13 @@ export const AdminChangeRoleModal: React.FC<AdminChangeRoleModalProps> = ({
         {
           id: 'dyak',
           name: isEs ? 'Diácono / Diaconisa' : isFr ? 'Diacre / Diaconesse' : isEn ? 'Deacon / Deaconess' : 'Dyak / Dyakonès',
-          desc: isEs ? 'Servicio ministerial, orden y apoyo' : isFr ? 'Service au sanctuaire, ordre et soutien' : isEn ? 'Sanctuary order and member care' : 'Òd nan tanp lan ak sèvis bay tout manm yo',
+          desc: isEs
+            ? 'Crea cultos y publica avisos para la iglesia sin acceso a datos de miembros ni ajustes'
+            : isFr
+            ? 'Crée les cultes et publie des annonces sans accès aux membres ni aux paramètres'
+            : isEn
+            ? 'Creates services & publishes announcements without member data or admin settings access'
+            : 'Kreye sèvis ak pibliye anons pou legliz la (san aksè sou done manm oswa paramèt admin)',
           icon: Briefcase,
           badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
           autoPrefix: isEs ? 'Diácono' : isFr ? 'Diacre' : isEn ? 'Deacon' : 'Dyak',
@@ -174,12 +180,12 @@ export const AdminChangeRoleModal: React.FC<AdminChangeRoleModalProps> = ({
         },
         {
           id: 'akey',
-          name: isEs ? 'Protocolo & Bienvenida (Ushers)' : isFr ? 'Accueil & Protocole' : isEn ? 'Ushers & Hospitality' : 'Akèy & Pwotokòl',
-          desc: isEs ? 'Recepción de miembros, acomodación y orden' : isFr ? 'Accueil des fidèles et protocole' : isEn ? 'Greeting, seating and sanctuary hospitality' : 'Resevwa moun nan pòt la, plase yo ak asire lòd',
+          name: isEs ? 'Recepción & Protocolo (Ushers)' : isFr ? 'Réception, Accueil & Protocole' : isEn ? 'Reception, Ushers & Hospitality' : 'Resepsyon & Akèy (Pwotokòl)',
+          desc: isEs ? 'Recepción de miembros, escaneo de asistencia en servicio activo y orden' : isFr ? 'Accueil des fidèles, scan de présence au culte actif et protocole' : isEn ? 'Greeting members and scanning active service attendance' : 'Resevwa manm yo ak eskane prezans pou sèvis ki an kou a',
           icon: HeartHandshake,
           badgeColor: 'bg-rose-400/20 text-rose-300 border-rose-400/40',
           autoPrefix: isEs ? 'Hno.' : isFr ? 'Fr.' : isEn ? 'Bro.' : 'Frè',
-          targetServiceRole: 'Akèy',
+          targetServiceRole: 'Resepsyon',
         },
         {
           id: 'jenes',
@@ -221,6 +227,7 @@ export const AdminChangeRoleModal: React.FC<AdminChangeRoleModalProps> = ({
         ...member,
         titlePrefix: cleanPrefix || undefined,
         role: cleanRole,
+        memberType: 'member',
         department: cleanDept,
       };
 
@@ -371,7 +378,17 @@ export const AdminChangeRoleModal: React.FC<AdminChangeRoleModalProps> = ({
                     const sRole = (selectedRole || '').toLowerCase();
                     const rName = (r.name || '').toLowerCase();
                     const rTarget = (r.targetServiceRole || '').toLowerCase();
-                    const isSelected = sRole === rName || (rTarget ? sRole.includes(rTarget) : false);
+                    const isReceptionMatch =
+                      r.id === 'akey' &&
+                      (sRole.includes('recep') ||
+                        sRole.includes('resep') ||
+                        sRole.includes('akèy') ||
+                        sRole.includes('akey') ||
+                        sRole.includes('accueil') ||
+                        sRole.includes('pwotok') ||
+                        sRole.includes('protoc') ||
+                        sRole.includes('usher'));
+                    const isSelected = sRole === rName || (rTarget ? sRole.includes(rTarget) : false) || isReceptionMatch;
                     const IconComp = r.icon;
                     return (
                       <button

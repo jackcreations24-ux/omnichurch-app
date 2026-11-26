@@ -86,9 +86,10 @@
     "vite": "^6.2.3"
   },
   "devDependencies": {
-    "@capacitor/assets": "^3.0.5",
     "@capacitor/android": "^8.5.1",
+    "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "^8.5.1",
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
     "@types/canvas-confetti": "^1.9.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
@@ -97,6 +98,7 @@
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.25.0",
+    "eslint": "^10.14.0",
     "react-is": "^19.3.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",

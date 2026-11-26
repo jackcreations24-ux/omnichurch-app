@@ -5,7 +5,6 @@ import {
   Check,
   CheckCheck,
   Trash2,
-  Filter,
   Search,
   ArrowLeft,
   Calendar,
@@ -14,18 +13,18 @@ import {
   Layers,
   Clock,
   ExternalLink,
+  ChevronLeft,
   ChevronRight,
-  Eye,
-  EyeOff,
   Radio,
-  Share2,
   X,
   AlertTriangle,
-  Info,
   MessageSquare,
   ShieldAlert,
   BadgeCheck,
-  Send,
+  MailOpen,
+  Mail,
+  BookOpen,
+  Type,
 } from 'lucide-react';
 import {
   Church,
@@ -44,9 +43,17 @@ import {
   markAllNotificationsAsRead,
   dismissNotification,
   clearAllNotifications,
+  syncNotificationReadStatesFromCloud,
+  getNotificationReadAt,
+  formatNotificationTimestamp,
+  getNotificationTextSizePreference,
+  saveNotificationTextSizePreference,
+  NotificationTextSize,
 } from '../../services/notificationCenterService';
 import { getAnnouncementsByChurch } from '../../utils/storage';
 import { hasActiveChurchLicense } from '../../utils/developerStorage';
+import { subscribeToMemberNotifications } from '../../services/firestoreService';
+import { PosterLightboxModal } from '../common/PosterLightboxModal';
 
 interface NotificationsPageProps {
   church: Church;
@@ -69,6 +76,7 @@ interface NotificationsPageProps {
 type NotificationCategoryFilter =
   | 'all'
   | 'unread'
+  | 'read'
   | 'official_alert'
   | 'announcement'
   | 'service_reminder'
@@ -92,18 +100,19 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [activeFilter, setActiveFilter] = useState<NotificationCategoryFilter>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  // Set cards ("tarjetas") as default view mode in notifications
   const [viewMode, setViewMode] = useState<'messages' | 'cards'>('cards');
-  const [selectedNotification, setSelectedNotification] = useState<AppNotification | null>(null);
+  const [selectedNotificationId, setSelectedNotificationId] = useState<string | null>(null);
+  const [textSize, setTextSize] = useState<NotificationTextSize>(() => getNotificationTextSizePreference());
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; title: string; caption?: string } | null>(null);
 
-  // Verification privilege: only churches with an active license receive verified status badge
   const isChurchLicensed = useMemo(() => hasActiveChurchLicense(church.id), [church.id]);
 
-  // Invisible Pull-to-Refresh State & Refs
+  // Pull-to-refresh gesture refs
   const containerRef = useRef<HTMLDivElement>(null);
-  const [pullDistance, setPullDistance] = useState<number>(0);
   const isDraggingRef = useRef<boolean>(false);
   const startYRef = useRef<number>(0);
+  const pullDeltaRef = useRef<number>(0);
   const isRefreshingRef = useRef<boolean>(false);
 
   const handleClose = onClose || onBack || (() => {});
@@ -111,62 +120,86 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
   const isEs = language === 'es';
   const isEn = language === 'en';
   const isFr = language === 'fr';
+  const resolvedLang: Language = (language as Language) || 'ht';
+  const memberKey = member?.id || member?.memberId;
 
-  // Load all notifications
-  const reloadNotifications = useCallback((overrideAnnouncements?: Announcement[]) => {
-    const freshAnnouncements = overrideAnnouncements || getAnnouncementsByChurch(church.id);
-    const effectiveAnnouncements = freshAnnouncements.length > 0 ? freshAnnouncements : announcements;
-    const list = getContextualNotifications({
-      church,
-      member,
-      announcements: effectiveAnnouncements,
-      services,
-      attendanceRecords,
-      language: (language as Language) || 'ht',
+  const showFeedback = useCallback((msg: string) => {
+    setFeedbackMessage(msg);
+  }, []);
+
+  useEffect(() => {
+    if (!feedbackMessage) return;
+    const timer = window.setTimeout(() => setFeedbackMessage(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [feedbackMessage]);
+
+  // Load all notifications (strictly excluded for admin)
+  const reloadNotifications = useCallback(
+    (overrideAnnouncements?: Announcement[]) => {
+      if (userRole === 'admin' || !member) {
+        setNotifications([]);
+        return;
+      }
+      const effectiveAnnouncements =
+        overrideAnnouncements && overrideAnnouncements.length > 0
+          ? overrideAnnouncements
+          : announcements.length > 0
+          ? announcements
+          : getAnnouncementsByChurch(church.id);
+
+      const list = getContextualNotifications({
+        church,
+        member,
+        userRole,
+        announcements: effectiveAnnouncements,
+        services,
+        attendanceRecords,
+        language: resolvedLang,
+      });
+      setNotifications(list);
+    },
+    [church, member, userRole, announcements, services, attendanceRecords, resolvedLang]
+  );
+
+  // Bidirectional real-time Firestore notifications listener (Web <-> Android parity)
+  useEffect(() => {
+    if (userRole === 'admin' || !member || !church?.id) return;
+    const unsub = subscribeToMemberNotifications(church.id, member, church, (fsNotifs) => {
+      syncNotificationReadStatesFromCloud(fsNotifs, church.id, member);
+      reloadNotifications();
     });
-    setNotifications(list);
-  }, [church, member, announcements, services, attendanceRecords, language]);
+    return () => unsub();
+  }, [church, member, userRole, reloadNotifications]);
 
-  // Invisible Pull-to-Refresh Trigger Action
+  // Pull-to-refresh trigger
   const triggerRefresh = useCallback(async () => {
     if (isRefreshingRef.current) return;
     isRefreshingRef.current = true;
-
     try {
-      // Subtle tactile feedback on supported devices (silent confirmation)
       if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
         try {
           navigator.vibrate(15);
-        } catch (_) {}
+        } catch {}
       }
-
-      // 1. Call parent refresh handler if provided
       if (onRefresh) {
         await onRefresh();
       }
-
-      // 2. Fetch fresh announcements from church storage
       const freshAnnouncements = getAnnouncementsByChurch(church.id);
-
-      // 3. Re-calculate contextual notifications
       reloadNotifications(freshAnnouncements);
-
-      // 4. Dispatch global event so badges across the entire app stay synchronized
       window.dispatchEvent(new Event('omnichurch_notifications_updated'));
     } finally {
-      setTimeout(() => {
+      window.setTimeout(() => {
         isRefreshingRef.current = false;
-        setPullDistance(0);
+        pullDeltaRef.current = 0;
       }, 250);
     }
   }, [church.id, onRefresh, reloadNotifications]);
 
-  // Touch Gesture Listeners (Mobile Pull-to-Refresh)
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    const isAtTop = window.scrollY <= 2;
-    if (isAtTop) {
+    if (window.scrollY <= 2) {
       isDraggingRef.current = true;
       startYRef.current = e.touches[0].clientY;
+      pullDeltaRef.current = 0;
     } else {
       isDraggingRef.current = false;
     }
@@ -174,95 +207,58 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
 
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
     if (!isDraggingRef.current || isRefreshingRef.current) return;
-    const currentY = e.touches[0].clientY;
-    const deltaY = currentY - startYRef.current;
-
-    // Pulling down while at top
-    if (deltaY > 0 && window.scrollY <= 2) {
-      // Damped resistance curve for smooth native feel
-      const distance = Math.min(deltaY * 0.38, 60);
-      setPullDistance(distance);
-    } else {
-      setPullDistance(0);
-    }
+    const deltaY = e.touches[0].clientY - startYRef.current;
+    pullDeltaRef.current = deltaY > 0 && window.scrollY <= 2 ? Math.min(deltaY * 0.4, 60) : 0;
   };
 
   const handleTouchEnd = () => {
     if (!isDraggingRef.current) return;
     isDraggingRef.current = false;
-
-    if (pullDistance >= 38) {
+    if (pullDeltaRef.current >= 38) {
       triggerRefresh();
-    } else {
-      setPullDistance(0);
     }
-  };
-
-  // Pointer Listeners (Desktop / Trackpad Drag)
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    if (window.scrollY <= 2) {
-      isDraggingRef.current = true;
-      startYRef.current = e.clientY;
-    }
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!isDraggingRef.current || isRefreshingRef.current) return;
-    const deltaY = e.clientY - startYRef.current;
-    if (deltaY > 0 && window.scrollY <= 2) {
-      const distance = Math.min(deltaY * 0.35, 55);
-      setPullDistance(distance);
-    } else {
-      setPullDistance(0);
-    }
-  };
-
-  const handlePointerUp = () => {
-    if (!isDraggingRef.current) return;
-    isDraggingRef.current = false;
-    if (pullDistance >= 38) {
-      triggerRefresh();
-    } else {
-      setPullDistance(0);
-    }
-  };
-
-  const handlePointerCancel = () => {
-    isDraggingRef.current = false;
-    setPullDistance(0);
+    pullDeltaRef.current = 0;
   };
 
   useEffect(() => {
     reloadNotifications();
-
     const handleUpdate = () => {
       reloadNotifications();
     };
-
     window.addEventListener('omnichurch_notifications_updated', handleUpdate);
+    window.addEventListener('storage', handleUpdate);
     return () => {
       window.removeEventListener('omnichurch_notifications_updated', handleUpdate);
+      window.removeEventListener('storage', handleUpdate);
     };
   }, [reloadNotifications]);
 
   const unreadCount = getUnreadNotificationsCount(notifications);
+  const readCount = notifications.length - unreadCount;
+  const officialAlertsCount = useMemo(
+    () => notifications.filter((n) => n.type === 'official_alert').length,
+    [notifications]
+  );
 
   // Filter and search
   const filteredList = useMemo(() => {
     return notifications.filter((notif) => {
-      // Filter by category
       if (activeFilter === 'unread' && notif.read) return false;
-      if (activeFilter !== 'all' && activeFilter !== 'unread' && notif.type !== activeFilter) {
+      if (activeFilter === 'read' && !notif.read) return false;
+      if (
+        activeFilter !== 'all' &&
+        activeFilter !== 'unread' &&
+        activeFilter !== 'read' &&
+        notif.type !== activeFilter
+      ) {
         return false;
       }
 
-      // Search by query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const matchesTitle = (notif.title || '').toLowerCase().includes(q);
         const matchesBody = (notif.body || '').toLowerCase().includes(q);
-        const matchesAuthor = notif.author ? (notif.author || '').toLowerCase().includes(q) : false;
+        const matchesAuthor = notif.author ? notif.author.toLowerCase().includes(q) : false;
         return matchesTitle || matchesBody || matchesAuthor;
       }
 
@@ -270,53 +266,156 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
     });
   }, [notifications, activeFilter, searchQuery]);
 
+  // Derive live selected notification (never stale!)
+  const selectedNotification = useMemo(
+    () => notifications.find((n) => n.id === selectedNotificationId) || null,
+    [notifications, selectedNotificationId]
+  );
+
+  // Index within filteredList (or all notifications) for Prev/Next reading
+  const readerNavigationList = useMemo(() => {
+    if (selectedNotificationId && filteredList.some((n) => n.id === selectedNotificationId)) {
+      return filteredList;
+    }
+    return notifications;
+  }, [filteredList, notifications, selectedNotificationId]);
+
+  const selectedIndex = useMemo(() => {
+    if (!selectedNotificationId) return -1;
+    return readerNavigationList.findIndex((n) => n.id === selectedNotificationId);
+  }, [readerNavigationList, selectedNotificationId]);
+
+  // Close modal with Escape & navigate with ArrowLeft / ArrowRight when reader is open
+  useEffect(() => {
+    if (!selectedNotificationId) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelectedNotificationId(null);
+      } else if (e.key === 'ArrowRight' && selectedIndex >= 0 && selectedIndex < readerNavigationList.length - 1) {
+        const nextNotif = readerNavigationList[selectedIndex + 1];
+        if (!nextNotif.read) {
+          markNotificationAsRead(nextNotif.id, church.id, memberKey, member);
+          reloadNotifications();
+        }
+        setSelectedNotificationId(nextNotif.id);
+      } else if (e.key === 'ArrowLeft' && selectedIndex > 0) {
+        const prevNotif = readerNavigationList[selectedIndex - 1];
+        if (!prevNotif.read) {
+          markNotificationAsRead(prevNotif.id, church.id, memberKey, member);
+          reloadNotifications();
+        }
+        setSelectedNotificationId(prevNotif.id);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedNotificationId, selectedIndex, readerNavigationList, church.id, memberKey, member, reloadNotifications]);
+
+  const handleChangeTextSize = (size: NotificationTextSize) => {
+    setTextSize(size);
+    saveNotificationTextSizePreference(size);
+  };
+
   const handleMarkAllRead = () => {
-    const ids = notifications.map((n) => n.id);
-    markAllNotificationsAsRead(ids, church.id, member?.id || member?.memberId);
+    const unreadIds = notifications.filter((n) => !n.read).map((n) => n.id);
+    if (unreadIds.length === 0) return;
+    markAllNotificationsAsRead(unreadIds, church.id, memberKey, member);
     reloadNotifications();
+    showFeedback(
+      isEs
+        ? 'Todas las notificaciones marcadas como leídas.'
+        : isFr
+        ? 'Toutes les notifications sont marquées comme lues.'
+        : isEn
+        ? 'All notifications marked as read.'
+        : 'Tout notifikasyon yo make kòm li.'
+    );
   };
 
   const handleClearRead = () => {
     const readIds = notifications.filter((n) => n.read).map((n) => n.id);
     if (readIds.length === 0) return;
-    clearAllNotifications(readIds, church.id, member?.id || member?.memberId);
+    clearAllNotifications(readIds, church.id, memberKey, member);
+    if (selectedNotificationId && readIds.includes(selectedNotificationId)) {
+      setSelectedNotificationId(null);
+    }
     reloadNotifications();
+    showFeedback(
+      isEs
+        ? 'Notificaciones leídas eliminadas de la vista.'
+        : isFr
+        ? 'Notifications lues retirées de la liste.'
+        : isEn
+        ? 'Read notifications cleared.'
+        : 'Notifikasyon ki deja li yo netwaye.'
+    );
   };
 
   const handleToggleRead = (e: React.MouseEvent, notif: AppNotification) => {
     e.stopPropagation();
-    toggleNotificationRead(notif.id, church.id, member?.id || member?.memberId);
+    const nowRead = toggleNotificationRead(notif.id, church.id, memberKey, member);
     reloadNotifications();
+    showFeedback(
+      nowRead
+        ? isEs
+          ? 'Marcado como leído.'
+          : isFr
+          ? 'Marqué comme lu.'
+          : isEn
+          ? 'Marked as read.'
+          : 'Make kòm li.'
+        : isEs
+        ? 'Marcado como no leído.'
+        : isFr
+        ? 'Marqué comme non lu.'
+        : isEn
+        ? 'Marked as unread.'
+        : 'Make kòm pa li.'
+    );
   };
 
   const handleDelete = (e: React.MouseEvent, notif: AppNotification) => {
     e.stopPropagation();
-    dismissNotification(notif.id, church.id, member?.id || member?.memberId);
-    reloadNotifications();
-    if (selectedNotification?.id === notif.id) {
-      setSelectedNotification(null);
+    dismissNotification(notif.id, church.id, memberKey, member);
+    if (selectedNotificationId === notif.id) {
+      setSelectedNotificationId(null);
     }
+    reloadNotifications();
   };
 
   const handleCardClick = (notif: AppNotification) => {
     if (!notif.read) {
-      markNotificationAsRead(notif.id, church.id, member?.id || member?.memberId);
+      markNotificationAsRead(notif.id, church.id, memberKey, member);
       reloadNotifications();
     }
-    setSelectedNotification(notif);
+    setSelectedNotificationId(notif.id);
+  };
+
+  const handleStepReader = (direction: -1 | 1) => {
+    const targetIdx = selectedIndex + direction;
+    if (targetIdx < 0 || targetIdx >= readerNavigationList.length) return;
+    const nextNotif = readerNavigationList[targetIdx];
+    if (!nextNotif.read) {
+      markNotificationAsRead(nextNotif.id, church.id, memberKey, member);
+      reloadNotifications();
+    }
+    setSelectedNotificationId(nextNotif.id);
   };
 
   const handleActionClick = (notif: AppNotification) => {
     if (!notif.read) {
-      markNotificationAsRead(notif.id, church.id, member?.id || member?.memberId);
+      markNotificationAsRead(notif.id, church.id, memberKey, member);
       reloadNotifications();
     }
+    setSelectedNotificationId(null);
     if (notif.actionTarget) {
       if (onNavigateToTarget) {
         onNavigateToTarget(
-          notif.actionTarget.announcementId ? 'announcement' :
-          notif.actionTarget.serviceId ? 'service' :
-          (notif.actionTarget.tab as any) || 'announcement',
+          notif.actionTarget.announcementId
+            ? 'announcement'
+            : notif.actionTarget.serviceId
+            ? 'service'
+            : ((notif.actionTarget.tab as any) || 'announcement'),
           notif.actionTarget.announcementId || notif.actionTarget.serviceId
         );
       } else if (onNavigateToTab) {
@@ -328,16 +427,38 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
     }
   };
 
+  // Typography scale classes based on reading comfort preference
+  const titleSizeClass =
+    textSize === 'large'
+      ? 'text-base sm:text-lg'
+      : textSize === 'compact'
+      ? 'text-sm'
+      : 'text-sm sm:text-base';
+
+  const bodySizeClass =
+    textSize === 'large'
+      ? 'text-[15px] sm:text-base leading-7'
+      : textSize === 'compact'
+      ? 'text-xs sm:text-[13px] leading-relaxed'
+      : 'text-[13px] sm:text-[15px] leading-relaxed';
+
+  const modalBodySizeClass =
+    textSize === 'large'
+      ? 'text-base sm:text-[17px] leading-8'
+      : textSize === 'compact'
+      ? 'text-sm leading-6'
+      : 'text-[15px] sm:text-base leading-7';
+
   const getNotificationIcon = (type: AppNotification['type']) => {
     switch (type) {
       case 'official_alert':
-        return <AlertTriangle className="w-5 h-5 text-amber-300 animate-pulse" />;
+        return <AlertTriangle className="w-5 h-5 text-amber-300" />;
       case 'service_reminder':
         return <Calendar className="w-5 h-5 text-emerald-400" />;
       case 'attendance':
-        return <CheckCircle2 className="w-5 h-5 text-cyan-400" />;
+        return <CheckCircle2 className="w-5 h-5 text-sky-400" />;
       case 'interaction':
-        return <Radio className="w-5 h-5 text-purple-400" />;
+        return <Radio className="w-5 h-5 text-indigo-300" />;
       case 'system':
         return <Layers className="w-5 h-5 text-rose-400" />;
       default:
@@ -348,21 +469,19 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
   const getIconBackground = (type: AppNotification['type']) => {
     switch (type) {
       case 'official_alert':
-        return 'bg-red-500/20 border-amber-400/50 text-amber-300 shadow-[0_0_15px_rgba(251,191,36,0.3)]';
+        return 'bg-red-500/15 border-amber-400/40 text-amber-300';
       case 'service_reminder':
         return 'bg-emerald-500/15 border-emerald-400/30 text-emerald-300';
       case 'attendance':
-        return 'bg-cyan-500/15 border-cyan-400/30 text-cyan-300';
+        return 'bg-sky-500/15 border-sky-400/30 text-sky-300';
       case 'interaction':
-        return 'bg-purple-500/15 border-purple-400/30 text-purple-300';
+        return 'bg-indigo-500/15 border-indigo-400/30 text-indigo-300';
       case 'system':
         return 'bg-rose-500/15 border-rose-400/30 text-rose-300';
       default:
         return 'bg-amber-400/15 border-amber-400/30 text-amber-300';
     }
   };
-
-  const officialAlertsCount = notifications.filter((n) => n.type === 'official_alert').length;
 
   const filterTabs: { id: NotificationCategoryFilter; label: string; count?: number }[] = [
     {
@@ -375,28 +494,90 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
       label: isEs ? 'Sin leer' : isFr ? 'Non lues' : isEn ? 'Unread' : 'Pa li',
       count: unreadCount,
     },
+    {
+      id: 'read',
+      label: isEs ? 'Leídas' : isFr ? 'Lues' : isEn ? 'Read' : 'Deja li',
+      count: readCount,
+    },
     ...(officialAlertsCount > 0
       ? [
           {
             id: 'official_alert' as NotificationCategoryFilter,
-            label: isEs ? '⚠️ Avisos Oficiales' : isFr ? '⚠️ Avis Officiels' : isEn ? '⚠️ Official Warnings' : '⚠️ Avètisman Ofisyèl',
+            label: isEs
+              ? 'Avisos Oficiales'
+              : isFr
+              ? 'Avis Officiels'
+              : isEn
+              ? 'Official Notices'
+              : 'Avètisman Ofisyèl',
             count: officialAlertsCount,
           },
         ]
       : []),
     {
       id: 'announcement',
-      label: isEs ? 'Avisos & Comunicados' : isFr ? 'Annonces & Bulletins' : isEn ? 'Announcements' : 'Anons & Kominike',
+      label: isEs ? 'Anuncios' : isFr ? 'Annonces' : isEn ? 'Announcements' : 'Anons',
     },
     {
       id: 'service_reminder',
-      label: isEs ? 'Cultos & Recordatorios' : isFr ? 'Cultes & Rappels' : isEn ? 'Services & Reminders' : 'Sèvis & Rapèl',
+      label: isEs ? 'Cultos' : isFr ? 'Cultes' : isEn ? 'Services' : 'Sèvis',
     },
     {
       id: 'attendance',
       label: isEs ? 'Asistencia' : isFr ? 'Présences' : isEn ? 'Attendance' : 'Prezans',
     },
   ];
+
+  const getReadActionLabel = (isRead: boolean) => {
+    if (isRead) {
+      return isEs
+        ? 'Marcar no leído'
+        : isFr
+        ? 'Marquer non lu'
+        : isEn
+        ? 'Mark unread'
+        : 'Make pa li';
+    }
+    return isEs
+      ? 'Marcar leído'
+      : isFr
+      ? 'Marquer lu'
+      : isEn
+      ? 'Mark read'
+      : 'Make li';
+  };
+
+  const getOpenActionLabel = (notif: AppNotification) => {
+    if (notif.actionTarget?.tab === 'services') {
+      return isEs
+        ? 'Abrir culto y asistencia'
+        : isFr
+        ? 'Ouvrir le culte'
+        : isEn
+        ? 'Open service & check-in'
+        : 'Louvri kilt la';
+    }
+    if (notif.actionTarget?.tab === 'attendance') {
+      return isEs
+        ? 'Ver mi asistencia'
+        : isFr
+        ? 'Voir mes présences'
+        : isEn
+        ? 'View attendance'
+        : 'Wè prezans mwen';
+    }
+    return isEs
+      ? 'Ver publicación completa'
+      : isFr
+      ? 'Voir la publication'
+      : isEn
+      ? 'View full post'
+      : 'Wè anons la nan fil la';
+  };
+
+  const selectedReadAt = selectedNotification
+    ? getNotificationReadAt(selectedNotification.id, church.id, memberKey, member)
+    : undefined;
 
   return (
     <div
@@ -406,47 +587,28 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
       onTouchCancel={handleTouchEnd}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerCancel}
-      style={{
-        transform: pullDistance > 0 ? `translateY(${pullDistance}px)` : 'none',
-        transition: pullDistance === 0 ? 'transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none',
-        willChange: pullDistance > 0 ? 'transform' : 'auto',
-      }}
       className="space-y-6 pb-12 max-w-5xl mx-auto touch-pan-y"
     >
       {/* =========================================================================
-          1. HEADER - iOS 27 ULTRA ADVANCED FROSTED GLASS BAR
+          1. HEADER & READING CONTROLS
           ========================================================================= */}
-      <div
-        className="rounded-3xl p-5 sm:p-6 ios-glass-card relative overflow-hidden text-slate-100 shadow-2xl"
-        style={{
-          background: 'radial-gradient(130% 120% at 50% 0%, rgba(30, 41, 59, 0.85) 0%, rgba(15, 23, 42, 0.96) 100%)',
-          backdropFilter: 'blur(30px) saturate(190%)',
-          WebkitBackdropFilter: 'blur(30px) saturate(190%)',
-          border: '1px solid rgba(255, 255, 255, 0.14)',
-        }}
-      >
-        {/* Specular Highlight */}
-        <div className="absolute inset-x-12 top-0 h-[1px] bg-gradient-to-r from-transparent via-white/40 to-transparent pointer-events-none" />
-
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3.5">
+      <div className="rounded-3xl p-5 sm:p-6 bg-[#0F172A]/95 border border-slate-700/70 text-slate-100 shadow-xl relative overflow-hidden">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex items-start sm:items-center gap-3.5 min-w-0">
             <button
               type="button"
               id="btn-back-from-notifications"
               onClick={handleClose}
-              className="p-2.5 rounded-2xl bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95"
+              className="p-2.5 min-h-[42px] min-w-[42px] rounded-xl bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-200 hover:text-white transition-colors cursor-pointer flex items-center justify-center shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
               title={isEs ? 'Volver' : isFr ? 'Retour' : isEn ? 'Go Back' : 'Tounen'}
+              aria-label={isEs ? 'Volver' : isFr ? 'Retour' : isEn ? 'Go Back' : 'Tounen'}
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
 
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-lg sm:text-2xl font-black text-white tracking-tight flex items-center gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <h1 className="text-lg sm:text-2xl font-bold text-white tracking-tight flex items-center gap-2">
                   <Bell className="w-5 h-5 sm:w-6 sm:h-6 text-amber-400 shrink-0" />
                   <span className="truncate">
                     {isEs
@@ -455,70 +617,112 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
                       ? 'Centre de Notifications'
                       : isEn
                       ? 'Notification Center'
-                      : 'Sant Notifikasyon & Alèt'}
+                      : 'Sant Notifikasyon'}
                   </span>
                 </h1>
-                {unreadCount > 0 && (
-                  <span className="px-2.5 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-300 text-slate-950 font-black text-xs font-mono shadow-md shadow-amber-400/20 shrink-0">
-                    {unreadCount} {isEs ? 'nuevas' : isFr ? 'nouvelles' : isEn ? 'new' : 'nouvo'}
-                  </span>
-                )}
               </div>
-              <p className="text-xs text-slate-300 mt-1 flex items-center gap-1.5 flex-wrap">
-                <span className="font-bold text-white flex items-center gap-1">
+
+              <div className="text-xs sm:text-sm text-slate-400 mt-1 flex items-center gap-2 flex-wrap">
+                <span className="font-semibold text-slate-200 inline-flex items-center gap-1">
                   <span>{church.name}</span>
                   {isChurchLicensed && (
-                    <BadgeCheck
-                      className="w-3.5 h-3.5 text-sky-400 shrink-0"
-                      title={isEs ? 'Iglesia con Licencia Verificada' : 'Legliz verifye ak lisans ofisyèl'}
-                    />
+                    <span
+                      title={
+                        isEs
+                          ? 'Iglesia con Licencia Verificada'
+                          : isFr
+                          ? 'Église vérifiée sous licence'
+                          : isEn
+                          ? 'Licensed verified church'
+                          : 'Legliz verifye ak lisans ofisyèl'
+                      }
+                    >
+                      <BadgeCheck className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    </span>
                   )}
                 </span>
-                <span>•</span>
-                <span>
-                  {isEs
-                    ? 'Todos los avisos de cultos, confirmaciones de asistencia y comunicaciones oficiales.'
-                    : isFr
-                    ? 'Toutes les alertes de cultes, présences et communications officielles.'
-                    : isEn
-                    ? 'All service alerts, attendance logs, and official church announcements.'
-                    : 'Tout alèt kilt, konfimasyon prezans ak kominikasyon ofisyèl legliz la.'}
+                <span aria-hidden="true">·</span>
+                <span className="tabular-nums font-medium text-amber-300">
+                  {unreadCount}{' '}
+                  {isEs ? 'sin leer' : isFr ? 'non lues' : isEn ? 'unread' : 'pa li'}
                 </span>
-              </p>
+                <span aria-hidden="true">·</span>
+                <span className="tabular-nums text-slate-400">
+                  {readCount} {isEs ? 'leídas' : isFr ? 'lues' : isEn ? 'read' : 'deja li'}
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* Quick Global Actions & View Mode Toggle */}
-          <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          {/* Reading Controls & Bulk Actions */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Reading Comfort Text Size Control */}
+            <div
+              className="flex items-center gap-0.5 p-1 rounded-xl bg-[#07152F] border border-slate-700/80"
+              role="group"
+              aria-label={
+                isEs
+                  ? 'Tamaño de lectura'
+                  : isFr
+                  ? 'Taille de lecture'
+                  : isEn
+                  ? 'Reading text size'
+                  : 'Gwosè tèks pou lekti'
+              }
+            >
+              <span className="px-2 text-slate-400 flex items-center" aria-hidden="true">
+                <Type className="w-3.5 h-3.5" />
+              </span>
+              {(
+                [
+                  { id: 'compact', label: 'A-' },
+                  { id: 'normal', label: 'A' },
+                  { id: 'large', label: 'A+' },
+                ] as { id: NotificationTextSize; label: string }[]
+              ).map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  id={`btn-notif-text-${opt.id}`}
+                  onClick={() => handleChangeTextSize(opt.id)}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                    textSize === opt.id
+                      ? 'bg-amber-400 text-slate-950 font-bold'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             {/* View Mode Toggle */}
-            <div className="flex items-center gap-1 p-1 rounded-2xl bg-slate-950/70 border border-white/10">
-              <button
-                type="button"
-                id="btn-view-mode-messages"
-                onClick={() => setViewMode('messages')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                  viewMode === 'messages'
-                    ? 'bg-amber-400 text-slate-950 shadow-md font-black'
-                    : 'text-slate-400 hover:text-white'
-                }`}
-                title={isEs ? 'Modo Mensajes' : isFr ? 'Mode Messages' : isEn ? 'Message View' : 'Wè kòmsi se mesaj'}
-              >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>{isEs ? 'Mensajes' : isFr ? 'Messages' : isEn ? 'Messages' : 'Fil Mesaj'}</span>
-              </button>
+            <div className="flex items-center gap-0.5 p-1 rounded-xl bg-[#07152F] border border-slate-700/80">
               <button
                 type="button"
                 id="btn-view-mode-cards"
                 onClick={() => setViewMode('cards')}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
                   viewMode === 'cards'
-                    ? 'bg-amber-400 text-slate-950 shadow-md font-black'
-                    : 'text-slate-400 hover:text-white'
+                    ? 'bg-amber-400 text-slate-950 font-bold'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
                 }`}
-                title={isEs ? 'Modo Tarjetas' : isFr ? 'Mode Cartes' : isEn ? 'Card View' : 'Lis Kat'}
               >
                 <Layers className="w-3.5 h-3.5" />
                 <span>{isEs ? 'Tarjetas' : isFr ? 'Cartes' : isEn ? 'Cards' : 'Kat'}</span>
+              </button>
+              <button
+                type="button"
+                id="btn-view-mode-messages"
+                onClick={() => setViewMode('messages')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                  viewMode === 'messages'
+                    ? 'bg-amber-400 text-slate-950 font-bold'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
+                }`}
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>{isEs ? 'Mensajes' : isFr ? 'Messages' : isEn ? 'Messages' : 'Fil Mesaj'}</span>
               </button>
             </div>
 
@@ -527,34 +731,79 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
                 type="button"
                 id="btn-mark-all-read-full-page"
                 onClick={handleMarkAllRead}
-                className="px-3.5 py-2 rounded-xl bg-white/8 hover:bg-white/15 border border-white/15 text-slate-200 hover:text-white font-bold text-xs flex items-center gap-2 transition-all cursor-pointer active:scale-95"
+                className="px-3.5 py-2 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-200 hover:text-white font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
               >
                 <CheckCheck className="w-4 h-4 text-amber-400" />
-                <span>{isEs ? 'Marcar todo leído' : isFr ? 'Tout marquer lu' : isEn ? 'Mark all as read' : 'Make tout kòm li'}</span>
+                <span>
+                  {isEs
+                    ? 'Marcar todo leído'
+                    : isFr
+                    ? 'Tout marquer lu'
+                    : isEn
+                    ? 'Mark all read'
+                    : 'Make tout kòm li'}
+                </span>
               </button>
             )}
 
-            {notifications.some((n) => n.read) && (
+            {readCount > 0 && (
               <button
                 type="button"
                 id="btn-clear-read-notifications"
                 onClick={handleClearRead}
-                className="px-3 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-800 border border-slate-700/80 hover:border-red-500/40 text-slate-400 hover:text-red-300 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
-                title={isEs ? 'Limpiar leídos' : isFr ? 'Effacer lus' : isEn ? 'Clear read' : 'Efase sa ki li yo'}
+                className="px-3 py-2 rounded-xl bg-slate-800/80 hover:bg-red-950/50 border border-slate-700 hover:border-red-500/40 text-slate-300 hover:text-red-200 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                title={
+                  isEs
+                    ? 'Limpiar leídos'
+                    : isFr
+                    ? 'Effacer les lues'
+                    : isEn
+                    ? 'Clear read'
+                    : 'Netwaye sa ki deja li yo'
+                }
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">{isEs ? 'Limpiar leídos' : isFr ? 'Effacer lus' : isEn ? 'Clear read' : 'Netwaye sa ki li'}</span>
+                <span className="hidden sm:inline">
+                  {isEs
+                    ? 'Limpiar leídos'
+                    : isFr
+                    ? 'Effacer lues'
+                    : isEn
+                    ? 'Clear read'
+                    : 'Netwaye sa ki li'}
+                </span>
               </button>
             )}
           </div>
         </div>
 
+        {/* Inline Action Feedback Confirmation */}
+        {feedbackMessage && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mt-3 px-3.5 py-2 rounded-xl bg-sky-500/10 border border-sky-400/30 text-sky-200 text-xs font-medium flex items-center justify-between gap-2"
+          >
+            <span className="flex items-center gap-2">
+              <CheckCheck className="w-4 h-4 text-sky-400 shrink-0" />
+              <span>{feedbackMessage}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setFeedbackMessage(null)}
+              className="text-sky-300 hover:text-white cursor-pointer"
+              aria-label="Close"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* =========================================================================
-            2. SEARCH & FILTER TABS
+            2. FILTER SEGMENTED BAR & SEARCH
             ========================================================================= */}
-        <div className="mt-5 pt-4 border-t border-white/10 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
-          {/* Filter Pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
+        <div className="mt-5 pt-4 border-t border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
             {filterTabs.map((tab) => {
               const isActive = activeFilter === tab.id;
               return (
@@ -563,22 +812,20 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
                   type="button"
                   id={`btn-filter-notif-${tab.id}`}
                   onClick={() => setActiveFilter(tab.id)}
-                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all duration-200 cursor-pointer flex items-center gap-1.5 ${
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 transition-colors cursor-pointer flex items-center gap-1.5 ${
                     isActive
-                      ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20 scale-[1.02]'
-                      : 'bg-white/5 text-slate-300 hover:bg-white/10 border border-white/10 hover:text-white'
+                      ? 'bg-amber-400 text-slate-950 font-bold'
+                      : 'bg-slate-800/70 text-slate-300 hover:bg-slate-800 border border-slate-700/70 hover:text-white'
                   }`}
                 >
                   <span>{tab.label}</span>
                   {typeof tab.count === 'number' && (
                     <span
-                      className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-black ${
-                        isActive
-                          ? 'bg-slate-950/20 text-slate-950'
-                          : 'bg-white/10 text-slate-400'
+                      className={`font-mono tabular-nums text-[11px] ${
+                        isActive ? 'text-slate-900 font-bold' : 'text-slate-400'
                       }`}
                     >
-                      {tab.count}
+                      ({tab.count})
                     </span>
                   )}
                 </button>
@@ -586,7 +833,6 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
             })}
           </div>
 
-          {/* Search Input */}
           <div className="relative w-full md:w-64 shrink-0">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
@@ -595,15 +841,22 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={
-                isEs ? 'Buscar notificaciones...' : isFr ? 'Rechercher...' : isEn ? 'Search notifications...' : 'Chèche notifikasyon...'
+                isEs
+                  ? 'Buscar notificaciones...'
+                  : isFr
+                  ? 'Rechercher...'
+                  : isEn
+                  ? 'Search notifications...'
+                  : 'Chèche notifikasyon...'
               }
-              className="w-full pl-9 pr-8 py-1.5 rounded-xl bg-slate-950/60 border border-white/10 text-white placeholder:text-slate-500 text-xs focus:outline-none focus:border-amber-400 transition-colors"
+              className="w-full pl-9 pr-8 py-2 rounded-xl bg-[#07152F] border border-slate-700/80 text-white placeholder:text-slate-500 text-xs focus:outline-none focus:border-amber-400 transition-colors"
             />
             {searchQuery && (
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                aria-label="Clear search"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -616,270 +869,317 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
           3. NOTIFICATIONS LIST
           ========================================================================= */}
       {filteredList.length === 0 ? (
-        <div
-          className="rounded-3xl p-12 text-center ios-glass-card border border-white/10 text-slate-300"
-          style={{
-            background: 'radial-gradient(130% 120% at 50% 0%, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.8) 100%)',
-          }}
-        >
-          <div className="w-16 h-16 mx-auto mb-4 rounded-3xl bg-white/5 border border-white/10 flex items-center justify-center text-slate-400 shadow-inner">
-            <Bell className="w-8 h-8 text-slate-400" />
+        <div className="rounded-3xl p-10 sm:p-12 text-center bg-[#0F172A]/85 border border-slate-800 text-slate-300">
+          <div className="w-14 h-14 mx-auto mb-4 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-400">
+            {activeFilter === 'unread' ? (
+              <CheckCheck className="w-7 h-7 text-sky-400" />
+            ) : (
+              <Bell className="w-7 h-7 text-slate-400" />
+            )}
           </div>
           <h3 className="text-base sm:text-lg font-bold text-white">
-            {isEs
+            {activeFilter === 'unread'
+              ? isEs
+                ? '¡Estás al día! No hay mensajes sin leer.'
+                : isFr
+                ? 'Vous êtes à jour ! Aucune notification non lue.'
+                : isEn
+                ? 'You are all caught up! No unread notifications.'
+                : 'Ou ajou ! Pa gen okenn notifikasyon ki poko li.'
+              : isEs
               ? 'No hay notificaciones en este filtro'
               : isFr
               ? 'Aucune notification dans ce filtre'
               : isEn
-              ? 'No notifications found'
+              ? 'No notifications in this filter'
               : 'Pa gen notifikasyon nan kategori sa a'}
           </h3>
-          <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+          <p className="text-xs sm:text-sm text-slate-400 mt-1.5 max-w-md mx-auto leading-relaxed">
             {searchQuery
               ? isEs
-                ? 'Intente modificar el texto de búsqueda.'
+                ? 'Intenta modificar el texto de búsqueda.'
                 : isFr
                 ? 'Essayez de modifier votre recherche.'
                 : isEn
                 ? 'Try adjusting your search criteria.'
                 : 'Eseye chanje mo w ap chèche a.'
+              : activeFilter === 'unread' && notifications.length > 0
+              ? isEs
+                ? 'Puedes revisar tus mensajes leídos en la pestaña "Todas" o "Leídas".'
+                : isFr
+                ? 'Vous pouvez consulter les notifications déjà lues dans « Toutes » ou « Lues ».'
+                : isEn
+                ? 'You can review previously read items under "All" or "Read".'
+                : 'Ou kapab revize mesaj ou deja li yo nan onglet "Tout" oswa "Deja li".'
               : isEs
               ? 'Las notificaciones de cultos, avisos de líderes y asistencias aparecerán automáticamente aquí.'
               : isFr
               ? 'Les notifications de cultes et d’annonces apparaîtront automatiquement ici.'
               : isEn
-              ? 'Service alerts, ministry announcements, and scan records will automatically appear here.'
-              : 'Tout rapèl kilt ak nouvo anons legliz la ap parèt otomatikman isit la.'}
+              ? 'Service alerts, ministry announcements, and attendance confirmations will appear here automatically.'
+              : 'Tout rapèl kilt, nouvo anons ak konfimasyon prezans ap parèt otomatikman isit la.'}
           </p>
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery('')}
-              className="mt-4 px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-white font-bold text-xs transition-colors cursor-pointer"
-            >
-              {isEs ? 'Borrar búsqueda' : isFr ? 'Effacer la recherche' : isEn ? 'Clear search' : 'Efase rechèch'}
-            </button>
-          )}
+          <div className="mt-4 flex items-center justify-center gap-2 flex-wrap">
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs transition-colors cursor-pointer"
+              >
+                {isEs ? 'Borrar búsqueda' : isFr ? 'Effacer la recherche' : isEn ? 'Clear search' : 'Efase rechèch'}
+              </button>
+            )}
+            {activeFilter !== 'all' && notifications.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveFilter('all')}
+                className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs transition-colors cursor-pointer"
+              >
+                {isEs ? 'Ver todas' : isFr ? 'Voir toutes' : isEn ? 'Show all' : 'Wè tout notifikasyon yo'}
+              </button>
+            )}
+          </div>
         </div>
       ) : viewMode === 'messages' ? (
         /* =========================================================================
-           3A. CONVERSATIONAL MESSAGES FEED ("kòmsi se mesaj")
+           3A. CONVERSATIONAL MESSAGES FEED
            ========================================================================= */
         <div className="space-y-4">
           {filteredList.map((notif) => {
             const isOfficialWarning = notif.type === 'official_alert' || notif.priority === 'urgent';
-            const authorName = notif.author || `${church.name} (Ofisyèl)`;
+            const authorName = notif.author || church.name;
+            const ts = formatNotificationTimestamp(notif.createdAt, resolvedLang);
+            const readAtIso = notif.read
+              ? getNotificationReadAt(notif.id, church.id, memberKey, member)
+              : undefined;
+            const readAtFormatted = readAtIso
+              ? formatNotificationTimestamp(readAtIso, resolvedLang)
+              : null;
 
             return (
               <div
                 key={notif.id}
                 id={`notification-message-${notif.id}`}
-                className="flex items-start gap-3 sm:gap-4 group transition-all"
+                className="flex items-start gap-3 sm:gap-4"
               >
-                {/* 1. Sender Avatar */}
-                <div className="relative shrink-0 pt-1">
+                {/* Sender Avatar */}
+                <div className="shrink-0 pt-1">
                   {church.logoUrl ? (
                     <img
                       src={church.logoUrl}
                       alt={authorName}
-                      className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border shadow-md ring-1 ring-white/10 ${
-                        isOfficialWarning
-                          ? 'border-amber-400 ring-2 ring-red-500/40'
-                          : 'border-indigo-400/40'
+                      className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full object-cover border ${
+                        isOfficialWarning ? 'border-amber-400' : 'border-slate-700'
                       }`}
                     />
                   ) : (
                     <div
-                      className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center font-black text-xs text-white shadow-md ring-1 ring-white/10 ${
+                      className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full flex items-center justify-center font-bold text-xs text-white border ${
                         isOfficialWarning
-                          ? 'bg-gradient-to-br from-red-600 via-amber-600 to-slate-900 border border-amber-400'
-                          : 'bg-gradient-to-br from-indigo-600 via-purple-600 to-amber-500'
+                          ? 'bg-amber-600/30 border-amber-400/60 text-amber-200'
+                          : 'bg-[#07152F] border-slate-700 text-amber-300'
                       }`}
                     >
                       {church.name.slice(0, 2).toUpperCase()}
                     </div>
                   )}
-
-                  {/* Verified / Active Status Dot */}
-                  <span
-                    className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-slate-950 ${
-                      isOfficialWarning
-                        ? 'bg-amber-400 animate-pulse'
-                        : notif.type === 'service_reminder'
-                        ? 'bg-emerald-400'
-                        : isChurchLicensed
-                        ? 'bg-sky-400'
-                        : 'bg-slate-500'
-                    }`}
-                    title={isOfficialWarning ? 'Avètisman Ofisyèl' : isChurchLicensed ? 'Verifye (Legliz ak Lisans)' : 'Aktif'}
-                  />
                 </div>
 
-                {/* 2. Chat Message Bubble */}
+                {/* Message Content */}
                 <div className="flex-1 min-w-0 max-w-3xl">
-                  {/* Sender Metadata Bar */}
-                  <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                    <span className="font-bold text-white text-xs sm:text-sm flex items-center gap-1">
+                  {/* Unboxed Clean Metadata Header */}
+                  <div className="flex items-center gap-2 mb-1.5 flex-wrap text-xs text-slate-400">
+                    <span className="font-semibold text-white inline-flex items-center gap-1">
                       <span>{authorName}</span>
                       {isChurchLicensed && (
-                        <BadgeCheck
-                          className="w-3.5 h-3.5 text-sky-400 shrink-0"
-                          title={isEs ? 'Verificado (Iglesia con Licencia)' : isFr ? 'Vérifié (Église sous Licence)' : isEn ? 'Verified (Licensed Church)' : 'Verifye (Legliz ki gen Lisans)'}
-                        />
+                        <span
+                          title={
+                            isEs
+                              ? 'Verificado'
+                              : isFr
+                              ? 'Vérifié'
+                              : isEn
+                              ? 'Verified'
+                              : 'Verifye'
+                          }
+                        >
+                          <BadgeCheck className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                        </span>
                       )}
                     </span>
-
-                    {/* Official Warning / Category Badge */}
-                    {isOfficialWarning ? (
-                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-gradient-to-r from-red-600 to-amber-500 text-white shadow-sm flex items-center gap-1 border border-amber-300/40">
-                        <AlertTriangle className="w-3 h-3 text-white animate-pulse" />
-                        <span>
-                          {isEs
-                            ? 'AVISO OFICIAL DIRECTO'
-                            : isFr
-                            ? 'AVIS OFFICIEL DIRECT'
-                            : isEn
-                            ? 'OFFICIAL DIRECT NOTICE'
-                            : 'AVÈTISMAN OFISYÈL DIRECT'}
-                        </span>
-                      </span>
-                    ) : (
-                      notif.badgeText && (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-white/10 text-slate-300 border border-white/10">
+                    {notif.badgeText && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span
+                          className={
+                            isOfficialWarning ? 'text-amber-300 font-semibold' : 'text-slate-300'
+                          }
+                        >
                           {notif.badgeText}
                         </span>
-                      )
+                      </>
                     )}
-
-                    <span className="text-xs text-slate-500">•</span>
-                    <span className="text-[11px] text-slate-400 font-mono flex items-center gap-1">
-                      <Clock className="w-3 h-3 text-slate-500" />
-                      {notif.createdAt ? notif.createdAt.replace('T', ' ').slice(0, 16) : ''}
-                    </span>
+                    {ts.relative && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono tabular-nums text-slate-400" title={ts.full}>
+                          {ts.relative}
+                        </span>
+                      </>
+                    )}
                   </div>
 
-                  {/* Message Bubble Geometry */}
+                  {/* Message Card */}
                   <div
                     onClick={() => handleCardClick(notif)}
-                    className={`rounded-2xl sm:rounded-3xl rounded-tl-sm sm:rounded-tl-md p-4 sm:p-5 relative overflow-hidden transition-all duration-200 cursor-pointer border ${
+                    className={`rounded-2xl rounded-tl-sm p-4 sm:p-5 transition-colors duration-200 cursor-pointer border ${
                       isOfficialWarning
-                        ? 'bg-gradient-to-br from-red-950/60 via-slate-900/95 to-amber-950/40 border-amber-400/60 shadow-[0_12px_35px_rgba(239,68,68,0.2)]'
+                        ? 'bg-[#1a1625]/95 border-amber-400/50 hover:border-amber-400/80'
                         : !notif.read
-                        ? 'bg-gradient-to-br from-slate-900/95 via-slate-900/90 to-slate-800/80 border-amber-400/40 shadow-[0_8px_25px_rgba(251,191,36,0.1)]'
-                        : 'bg-slate-900/85 hover:bg-slate-900 border-white/10'
+                        ? 'bg-[#0F172A] border-amber-400/40 hover:border-amber-400/70'
+                        : 'bg-[#0F172A]/70 border-slate-800 hover:border-slate-700'
                     }`}
-                    style={{
-                      backdropFilter: 'blur(20px)',
-                      WebkitBackdropFilter: 'blur(20px)',
-                    }}
                   >
-                    {/* Official Warning Top Ribbon */}
                     {isOfficialWarning && (
-                      <div className="mb-2.5 pb-2 border-b border-amber-400/30 flex items-center justify-between gap-2 text-amber-300 font-bold text-xs">
-                        <div className="flex items-center gap-1.5">
-                          <ShieldAlert className="w-4 h-4 text-amber-400" />
-                          <span>
-                            {isEs
-                              ? 'Comunicación Oficial de la Iglesia'
-                              : isFr
-                              ? 'Communication Officielle de l’Église'
-                              : isEn
-                              ? 'Official Church Leadership Notice'
-                              : 'Kominikasyon & Avètisman Direksyon Legliz la'}
-                          </span>
-                        </div>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-400/20 text-amber-200 border border-amber-400/30">
-                          {isEs ? 'CONFIDENCIAL / MIEMBROS' : 'POU TOUT MANM'}
+                      <div className="mb-2.5 pb-2 border-b border-amber-400/20 flex items-center gap-2 text-amber-300 font-semibold text-xs">
+                        <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span>
+                          {isEs
+                            ? 'Comunicación Oficial de la Iglesia'
+                            : isFr
+                            ? 'Communication Officielle de l’Église'
+                            : isEn
+                            ? 'Official Church Leadership Notice'
+                            : 'Kominikasyon Ofisyèl Direksyon Legliz la'}
                         </span>
                       </div>
                     )}
 
-                    {/* Message Subject / Title */}
                     <h3
-                      className={`text-sm sm:text-base leading-snug ${
+                      className={`${titleSizeClass} leading-snug ${
                         isOfficialWarning
-                          ? 'font-black text-amber-200'
+                          ? 'font-bold text-amber-200'
                           : !notif.read
-                          ? 'font-black text-white'
-                          : 'font-bold text-slate-200'
+                          ? 'font-bold text-white'
+                          : 'font-semibold text-slate-300'
                       }`}
                     >
                       {notif.title}
                     </h3>
 
-                    {/* Message Body */}
-                    <p className="text-xs sm:text-sm text-slate-200 mt-2 whitespace-pre-line leading-relaxed">
+                    <p
+                      className={`${bodySizeClass} mt-2 whitespace-pre-line ${
+                        !notif.read ? 'text-slate-100' : 'text-slate-300'
+                      }`}
+                    >
                       {notif.body}
                     </p>
 
-                    {/* Embedded Action Attachment Card inside Message */}
+                    {notif.imageUrl && (
+                      <div className="mt-3 overflow-hidden rounded-xl border border-slate-700/70 bg-black/30">
+                        <img
+                          src={notif.imageUrl}
+                          alt={notif.title}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setLightboxImage({
+                              url: notif.imageUrl!,
+                              title: notif.title,
+                              caption: notif.imageCaption,
+                            });
+                          }}
+                          className="w-full max-h-64 object-cover cursor-pointer hover:opacity-95 transition-opacity"
+                        />
+                      </div>
+                    )}
+
                     {notif.actionTarget && (
-                      <div className="mt-3.5 pt-3 border-t border-white/10">
+                      <div className="mt-4 pt-3 border-t border-slate-800/80">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             handleActionClick(notif);
                           }}
-                          className={`w-full sm:w-auto px-4 py-2 rounded-xl font-black text-xs flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer active:scale-95 ${
+                          className={`px-4 py-2 rounded-xl font-semibold text-xs inline-flex items-center gap-2 transition-colors cursor-pointer ${
                             isOfficialWarning
-                              ? 'bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-slate-950 shadow-amber-400/20'
-                              : 'bg-white/10 hover:bg-white/15 border border-white/15 text-white'
+                              ? 'bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold'
+                              : 'bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white'
                           }`}
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
-                          <span>
-                            {notif.actionTarget.tab === 'services'
-                              ? isEs
-                                ? 'Abrir Culto & Registrar Asistencia'
-                                : isFr
-                                ? 'Ouvrir le Culte & Confirmer Présence'
-                                : isEn
-                                ? 'Open Service & Check-in'
-                                : 'Louvri Kilt la & Eskane Prezans'
-                              : isEs
-                              ? 'Ver Anuncio Completo'
-                              : isFr
-                              ? 'Voir l’Annonce Complète'
-                              : isEn
-                              ? 'View Full Post'
-                              : 'Wè Piblikasyon an nan Fil la'}
-                          </span>
+                          <span>{getOpenActionLabel(notif)}</span>
                         </button>
                       </div>
                     )}
 
-                    {/* Message Status & Read Receipts Bar */}
-                    <div className="mt-3 pt-2.5 border-t border-white/5 flex items-center justify-between text-[11px] text-slate-400">
+                    {/* Status & Read/Unread Actions Bar */}
+                    <div className="mt-3.5 pt-2.5 border-t border-slate-800/70 flex items-center justify-between gap-2 flex-wrap text-xs">
                       <div className="flex items-center gap-2">
                         {notif.read ? (
-                          <span className="flex items-center gap-1 text-slate-400 font-medium">
-                            <CheckCheck className="w-3.5 h-3.5 text-sky-400" />
-                            <span>{isEs ? 'Leído' : isFr ? 'Lu' : isEn ? 'Read' : 'Li'}</span>
+                          <span className="inline-flex items-center gap-1.5 text-sky-400 font-medium">
+                            <CheckCheck className="w-3.5 h-3.5 shrink-0" />
+                            <span>
+                              {isEs ? 'Leído' : isFr ? 'Lu' : isEn ? 'Read' : 'Deja li'}
+                            </span>
+                            {readAtFormatted?.relative && (
+                              <span className="text-slate-500 font-mono tabular-nums text-[11px]">
+                                · {readAtFormatted.relative}
+                              </span>
+                            )}
                           </span>
                         ) : (
-                          <span className="flex items-center gap-1 text-amber-300 font-black">
-                            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                            <span>{isEs ? 'Nuevo mensaje' : isFr ? 'Nouveau message' : isEn ? 'New message' : 'Nouvo mesaj'}</span>
+                          <span className="inline-flex items-center gap-1.5 text-amber-300 font-semibold">
+                            <Mail className="w-3.5 h-3.5 shrink-0" />
+                            <span>
+                              {isEs
+                                ? 'No leído'
+                                : isFr
+                                ? 'Non lu'
+                                : isEn
+                                ? 'Unread'
+                                : 'Poko li'}
+                            </span>
                           </span>
                         )}
                       </div>
 
-                      {/* Quick Message Actions */}
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1.5">
                         <button
                           type="button"
                           onClick={(e) => handleToggleRead(e, notif)}
-                          className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                          title={notif.read ? (isEs ? 'Marcar no leído' : 'Make kòm pa li') : (isEs ? 'Marcar leído' : 'Make kòm li')}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800/70 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                          title={getReadActionLabel(notif.read)}
                         >
-                          {notif.read ? <EyeOff className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5 text-amber-400" />}
+                          {notif.read ? (
+                            <MailOpen className="w-3.5 h-3.5 text-slate-300" />
+                          ) : (
+                            <Check className="w-3.5 h-3.5 text-amber-400" />
+                          )}
+                          <span>{getReadActionLabel(notif.read)}</span>
                         </button>
                         <button
                           type="button"
                           onClick={(e) => handleDelete(e, notif)}
                           className="p-1.5 rounded-lg hover:bg-red-500/20 text-slate-400 hover:text-red-300 transition-colors cursor-pointer"
-                          title={isEs ? 'Eliminar mensaje' : isFr ? 'Supprimer' : isEn ? 'Delete' : 'Efase mesaj'}
+                          title={
+                            isEs
+                              ? 'Eliminar mensaje'
+                              : isFr
+                              ? 'Supprimer'
+                              : isEn
+                              ? 'Delete'
+                              : 'Efase'
+                          }
+                          aria-label={
+                            isEs
+                              ? 'Eliminar mensaje'
+                              : isFr
+                              ? 'Supprimer'
+                              : isEn
+                              ? 'Delete'
+                              : 'Efase'
+                          }
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -893,192 +1193,302 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
         </div>
       ) : (
         /* =========================================================================
-           3B. CLASSIC CARDS VIEW
+           3B. CLASSIC CARDS VIEW (OPTIMIZED FOR LEGIBILITY & QUICK READING)
            ========================================================================= */
         <div className="space-y-3">
-          {filteredList.map((notif) => (
-            <div
-              key={notif.id}
-              id={`notification-card-${notif.id}`}
-              onClick={() => handleCardClick(notif)}
-              className={`rounded-2xl sm:rounded-3xl p-4 sm:p-5 transition-all duration-200 cursor-pointer relative overflow-hidden border ${
-                !notif.read
-                  ? 'bg-gradient-to-r from-slate-900/95 via-slate-900/90 to-amber-950/20 border-amber-400/40 shadow-[0_8px_25px_rgba(251,191,36,0.08)]'
-                  : 'bg-slate-900/75 hover:bg-slate-900/90 border-white/8 hover:border-white/15'
-              }`}
-              style={{
-                backdropFilter: 'blur(20px)',
-                WebkitBackdropFilter: 'blur(20px)',
-              }}
-            >
-              {/* Unread Glow Indicator */}
-              {!notif.read && (
-                <div className="absolute top-0 left-0 bottom-0 w-1 bg-gradient-to-b from-amber-400 to-amber-500 shadow-[0_0_10px_rgba(251,191,36,0.8)]" />
-              )}
+          {filteredList.map((notif) => {
+            const ts = formatNotificationTimestamp(notif.createdAt, resolvedLang);
+            const isLongBody = (notif.body || '').length > 180;
+            const readAtIso = notif.read
+              ? getNotificationReadAt(notif.id, church.id, memberKey, member)
+              : undefined;
+            const readAtFormatted = readAtIso
+              ? formatNotificationTimestamp(readAtIso, resolvedLang)
+              : null;
 
-              <div className="flex items-start justify-between gap-3 sm:gap-4">
-                {/* Left Type Icon */}
-                <div
-                  className={`w-10 h-10 sm:w-11 sm:h-11 rounded-2xl border flex items-center justify-center shrink-0 shadow-sm ${getIconBackground(
-                    notif.type
-                  )}`}
-                >
-                  {getNotificationIcon(notif.type)}
-                </div>
-
-                {/* Center Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap mb-1">
-                    {notif.priority === 'urgent' && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-red-500/20 text-red-300 border border-red-500/30 flex items-center gap-1">
-                        <AlertTriangle className="w-3 h-3 text-red-400" />
-                        {isEs ? 'Urgente' : isFr ? 'Urgent' : isEn ? 'Urgent' : 'Ijan'}
-                      </span>
-                    )}
-                    {notif.badgeText && (
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-white/10 text-slate-300 border border-white/10">
-                        {notif.badgeText}
-                      </span>
-                    )}
-                    {notif.author && (
-                      <span className="text-xs text-slate-400 font-medium flex items-center gap-1">
-                        <span>{notif.author}</span>
-                        {isChurchLicensed && (
-                          <BadgeCheck
-                            className="w-3.5 h-3.5 text-sky-400 shrink-0"
-                            title={isEs ? 'Verificado (Iglesia con Licencia)' : isFr ? 'Vérifié (Église sous Licence)' : isEn ? 'Verified (Licensed Church)' : 'Verifye (Legliz ki gen Lisans)'}
-                          />
-                        )}
-                      </span>
-                    )}
-                    <span className="text-xs text-slate-500">•</span>
-                    <span className="text-xs text-slate-400 font-mono flex items-center gap-1">
-                      <Clock className="w-3 h-3 text-slate-500" />
-                      {notif.createdAt ? notif.createdAt.replace('T', ' ').slice(0, 16) : ''}
-                    </span>
+            return (
+              <div
+                key={notif.id}
+                id={`notification-card-${notif.id}`}
+                onClick={() => handleCardClick(notif)}
+                className={`rounded-2xl p-4 sm:p-5 transition-colors duration-200 cursor-pointer border ${
+                  !notif.read
+                    ? 'bg-[#0F172A] border-amber-400/45 hover:border-amber-400/75 shadow-sm'
+                    : 'bg-[#0F172A]/65 hover:bg-[#0F172A]/85 border-slate-800 hover:border-slate-700'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-3 sm:gap-4">
+                  {/* Left Type Icon */}
+                  <div
+                    className={`w-10 h-10 sm:w-11 sm:h-11 rounded-xl border flex items-center justify-center shrink-0 ${getIconBackground(
+                      notif.type
+                    )}`}
+                  >
+                    {getNotificationIcon(notif.type)}
                   </div>
 
-                  <h3
-                    className={`text-sm sm:text-base leading-snug ${
-                      !notif.read ? 'font-black text-white' : 'font-bold text-slate-200'
-                    }`}
-                  >
-                    {notif.title}
-                  </h3>
-
-                  <p className="text-xs sm:text-sm text-slate-300 mt-1 whitespace-pre-line leading-relaxed line-clamp-3">
-                    {notif.body}
-                  </p>
-
-                  {/* Bottom Action bar if available */}
-                  {notif.actionTarget && (
-                    <div className="mt-3 pt-2.5 border-t border-white/5 flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleActionClick(notif);
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/30 text-amber-300 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
-                      >
-                        <ExternalLink className="w-3.5 h-3.5 text-amber-400" />
-                        <span>
-                          {notif.actionTarget.tab === 'services'
-                            ? isEs
-                              ? 'Ver Culto / Asistencia'
-                              : isFr
-                              ? 'Voir le Culte'
-                              : isEn
-                              ? 'View Service'
-                              : 'Gade Sèvis la / Eskane'
-                            : isEs
-                            ? 'Ver Publicación en Noticias'
-                            : isFr
-                            ? 'Voir l’Annonce'
-                            : isEn
-                            ? 'View Announcement'
-                            : 'Gade Anons la nan Fil la'}
+                  {/* Center Content */}
+                  <div className="flex-1 min-w-0">
+                    {/* Clean Unboxed Metadata Row */}
+                    <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400 mb-1.5">
+                      {!notif.read ? (
+                        <span className="inline-flex items-center gap-1 font-semibold text-amber-300">
+                          <Mail className="w-3 h-3 shrink-0" />
+                          <span>
+                            {isEs ? 'Sin leer' : isFr ? 'Non lu' : isEn ? 'Unread' : 'Poko li'}
+                          </span>
                         </span>
-                      </button>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 font-medium text-sky-400">
+                          <CheckCheck className="w-3.5 h-3.5 shrink-0" />
+                          <span>{isEs ? 'Leído' : isFr ? 'Lu' : isEn ? 'Read' : 'Deja li'}</span>
+                        </span>
+                      )}
+
+                      {notif.badgeText && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span
+                            className={
+                              notif.priority === 'urgent'
+                                ? 'text-amber-300 font-semibold'
+                                : 'text-slate-300 font-medium'
+                            }
+                          >
+                            {notif.badgeText}
+                          </span>
+                        </>
+                      )}
+
+                      {notif.author && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-slate-300 inline-flex items-center gap-1">
+                            <span>{notif.author}</span>
+                            {isChurchLicensed && (
+                              <span
+                                title={
+                                  isEs
+                                    ? 'Verificado'
+                                    : isFr
+                                    ? 'Vérifié'
+                                    : isEn
+                                    ? 'Verified'
+                                    : 'Verifye'
+                                }
+                              >
+                                <BadgeCheck className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                              </span>
+                            )}
+                          </span>
+                        </>
+                      )}
+
+                      {ts.relative && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span
+                            className="font-mono tabular-nums text-slate-400 inline-flex items-center gap-1"
+                            title={ts.full}
+                          >
+                            <Clock className="w-3 h-3 text-slate-500 shrink-0" />
+                            {ts.relative}
+                          </span>
+                        </>
+                      )}
                     </div>
-                  )}
-                </div>
 
-                {/* Right Actions */}
-                <div className="flex items-center gap-1 shrink-0 self-start">
-                  <button
-                    type="button"
-                    onClick={(e) => handleToggleRead(e, notif)}
-                    className="p-2 rounded-xl hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
-                    title={
-                      notif.read
-                        ? isEs
-                          ? 'Marcar como no leído'
+                    {/* Title */}
+                    <h3
+                      className={`${titleSizeClass} leading-snug ${
+                        !notif.read ? 'font-bold text-white' : 'font-semibold text-slate-300'
+                      }`}
+                    >
+                      {notif.title}
+                    </h3>
+
+                    {/* Body */}
+                    <p
+                      className={`${bodySizeClass} mt-1.5 whitespace-pre-line line-clamp-3 ${
+                        !notif.read ? 'text-slate-200' : 'text-slate-400'
+                      }`}
+                    >
+                      {notif.body}
+                    </p>
+
+                    {/* Footer Action Row */}
+                    <div className="mt-3.5 pt-2.5 border-t border-slate-800/80 flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCardClick(notif);
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 text-slate-200 hover:text-white font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <BookOpen className="w-3.5 h-3.5 text-sky-400" />
+                          <span>
+                            {isLongBody
+                              ? isEs
+                                ? 'Leer completo'
+                                : isFr
+                                ? 'Lire en entier'
+                                : isEn
+                                ? 'Read full message'
+                                : 'Li tout mesaj la'
+                              : isEs
+                              ? 'Abrir lectura'
+                              : isFr
+                              ? 'Ouvrir'
+                              : isEn
+                              ? 'Read'
+                              : 'Ouvri pou li'}
+                          </span>
+                        </button>
+
+                        {notif.actionTarget && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleActionClick(notif);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/35 text-amber-200 hover:text-white font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 text-amber-400" />
+                            <span>{getOpenActionLabel(notif)}</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {readAtFormatted?.relative && (
+                        <span className="text-[11px] font-mono tabular-nums text-slate-500">
+                          {isEs ? 'Leído' : isFr ? 'Lu' : isEn ? 'Read' : 'Li'} ·{' '}
+                          {readAtFormatted.relative}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right Quick Actions */}
+                  <div className="flex flex-col sm:flex-row items-center gap-1 shrink-0 self-start">
+                    <button
+                      type="button"
+                      id={`btn-toggle-read-${notif.id}`}
+                      onClick={(e) => handleToggleRead(e, notif)}
+                      className={`p-2 min-h-[36px] min-w-[36px] rounded-xl border transition-colors cursor-pointer flex items-center justify-center ${
+                        notif.read
+                          ? 'bg-slate-800/60 hover:bg-slate-700 border-slate-700/70 text-slate-300 hover:text-white'
+                          : 'bg-amber-400/15 hover:bg-amber-400/25 border-amber-400/40 text-amber-300'
+                      }`}
+                      title={getReadActionLabel(notif.read)}
+                      aria-label={getReadActionLabel(notif.read)}
+                    >
+                      {notif.read ? (
+                        <MailOpen className="w-4 h-4" />
+                      ) : (
+                        <Check className="w-4 h-4" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={(e) => handleDelete(e, notif)}
+                      className="p-2 min-h-[36px] min-w-[36px] rounded-xl bg-slate-800/40 hover:bg-red-500/20 border border-transparent hover:border-red-500/30 text-slate-400 hover:text-red-300 transition-colors cursor-pointer flex items-center justify-center"
+                      title={
+                        isEs
+                          ? 'Eliminar notificación'
                           : isFr
-                          ? 'Marquer non lu'
+                          ? 'Supprimer'
                           : isEn
-                          ? 'Mark as unread'
-                          : 'Make kòm pa li'
-                        : isEs
-                        ? 'Marcar como leído'
-                        : isFr
-                        ? 'Marquer comme lu'
-                        : isEn
-                        ? 'Mark as read'
-                        : 'Make kòm li'
-                    }
-                  >
-                    {notif.read ? (
-                      <EyeOff className="w-4 h-4 text-slate-400" />
-                    ) : (
-                      <Check className="w-4 h-4 text-amber-400" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={(e) => handleDelete(e, notif)}
-                    className="p-2 rounded-xl hover:bg-red-500/20 text-slate-400 hover:text-red-300 transition-colors cursor-pointer"
-                    title={isEs ? 'Eliminar notificación' : isFr ? 'Supprimer' : isEn ? 'Delete' : 'Efase notifikasyon'}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                          ? 'Delete'
+                          : 'Efase notifikasyon'
+                      }
+                      aria-label={
+                        isEs
+                          ? 'Eliminar notificación'
+                          : isFr
+                          ? 'Supprimer'
+                          : isEn
+                          ? 'Delete'
+                          : 'Efase notifikasyon'
+                      }
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
       {/* =========================================================================
-          4. NOTIFICATION DETAIL POPUP MODAL (WHEN CLICKED)
+          4. NOTIFICATION READER MODAL (COMFORTABLE READING + PREV/NEXT + READ TOGGLE)
           ========================================================================= */}
       <AnimatePresence>
         {selectedNotification && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+            onClick={() => setSelectedNotificationId(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="notification-reader-title"
+          >
             <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              initial={{ opacity: 0, scale: 0.97, y: 8 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="w-full max-w-lg rounded-3xl ios-glass-card p-6 shadow-2xl relative border border-white/15"
-              style={{
-                background: 'radial-gradient(130% 120% at 50% 0%, rgba(30, 41, 59, 0.98) 0%, rgba(15, 23, 42, 0.99) 100%)',
-              }}
+              exit={{ opacity: 0, scale: 0.97, y: 8 }}
+              transition={{ duration: 0.18 }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-2xl rounded-3xl bg-[#0F172A] border border-slate-700/80 shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
-              <div className="flex items-start justify-between gap-4 pb-4 border-b border-white/10">
-                <div className="flex items-center gap-3">
+              {/* Modal Top Header */}
+              <div className="p-5 sm:p-6 pb-4 border-b border-slate-800 flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3.5 min-w-0">
                   <div
-                    className={`w-11 h-11 rounded-2xl border flex items-center justify-center shrink-0 shadow-sm ${getIconBackground(
+                    className={`w-11 h-11 rounded-2xl border flex items-center justify-center shrink-0 ${getIconBackground(
                       selectedNotification.type
                     )}`}
                   >
                     {getNotificationIcon(selectedNotification.type)}
                   </div>
-                  <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-white/10 text-slate-300">
-                      {selectedNotification.badgeText || 'Notifikasyon'}
-                    </span>
-                    <h3 className="text-base sm:text-lg font-black text-white mt-1 leading-snug">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400 mb-1">
+                      {selectedNotification.read ? (
+                        <span className="inline-flex items-center gap-1 text-sky-400 font-semibold">
+                          <CheckCheck className="w-3.5 h-3.5" />
+                          <span>{isEs ? 'Leído' : isFr ? 'Lu' : isEn ? 'Read' : 'Deja li'}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-amber-300 font-semibold">
+                          <Mail className="w-3.5 h-3.5" />
+                          <span>{isEs ? 'No leído' : isFr ? 'Non lu' : isEn ? 'Unread' : 'Poko li'}</span>
+                        </span>
+                      )}
+                      {selectedNotification.badgeText && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-slate-300 font-medium">
+                            {selectedNotification.badgeText}
+                          </span>
+                        </>
+                      )}
+                      {selectedIndex >= 0 && readerNavigationList.length > 1 && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono tabular-nums text-slate-400">
+                            {selectedIndex + 1} / {readerNavigationList.length}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <h3
+                      id="notification-reader-title"
+                      className="text-base sm:text-xl font-bold text-white leading-snug"
+                    >
                       {selectedNotification.title}
                     </h3>
                   </div>
@@ -1086,67 +1496,186 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => setSelectedNotification(null)}
-                  className="p-1.5 rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
+                  onClick={() => setSelectedNotificationId(null)}
+                  className="p-2 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors cursor-pointer shrink-0"
+                  aria-label={isEs ? 'Cerrar' : isFr ? 'Fermer' : isEn ? 'Close' : 'Fèmen'}
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              <div className="py-4 space-y-3">
-                <div className="flex items-center gap-3 text-xs text-slate-400 font-mono">
-                  <span className="flex items-center gap-1">
-                    <Clock className="w-3.5 h-3.5 text-slate-400" />
-                    {selectedNotification.createdAt ? selectedNotification.createdAt.replace('T', ' ').slice(0, 16) : ''}
+              {/* Modal Meta + Text Size Strip */}
+              <div className="px-5 sm:px-6 py-3 bg-[#07152F]/70 border-b border-slate-800/80 flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 text-xs text-slate-400 flex-wrap">
+                  <span className="font-mono tabular-nums inline-flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5 text-slate-500" />
+                    {formatNotificationTimestamp(selectedNotification.createdAt, resolvedLang).full}
                   </span>
                   {selectedNotification.author && (
                     <>
-                      <span>•</span>
-                      <span>{selectedNotification.author}</span>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-slate-200 font-medium">
+                        {selectedNotification.author}
+                      </span>
+                    </>
+                  )}
+                  {selectedReadAt && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="text-sky-400 font-mono tabular-nums">
+                        {isEs ? 'Leído' : isFr ? 'Lu' : isEn ? 'Read' : 'Li'}{' '}
+                        {formatNotificationTimestamp(selectedReadAt, resolvedLang).relative}
+                      </span>
                     </>
                   )}
                 </div>
 
-                <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-line bg-black/20 p-4 rounded-2xl border border-white/5">
-                  {selectedNotification.body}
-                </p>
+                {/* Inline Text Size Switcher */}
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { id: 'compact', label: 'A-' },
+                      { id: 'normal', label: 'A' },
+                      { id: 'large', label: 'A+' },
+                    ] as { id: NotificationTextSize; label: string }[]
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => handleChangeTextSize(opt.id)}
+                      className={`px-2 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                        textSize === opt.id
+                          ? 'bg-amber-400 text-slate-950 font-bold'
+                          : 'bg-slate-800/80 text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <div className="pt-4 border-t border-white/10 flex items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={(e) => handleDelete(e, selectedNotification)}
-                  className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-red-950/40 border border-slate-700 hover:border-red-500/40 text-slate-400 hover:text-red-300 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  <span>{isEs ? 'Eliminar' : isFr ? 'Supprimer' : isEn ? 'Delete' : 'Efase'}</span>
-                </button>
+              {/* Scrollable Reading Body */}
+              <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4">
+                {(selectedNotification.department ||
+                  (selectedNotification.targetAudience &&
+                    selectedNotification.targetAudience !== 'Tout moun')) && (
+                  <div className="flex items-center gap-2 flex-wrap text-xs text-slate-300">
+                    {selectedNotification.department && (
+                      <span className="text-indigo-300 font-semibold">
+                        {selectedNotification.department}
+                      </span>
+                    )}
+                    {selectedNotification.targetAudience &&
+                      selectedNotification.targetAudience !== 'Tout moun' && (
+                        <span className="text-amber-300 font-medium">
+                          {isEs ? 'Dirigido a:' : isFr ? 'Pour :' : isEn ? 'Audience:' : 'Konsène:'}{' '}
+                          {selectedNotification.targetAudience}
+                        </span>
+                      )}
+                  </div>
+                )}
 
-                <div className="flex items-center gap-2">
+                <p
+                  className={`${modalBodySizeClass} text-slate-100 whitespace-pre-line max-w-[68ch]`}
+                >
+                  {selectedNotification.body}
+                </p>
+
+                {selectedNotification.imageUrl && (
+                  <div className="rounded-2xl overflow-hidden border border-slate-700/80 bg-black/40">
+                    <img
+                      src={selectedNotification.imageUrl}
+                      alt={selectedNotification.title}
+                      onClick={() =>
+                        setLightboxImage({
+                          url: selectedNotification.imageUrl!,
+                          title: selectedNotification.title,
+                          caption: selectedNotification.imageCaption,
+                        })
+                      }
+                      className="w-full max-h-80 object-contain mx-auto cursor-pointer hover:opacity-95 transition-opacity"
+                    />
+                    {selectedNotification.imageCaption && (
+                      <div className="px-4 py-2 bg-slate-950/80 text-xs text-slate-300 text-center">
+                        {selectedNotification.imageCaption}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer Controls */}
+              <div className="p-4 sm:p-5 border-t border-slate-800 bg-[#07152F]/50 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                {/* Left: Prev/Next & Toggle Read/Unread + Delete */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {readerNavigationList.length > 1 && (
+                    <div className="flex items-center gap-1 mr-1">
+                      <button
+                        type="button"
+                        disabled={selectedIndex <= 0}
+                        onClick={() => handleStepReader(-1)}
+                        className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 transition-colors cursor-pointer"
+                        title={isEs ? 'Anterior' : isFr ? 'Précédent' : isEn ? 'Previous' : 'Anvan'}
+                        aria-label={isEs ? 'Anterior' : isFr ? 'Précédent' : isEn ? 'Previous' : 'Anvan'}
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={selectedIndex < 0 || selectedIndex >= readerNavigationList.length - 1}
+                        onClick={() => handleStepReader(1)}
+                        className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 transition-colors cursor-pointer"
+                        title={isEs ? 'Siguiente' : isFr ? 'Suivant' : isEn ? 'Next' : 'Swivan'}
+                        aria-label={isEs ? 'Siguiente' : isFr ? 'Suivant' : isEn ? 'Next' : 'Swivan'}
+                      >
+                        <ChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    id="btn-modal-toggle-read"
+                    onClick={(e) => handleToggleRead(e, selectedNotification)}
+                    className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 hover:text-white font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    {selectedNotification.read ? (
+                      <MailOpen className="w-4 h-4 text-amber-400" />
+                    ) : (
+                      <Check className="w-4 h-4 text-sky-400" />
+                    )}
+                    <span>{getReadActionLabel(selectedNotification.read)}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => handleDelete(e, selectedNotification)}
+                    className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-red-950/50 border border-slate-700 hover:border-red-500/40 text-slate-400 hover:text-red-300 font-semibold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>{isEs ? 'Eliminar' : isFr ? 'Supprimer' : isEn ? 'Delete' : 'Efase'}</span>
+                  </button>
+                </div>
+
+                {/* Right: Open Target & Close */}
+                <div className="flex items-center justify-end gap-2">
                   {selectedNotification.actionTarget && (
                     <button
                       type="button"
-                      onClick={() => {
-                        const target = selectedNotification.actionTarget;
-                        setSelectedNotification(null);
-                        if (target && onNavigateToTab) {
-                          onNavigateToTab(target.tab || 'home', {
-                            announcementId: target.announcementId,
-                            serviceId: target.serviceId,
-                          });
-                        }
-                      }}
-                      className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-lg shadow-amber-400/20 transition-all cursor-pointer transform active:scale-95"
+                      id="btn-modal-open-target"
+                      onClick={() => handleActionClick(selectedNotification)}
+                      className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                     >
-                      <ExternalLink className="w-4 h-4 text-slate-950" />
-                      <span>{isEs ? 'Ir a la publicación' : isFr ? 'Ouvrir' : isEn ? 'Open Post' : 'Ouvri kounye a'}</span>
+                      <ExternalLink className="w-4 h-4" />
+                      <span>{getOpenActionLabel(selectedNotification)}</span>
                     </button>
                   )}
 
                   <button
                     type="button"
-                    onClick={() => setSelectedNotification(null)}
-                    className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white font-bold text-xs transition-colors cursor-pointer"
+                    onClick={() => setSelectedNotificationId(null)}
+                    className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs transition-colors cursor-pointer"
                   >
                     {isEs ? 'Cerrar' : isFr ? 'Fermer' : isEn ? 'Close' : 'Fèmen'}
                   </button>
@@ -1156,6 +1685,14 @@ export const NotificationsPage: React.FC<NotificationsPageProps> = ({
           </div>
         )}
       </AnimatePresence>
+      <PosterLightboxModal
+        isOpen={!!lightboxImage}
+        imageUrl={lightboxImage?.url || ''}
+        title={lightboxImage?.title || ''}
+        caption={lightboxImage?.caption}
+        language={resolvedLang}
+        onClose={() => setLightboxImage(null)}
+      />
     </div>
   );
 };

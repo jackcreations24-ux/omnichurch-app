@@ -27,6 +27,8 @@ import confetti from 'canvas-confetti';
 import { Church, Language, UserRole } from '../../types';
 import { useToast } from '../../context/ToastContext';
 import { saveChurch } from '../../utils/storage';
+import { openExternalUrlSafely } from '../../utils/safeExternalLink';
+import { OmniChurchLogo } from './OmniChurchLogo';
 
 interface DesktopAppDownloadModalProps {
   isOpen: boolean;
@@ -214,7 +216,7 @@ pause
       ? `✝️ *${church?.name || 'OmniChurch Pro'}*\nAccédez au portail officiel de notre église, carte de membre digitale et présences :\n🔗 ${currentUrl}`
       : `✝️ *${church?.name || 'OmniChurch Pro'}*\nKonekte sou pòtay ofisyèl legliz nou an, jwenn kat manm dijital ou, orè sèvis ak prezans:\n🔗 ${currentUrl}`;
 
-    window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
+    openExternalUrlSafely(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`);
   };
 
   return (
@@ -226,11 +228,13 @@ pause
         className="relative w-full max-w-2xl bg-[#0F172A] border border-slate-700/90 rounded-3xl shadow-2xl overflow-hidden text-slate-200 my-auto"
       >
         {/* MODAL HEADER */}
-        <div className="flex items-center justify-between p-4 sm:p-5 border-b border-slate-800 bg-[#162235]">
+        <div className="flex items-center justify-between p-4 sm:p-5 border-b border-slate-800 bg-[#07152F]">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-amber-300 font-extrabold shadow-inner">
-              <Monitor className="w-5 h-5 text-amber-400" />
-            </div>
+            <OmniChurchLogo
+              variant="icon"
+              priority
+              className="h-10 w-10"
+            />
             <div>
               <h2 className="text-base sm:text-lg font-black text-white flex items-center gap-2">
                 <span>{isEs ? 'Aplicación de Escritorio (.EXE) & Compartir' : isEn ? 'Desktop App (.EXE) & Share' : isFr ? 'Application Bureau (.EXE) & Partage' : 'Aplikasyon PC (.EXE) & Sant Pataj'}</span>

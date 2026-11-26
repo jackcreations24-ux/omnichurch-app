@@ -1,26 +1,37 @@
 import React, { useState, useEffect } from 'react';
 import { SponsorItem, Language } from '../../types';
 import { getDeveloperSettings } from '../../utils/developerStorage';
+import { openExternalUrlSafely } from '../../utils/safeExternalLink';
 import { ExternalLink, HeartHandshake, CheckCircle2, ShieldCheck } from 'lucide-react';
 
 interface SponsorMarqueeFooterProps {
   language?: Language;
   onOpenDevPanel?: () => void;
+  onOpenPrivacyPolicy?: () => void;
+  onOpenTermsOfService?: () => void;
 }
 
 export const SponsorMarqueeFooter: React.FC<SponsorMarqueeFooterProps> = ({
   language = 'ht',
+  onOpenPrivacyPolicy,
+  onOpenTermsOfService,
 }) => {
   const [settings, setSettings] = useState(() => getDeveloperSettings());
   const [sponsors, setSponsors] = useState<SponsorItem[]>(() =>
-    settings.sponsors.filter((s) => s.active)
+    [...settings.sponsors]
+      .filter((s) => s.active)
+      .sort((a, b) => (a.displayOrder ?? 1) - (b.displayOrder ?? 1))
   );
 
   useEffect(() => {
     const handleUpdate = () => {
       const current = getDeveloperSettings();
       setSettings(current);
-      setSponsors(current.sponsors.filter((s) => s.active));
+      setSponsors(
+        [...current.sponsors]
+          .filter((s) => s.active)
+          .sort((a, b) => (a.displayOrder ?? 1) - (b.displayOrder ?? 1))
+      );
     };
 
     window.addEventListener('omnichurch_dev_settings_updated', handleUpdate);
@@ -29,13 +40,31 @@ export const SponsorMarqueeFooter: React.FC<SponsorMarqueeFooterProps> = ({
     };
   }, []);
 
-  if (!settings.showSponsorsInFooter || sponsors.length === 0) {
+  const showSponsorsBlock = settings.showSponsorsInFooter && sponsors.length > 0;
+
+  if (!showSponsorsBlock && !onOpenPrivacyPolicy && !onOpenTermsOfService) {
     return null;
   }
 
   const isEs = language === 'es';
   const isEn = language === 'en';
   const isFr = language === 'fr';
+
+  const privacyLabel = isEs
+    ? 'Política de Privacidad'
+    : isEn
+    ? 'Privacy Policy'
+    : isFr
+    ? 'Politique de Confidentialité'
+    : 'Politik Konfidansyalite';
+
+  const termsLabel = isEs
+    ? 'Términos de Servicio'
+    : isEn
+    ? 'Terms of Service'
+    : isFr
+    ? 'Conditions d’Utilisation'
+    : 'Kondisyon Itilizasyon';
 
   const titleText = isEs
     ? 'Patrocinadores & Socios Oficiales'
@@ -56,11 +85,7 @@ export const SponsorMarqueeFooter: React.FC<SponsorMarqueeFooterProps> = ({
   const handleSponsorClick = (sponsor: SponsorItem, e: React.MouseEvent) => {
     e.preventDefault();
     if (!sponsor.targetUrl) return;
-    let url = sponsor.targetUrl.trim();
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `https://${url}`;
-    }
-    window.open(url, '_blank', 'noopener,noreferrer');
+    openExternalUrlSafely(sponsor.targetUrl);
   };
 
   const getTierBadge = (tier: SponsorItem['tier']) => {
@@ -87,14 +112,16 @@ export const SponsorMarqueeFooter: React.FC<SponsorMarqueeFooterProps> = ({
   return (
     <footer
       id="main-app-footer"
-      className="hidden sm:block w-full bg-[#090D16] border-t border-slate-800/90 py-3.5 overflow-hidden select-none relative group/footer"
+      className="w-full bg-[#090D16] border-t border-slate-800/90 pt-3 pb-20 sm:py-3.5 overflow-hidden select-none relative group/footer"
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <HeartHandshake className="w-4 h-4 text-amber-400 shrink-0" />
-          <span className="text-[11px] font-extrabold uppercase tracking-wider text-white">
-            {titleText}
-          </span>
+      {showSponsorsBlock && (
+        <div className="hidden sm:block mb-3">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <HeartHandshake className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="text-[11px] font-extrabold uppercase tracking-wider text-white">
+                {titleText}
+              </span>
           <span className="hidden sm:inline-block text-[10px] text-slate-400 font-medium">
             — {subText}
           </span>
@@ -224,6 +251,47 @@ export const SponsorMarqueeFooter: React.FC<SponsorMarqueeFooterProps> = ({
                 <ExternalLink className="w-3.5 h-3.5 text-slate-500 group-hover:text-amber-400 transition-colors shrink-0 ml-1 opacity-60 group-hover:opacity-100" />
               </div>
             ))}
+          </div>
+        </div>
+      )}
+        </div>
+      )}
+
+      {(onOpenPrivacyPolicy || onOpenTermsOfService) && (
+        <div
+          className={`max-w-7xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-[11px] text-slate-400 ${
+            showSponsorsBlock ? 'sm:pt-3 sm:border-t sm:border-slate-800/70' : ''
+          }`}
+        >
+          <span className="text-slate-500">
+            © {new Date().getFullYear()} OmniChurch PRO
+          </span>
+          <div className="flex items-center gap-2.5 flex-wrap justify-center">
+            {onOpenPrivacyPolicy && (
+              <button
+                type="button"
+                id="footer-link-privacy-policy"
+                onClick={onOpenPrivacyPolicy}
+                className="text-slate-400 hover:text-white underline underline-offset-2 transition-colors cursor-pointer bg-transparent border-0 p-0"
+              >
+                {privacyLabel}
+              </button>
+            )}
+            {onOpenPrivacyPolicy && onOpenTermsOfService && (
+              <span className="text-slate-600" aria-hidden="true">
+                •
+              </span>
+            )}
+            {onOpenTermsOfService && (
+              <button
+                type="button"
+                id="footer-link-terms-of-service"
+                onClick={onOpenTermsOfService}
+                className="text-slate-400 hover:text-white underline underline-offset-2 transition-colors cursor-pointer bg-transparent border-0 p-0"
+              >
+                {termsLabel}
+              </button>
+            )}
           </div>
         </div>
       )}

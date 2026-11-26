@@ -10,10 +10,14 @@ import {
 } from '../../types';
 import { SERVICE_CATEGORIES } from '../../utils/i18n';
 import {
-  recordAttendanceScan,
   ScanResult,
   isDeviceOnline,
+  isServiceEnded,
+  formatLocalDateYmd,
 } from '../../utils/storage';
+import { isServiceCurrentlyActive, isServiceBeforeStart } from '../../utils/permissions';
+import { formatServiceTimeAmPm } from '../../utils/memberFeedUtils';
+import { recordAttendanceScanUnified } from '../../utils/qrSyncLayer';
 import { useToast } from '../../context/ToastContext';
 import {
   Users,
@@ -71,6 +75,7 @@ import {
 import { featureFlags } from '../../utils/featureFlags';
 import { hasActiveChurchLicense, getChurchLicense, getDonationConfig } from '../../utils/developerStorage';
 import { AdminAttendanceRatioPieChart } from './AdminAttendanceRatioPieChart';
+import { AdminAttendanceAudit } from './AdminAttendanceAudit';
 import { ChurchLicenseModal } from '../common/ChurchLicenseModal';
 
 interface AdminDashboardProps {
@@ -84,8 +89,9 @@ interface AdminDashboardProps {
   onRefresh?: () => void;
   onNavigate?: (tab: string) => void;
   onNavigateTab?: (tab: string) => void;
-  onToggleActiveService?: (serviceId: string, isOpen: boolean) => void;
+  onToggleActiveService?: (serviceId: string, isOpen: boolean) => boolean | void;
   onKeepSessionAlive?: () => void;
+  onOpenDonateScreen?: () => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -101,6 +107,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onNavigateTab,
   onToggleActiveService,
   onKeepSessionAlive,
+  onOpenDonateScreen,
 }) => {
   const toast = useToast();
   const isEs = language === 'es';
@@ -191,7 +198,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, []);
 
   // Track user inactivity in AdminDashboard and show warning toast 30 seconds before auto-lock
+  const effectiveAutoLockMinutes =
+    typeof church?.autoLockMinutes === 'number' ? church.autoLockMinutes : 5;
+
   useEffect(() => {
+    if (effectiveAutoLockMinutes <= 0) {
+      setShowSessionWarning(false);
+      return;
+    }
+
     lastAdminDashboardActivityRef.current = Date.now();
 
     const recordDashboardActivity = () => {
@@ -213,8 +228,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       window.addEventListener(evt, recordDashboardActivity, { passive: true });
     });
 
-    const FIVE_MINUTES_MS = 5 * 60 * 1000;
-    const WARNING_THRESHOLD_MS = FIVE_MINUTES_MS - 30 * 1000; // 270,000 ms (30s before auto-lock)
+    const LOCK_TIMEOUT_MS = effectiveAutoLockMinutes * 60 * 1000;
+    const WARNING_THRESHOLD_MS = Math.max(0, LOCK_TIMEOUT_MS - 30 * 1000);
 
     const interval = setInterval(() => {
       // If camera scanner is actively scanning, keep session active automatically
@@ -227,8 +242,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       const idleDuration = Date.now() - lastAdminDashboardActivityRef.current;
 
-      if (idleDuration >= WARNING_THRESHOLD_MS && idleDuration < FIVE_MINUTES_MS) {
-        const remaining = Math.max(1, Math.ceil((FIVE_MINUTES_MS - idleDuration) / 1000));
+      if (idleDuration >= WARNING_THRESHOLD_MS && idleDuration < LOCK_TIMEOUT_MS) {
+        const remaining = Math.max(1, Math.ceil((LOCK_TIMEOUT_MS - idleDuration) / 1000));
         setSessionSecondsRemaining(remaining);
         setShowSessionWarning(true);
       } else if (idleDuration < WARNING_THRESHOLD_MS) {
@@ -242,7 +257,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
       clearInterval(interval);
     };
-  }, [isAutoScanEnabled]);
+  }, [isAutoScanEnabled, effectiveAutoLockMinutes]);
 
   const activeDonationSubtitle = useMemo(() => {
     const list: string[] = [];
@@ -268,6 +283,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const framePassCounterRef = useRef<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const zoomLevelRef = useRef<number>(zoomLevel);
+  const zoomRangeRef = useRef<ReturnType<typeof getCameraZoomRange>>(zoomRange);
+  const isAutoScanEnabledRef = useRef<boolean>(isAutoScanEnabled);
+  const scanCooldownUntilRef = useRef<number>(0);
+  const lastDetectedCodeRef = useRef<{ code: string; at: number } | null>(null);
 
   // 3-dots more menu state for header actions
   const [isHeaderMoreMenuOpen, setIsHeaderMoreMenuOpen] = useState<boolean>(false);
@@ -329,20 +349,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const activeService = services.find((s) => s.isOpenForAttendance);
+  const activeService = services.find((s) => isServiceCurrentlyActive(s, isServiceEnded));
   const activeServiceCategory = activeService
     ? SERVICE_CATEGORIES[activeService.category]
     : null;
 
-  // Set default selected service to open if none is active
-  useEffect(() => {
-    if (!activeService && services.length > 0 && !selectedServiceToOpen) {
-      setSelectedServiceToOpen(services[0].id);
-    }
-  }, [activeService, services, selectedServiceToOpen]);
+  // Only services that have NOT ended can be opened from the quick-open dropdown
+  const openableServices = useMemo(
+    () => services.filter((s) => !s.isPermanentlyEnded && !isServiceEnded(s)),
+    [services]
+  );
 
-  // Today's attendance
-  const todayDate = new Date().toISOString().split('T')[0];
+  // Set default selected service to open if none is active, keeping selection strictly within non-ended services
+  useEffect(() => {
+    if (activeService) return;
+    if (openableServices.length === 0) {
+      if (selectedServiceToOpen !== '') {
+        setSelectedServiceToOpen('');
+      }
+      return;
+    }
+    if (!selectedServiceToOpen || !openableServices.some((s) => s.id === selectedServiceToOpen)) {
+      setSelectedServiceToOpen(openableServices[0].id);
+    }
+  }, [activeService, openableServices, selectedServiceToOpen]);
+
+  // Today's attendance (strictly local calendar day)
+  const todayDate = formatLocalDateYmd();
   const todayRecords = attendanceRecords.filter((a) => a.serviceDate === todayDate);
 
   // Active attendance rate for the open service
@@ -389,7 +422,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   // ---------------- PROCESS SCAN EXECUTION ----------------
-  const handleProcessScan = (rawCode: string, method: 'qr_scan' | 'barcode' | 'manual' = 'qr_scan') => {
+  const handleProcessScan = async (rawCode: string, method: 'qr_scan' | 'barcode' | 'manual' = 'qr_scan') => {
     if (!rawCode.trim() || !activeService) {
       if (!activeService) {
         toast.warning(
@@ -400,7 +433,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
 
-    const res = recordAttendanceScan({
+    const res = await recordAttendanceScanUnified({
       currentChurchId: church.id,
       rawCode: rawCode.trim(),
       serviceId: activeService.id,
@@ -414,19 +447,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       scannerAudio.play('success');
       if (res.isOfflineSaved) {
         toast.info(
-          isEs ? '💾 Asistencia Guardada Localmente (Offline)' : isEn ? '💾 Attendance Saved Locally (Offline)' : isFr ? '💾 Présence Enregistrée Localement (Offline)' : '💾 Prezans Sove Lokalman (Offline)',
+          res.isVisitor
+            ? (isEs ? '💾 Visitante Guardado (Offline)' : isEn ? '💾 Visitor Saved Locally (Offline)' : isFr ? '💾 Visiteur Enregistré (Offline)' : '💾 Vizitè Sove Lokalman (Offline)')
+            : (isEs ? '💾 Asistencia Guardada Localmente (Offline)' : isEn ? '💾 Attendance Saved Locally (Offline)' : isFr ? '💾 Présence Enregistrée Localement (Offline)' : '💾 Prezans Sove Lokalman (Offline)'),
           isEs
-            ? `${res.member?.fullName} (${res.member?.memberId}) registrado localmente.`
+            ? `${res.member?.fullName} (${res.member?.memberId})${res.homeChurchName ? ` • ${res.homeChurchName}` : ''} registrado localmente.`
             : isEn
-            ? `${res.member?.fullName} (${res.member?.memberId}) saved locally.`
+            ? `${res.member?.fullName} (${res.member?.memberId})${res.homeChurchName ? ` • ${res.homeChurchName}` : ''} saved locally.`
             : isFr
-            ? `${res.member?.fullName} (${res.member?.memberId}) enregistré localement.`
-            : `${res.member?.fullName} (${res.member?.memberId}) anrejistre lokalman.`
+            ? `${res.member?.fullName} (${res.member?.memberId})${res.homeChurchName ? ` • ${res.homeChurchName}` : ''} enregistré localement.`
+            : `${res.member?.fullName} (${res.member?.memberId})${res.homeChurchName ? ` • ${res.homeChurchName}` : ''} anrejistre lokalman.`
         );
       } else {
         toast.success(
-          isEs ? '¡Asistencia Registrada! ✓' : isEn ? 'Attendance Recorded! ✓' : isFr ? 'Présence Enregistrée ! ✓' : 'Prezans Anrejistre! ✓',
-          `${res.member?.fullName} (${res.member?.memberId}) • ${activeService.title}`
+          res.isVisitor
+            ? (isEs ? '¡Visitante Registrado! ✓' : isEn ? 'Visitor Checked In! ✓' : isFr ? 'Visiteur Enregistré ! ✓' : 'Prezans Vizitè Anrejistre! ✓')
+            : (isEs ? '¡Asistencia Registrada! ✓' : isEn ? 'Attendance Recorded! ✓' : isFr ? 'Présence Enregistrée ! ✓' : 'Prezans Anrejistre! ✓'),
+          `${res.member?.fullName} (${res.member?.memberId})${res.homeChurchName ? ` • Vizitè (${res.homeChurchName})` : ''} • ${activeService.title}`
         );
       }
 
@@ -464,22 +501,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setManualCodeInput('');
   };
 
+  const handleProcessScanRef = useRef(handleProcessScan);
+  handleProcessScanRef.current = handleProcessScan;
+  zoomLevelRef.current = zoomLevel;
+  zoomRangeRef.current = zoomRange;
+  isAutoScanEnabledRef.current = isAutoScanEnabled;
+
   // ---------------- ULTRA MULTI-PASS CAMERA SCANNER LOOP ----------------
   const scanVideoFrame = async () => {
     if (!videoRef.current || !canvasRef.current || !isScanningRef.current) return;
+
+    const now = Date.now();
+    if (now < scanCooldownUntilRef.current) {
+      if (isScanningRef.current) {
+        animationFrameId.current = requestAnimationFrame(scanVideoFrame);
+      }
+      return;
+    }
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    if (video.readyState === video.HAVE_ENOUGH_DATA && ctx) {
+    if (video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0 && ctx) {
       canvas.width = video.videoWidth || 640;
       canvas.height = video.videoHeight || 480;
 
+      const curZoom = zoomLevelRef.current;
+      const curZoomRange = zoomRangeRef.current;
+      const useDigitalZoomCrop = curZoom > 1 && !curZoomRange.supported;
+
       // Handle digital zoom crop if digital zoom is active and hardware zoom wasn't applied
-      if (zoomLevel > 1 && !zoomRange.supported) {
-        const cropWidth = canvas.width / zoomLevel;
-        const cropHeight = canvas.height / zoomLevel;
+      if (useDigitalZoomCrop) {
+        const cropWidth = canvas.width / curZoom;
+        const cropHeight = canvas.height / curZoom;
         const startX = (canvas.width - cropWidth) / 2;
         const startY = (canvas.height - cropHeight) / 2;
         ctx.drawImage(video, startX, startY, cropWidth, cropHeight, 0, 0, canvas.width, canvas.height);
@@ -489,25 +544,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       try {
         const detection = await decodeFrameMultiPass(
-          video,
+          useDigitalZoomCrop ? canvas : video,
           canvas,
           framePassCounterRef.current++
         );
 
         if (detection && detection.code) {
-          if (detection.enhancementLabel) {
-            setActiveEnhancement(detection.enhancementLabel);
-          }
-          // Process scanned QR code
-          handleProcessScan(detection.code, 'qr_scan');
-          // Pause briefly before next scan to prevent instant re-trigger
-          isScanningRef.current = false;
-          setTimeout(() => {
-            setActiveEnhancement(null);
-            if (isAutoScanEnabled) {
-              isScanningRef.current = true;
+          const detectedCode = detection.code.trim();
+          const prev = lastDetectedCodeRef.current;
+          const isSameInCooldown =
+            prev && prev.code === detectedCode && Date.now() - prev.at < 3500;
+
+          if (!isSameInCooldown) {
+            lastDetectedCodeRef.current = { code: detectedCode, at: Date.now() };
+            scanCooldownUntilRef.current = Date.now() + 1800;
+
+            if (detection.enhancementLabel) {
+              setActiveEnhancement(detection.enhancementLabel);
+              setTimeout(() => {
+                setActiveEnhancement(null);
+              }, 1800);
             }
-          }, 1800);
+
+            // Process scanned QR code while keeping animation loop alive cleanly
+            void handleProcessScanRef.current(detectedCode, 'qr_scan');
+          }
         }
       } catch (err) {
         console.warn('Scan frame error:', err);
@@ -540,12 +601,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setIsTorchOn(false);
       const zRange = getCameraZoomRange(stream);
       setZoomRange(zRange);
+      zoomRangeRef.current = zRange;
       setZoomLevel(1);
+      zoomLevelRef.current = 1;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
         isScanningRef.current = true;
+        scanCooldownUntilRef.current = 0;
+        lastDetectedCodeRef.current = null;
+        if (animationFrameId.current) {
+          cancelAnimationFrame(animationFrameId.current);
+        }
         animationFrameId.current = requestAnimationFrame(scanVideoFrame);
       }
     } catch (err: unknown) {
@@ -567,6 +635,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Stop Embedded Camera
   const stopEmbeddedCamera = () => {
     isScanningRef.current = false;
+    scanCooldownUntilRef.current = 0;
+    lastDetectedCodeRef.current = null;
     if (animationFrameId.current) {
       cancelAnimationFrame(animationFrameId.current);
       animationFrameId.current = null;
@@ -598,6 +668,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleToggleZoom = async () => {
     const nextZoom = zoomLevel === 1 ? 2 : 1;
     setZoomLevel(nextZoom);
+    zoomLevelRef.current = nextZoom;
     if (zoomRange.supported && streamRef.current) {
       await setCameraZoom(streamRef.current, nextZoom);
     }
@@ -784,7 +855,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* 1. TOP HEADER */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
               {isEs ? 'Panel de Administración' : isEn ? 'Admin Dashboard' : isFr ? 'Tableau de Bord Admin' : 'Tablo Bò Administrasyon'}
             </h2>
@@ -876,7 +947,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     id="btn-admin-dropdown-support-dev"
                     onClick={() => {
                       setIsHeaderMoreMenuOpen(false);
-                      setIsDonationModalOpen(true);
+                      if (onOpenDonateScreen) {
+                        onOpenDonateScreen();
+                      } else {
+                        setIsDonationModalOpen(true);
+                      }
                     }}
                     className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-amber-300 hover:text-amber-200 hover:bg-amber-400/10 transition-colors cursor-pointer text-left mt-0.5"
                   >
@@ -1041,27 +1116,119 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* RIGHT SIDE: CONTROLS & THE AUTO-SCAN SWITCH */}
           <div className="w-full lg:w-auto flex flex-col sm:flex-row sm:items-center gap-3 shrink-0">
-            {/* If no service active, show quick-open dropdown */}
+            {/* If no service active, show quick-open dropdown (non-ended services only) */}
             {!activeService ? (
-              <div className="w-full sm:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-slate-900/90 p-2 sm:p-2.5 rounded-2xl border border-slate-700 shadow-lg">
-                <select
-                  id="select-service-to-open-now"
-                  value={selectedServiceToOpen}
-                  onChange={(e) => setSelectedServiceToOpen(e.target.value)}
-                  className="w-full sm:w-auto flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-amber-400 min-w-0 cursor-pointer"
-                >
-                  {services.map((srv) => (
-                    <option key={srv.id} value={srv.id}>
-                      {srv.title} ({srv.startTime})
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  id="btn-open-selected-service-now"
-                  onClick={() => {
-                    if (selectedServiceToOpen && onToggleActiveService) {
-                      onToggleActiveService(selectedServiceToOpen, true);
+              openableServices.length === 0 ? (
+                <div className="w-full sm:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 bg-slate-900/90 px-3.5 py-2.5 rounded-2xl border border-slate-700 shadow-lg">
+                  <span className="text-xs text-slate-400">
+                    {isEs
+                      ? 'No hay servicios vigentes disponibles para abrir.'
+                      : isEn
+                      ? 'No upcoming or openable services available.'
+                      : isFr
+                      ? 'Aucun service à venir disponible à ouvrir.'
+                      : 'Pa gen okenn sèvis ki disponib pou louvri kounye a.'}
+                  </span>
+                  <button
+                    type="button"
+                    id="btn-go-create-service-from-hero"
+                    onClick={() => handleNavigate('services')}
+                    className="w-full sm:w-auto px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs whitespace-nowrap cursor-pointer transition-all shadow-md flex items-center justify-center gap-1.5"
+                  >
+                    <PlusCircle className="w-3.5 h-3.5" />
+                    <span>
+                      {isEs
+                        ? 'Programar Servicio'
+                        : isEn
+                        ? 'Schedule Service'
+                        : isFr
+                        ? 'Planifier un Culte'
+                        : 'Pwograme yon Sèvis'}
+                    </span>
+                  </button>
+                </div>
+              ) : (
+                <div className="w-full sm:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-slate-900/90 p-2 sm:p-2.5 rounded-2xl border border-slate-700 shadow-lg">
+                  <select
+                    id="select-service-to-open-now"
+                    value={selectedServiceToOpen}
+                    onChange={(e) => setSelectedServiceToOpen(e.target.value)}
+                    className="w-full sm:w-auto flex-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-amber-400 min-w-0 cursor-pointer"
+                  >
+                    {openableServices.map((srv, idx) => (
+                      <option key={`${srv.id || 'srv'}-${idx}`} value={srv.id}>
+                        {srv.title} ({srv.date} • {srv.startTime})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    id="btn-open-selected-service-now"
+                    disabled={!selectedServiceToOpen}
+                    onClick={() => {
+                      if (!selectedServiceToOpen || !onToggleActiveService) return;
+                      const targetSrv = openableServices.find((s) => s.id === selectedServiceToOpen);
+                      if (!targetSrv || targetSrv.isPermanentlyEnded || isServiceEnded(targetSrv)) {
+                        toast.error(
+                          isEs
+                            ? 'Servicio Finalizado'
+                            : isEn
+                            ? 'Service Already Ended'
+                            : isFr
+                            ? 'Service Déjà Terminé'
+                            : 'Sèvis la Deja Fini',
+                          isEs
+                            ? 'Este servicio ya pasó su hora de fin y no puede reabrirse para asistencia.'
+                            : isEn
+                            ? 'This service has passed its scheduled end time and cannot be reopened for attendance.'
+                            : isFr
+                            ? 'Ce service a dépassé son heure de fin et ne peut plus être rouvert pour les présences.'
+                            : 'Sèvis sa a deja depase lè finisman li epi li pa kapab re-ouvri pou verifye prezans ankò.'
+                        );
+                        if (onRefresh) onRefresh();
+                        return;
+                      }
+                      if (isServiceBeforeStart(targetSrv)) {
+                        const startLabel = formatServiceTimeAmPm(targetSrv.startTime);
+                        toast.error(
+                          isEs
+                            ? 'Servicio Aún No Inicia'
+                            : isEn
+                            ? 'Service Not Started Yet'
+                            : isFr
+                            ? 'Culte Pas Encore Commencé'
+                            : 'Sèvis la Poko Kòmanse',
+                          isEs
+                            ? `Este servicio inicia a las ${startLabel}. No se puede activar ni escanear asistencia antes de la hora del servicio.`
+                            : isEn
+                            ? `This service starts at ${startLabel}. Attendance cannot be activated or verified before the scheduled start time.`
+                            : isFr
+                            ? `Ce culte commence à ${startLabel}. Impossible d’activer ou vérifier les présences avant l’heure du service.`
+                            : `Sèvis sa a ap kòmanse a ${startLabel}. Ou pa kapab aktive oswa verifye prezans anvan lè sèvis la!`
+                        );
+                        return;
+                      }
+                      const opened = onToggleActiveService(selectedServiceToOpen, true);
+                      if (opened === false) {
+                        toast.error(
+                          isEs
+                            ? 'No Se Puede Abrir'
+                            : isEn
+                            ? 'Cannot Open Service'
+                            : isFr
+                            ? 'Ouverture Refusée'
+                            : 'Pa Ka Louvri Sèvis la',
+                          isEs
+                            ? 'Este servicio ya finalizó o está cerrado permanentemente y no puede reabrirse.'
+                            : isEn
+                            ? 'This service has already ended or is permanently closed and cannot be reopened.'
+                            : isFr
+                            ? 'Ce service est déjà terminé ou définitivement fermé et ne peut plus être rouvert.'
+                            : 'Sèvis sa a deja fini oswa fèmen pou toutan epi li pa kapab re-ouvri ankò.'
+                        );
+                        if (onRefresh) onRefresh();
+                        return;
+                      }
                       toast.success(
                         isEs ? '¡Servicio Abierto!' : isEn ? 'Service Opened!' : isFr ? 'Service Ouvert !' : 'Sèvis Louvri!',
                         isEs
@@ -1072,13 +1239,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           ? 'Présence ouverte pour ce service. Vous pouvez activer le scan automatique.'
                           : 'Prezans louvri pou sèvis la. Ou ka limen scan otomatik kounye a.'
                       );
-                    }
-                  }}
-                  className="w-full sm:w-auto px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs whitespace-nowrap cursor-pointer transition-all shadow-md flex items-center justify-center text-center active:scale-[0.98]"
-                >
-                  {isEs ? 'Abrir Este Servicio' : isEn ? 'Open This Service' : isFr ? 'Ouvrir ce Service' : 'Louvri Sèvis Sa a'}
-                </button>
-              </div>
+                    }}
+                    className="w-full sm:w-auto px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold text-xs whitespace-nowrap cursor-pointer transition-all shadow-md flex items-center justify-center text-center active:scale-[0.98]"
+                  >
+                    {isEs ? 'Abrir Este Servicio' : isEn ? 'Open This Service' : isFr ? 'Ouvrir ce Service' : 'Louvri Sèvis Sa a'}
+                  </button>
+                </div>
+              )
             ) : (
               <div className="flex items-center gap-2.5 flex-wrap sm:flex-nowrap">
                 {/* AUTO-SCAN TOGGLE SWITCH */}
@@ -1321,14 +1488,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </div>
 
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-[11px] uppercase font-bold tracking-wider opacity-80">
-                            {lastScanResult.success
-                              ? (isEs ? 'Asistencia Validada ✓' : isEn ? 'Attendance Validated ✓' : isFr ? 'Présence Validée ✓' : 'Prezans Valide ✓')
-                              : lastScanResult.duplicate
-                              ? (isEs ? 'Atención: Ya Registrado' : isEn ? 'Notice: Already Recorded' : isFr ? 'Attention : Déjà Enregistré' : 'Atansyon: Deja Make')
-                              : (isEs ? 'Error de Escaneo' : isEn ? 'Scan Error' : isFr ? 'Erreur de Scan' : 'Erè Scan')}
-                          </span>
+                        <div className="flex items-center justify-between gap-1 flex-wrap">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-[11px] uppercase font-bold tracking-wider opacity-80">
+                              {lastScanResult.success
+                                ? lastScanResult.isVisitor
+                                  ? (isEs ? 'Visitante Validado ✓' : isEn ? 'Visitor Validated ✓' : isFr ? 'Visiteur Validé ✓' : 'Prezans Vizitè Valide ✓')
+                                  : (isEs ? 'Asistencia Validada ✓' : isEn ? 'Attendance Validated ✓' : isFr ? 'Présence Validée ✓' : 'Prezans Valide ✓')
+                                : lastScanResult.duplicate
+                                ? (isEs ? 'Atención: Ya Registrado' : isEn ? 'Notice: Already Recorded' : isFr ? 'Attention : Déjà Enregistré' : 'Atansyon: Deja Make')
+                                : (isEs ? 'Error de Escaneo' : isEn ? 'Scan Error' : isFr ? 'Erreur de Scan' : 'Erè Scan')}
+                            </span>
+                            {lastScanResult.isVisitor && (
+                              <span className="px-2 py-0.5 rounded-full bg-sky-500/20 border border-sky-400/40 text-sky-300 text-[10px] font-black uppercase">
+                                {isEs ? 'Visitante' : isEn ? 'Visitor' : isFr ? 'Visiteur' : 'Vizitè'}
+                              </span>
+                            )}
+                          </div>
                           <span className="text-[10px] font-mono opacity-70">
                             {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                           </span>
@@ -1344,9 +1520,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 {lastScanResult.member.memberId}
                               </span>
                               <span>•</span>
-                              <span>{lastScanResult.member.department}</span>
+                              <span>
+                                {lastScanResult.homeChurchName
+                                  ? `${isEs ? 'Origen' : isEn ? 'From' : isFr ? 'Origine' : 'Soti nan'}: ${lastScanResult.homeChurchName}`
+                                  : lastScanResult.member.department}
+                              </span>
                               <span>•</span>
-                              <span className="text-emerald-400 font-semibold">{lastScanResult.member.role}</span>
+                              <span className={lastScanResult.isVisitor ? 'text-sky-300 font-semibold' : 'text-emerald-400 font-semibold'}>
+                                {lastScanResult.isVisitor
+                                  ? (isEs ? 'Visitante' : isEn ? 'Visitor' : isFr ? 'Visiteur' : 'Vizitè')
+                                  : lastScanResult.member.role}
+                              </span>
                             </div>
                           </>
                         )}
@@ -1423,11 +1607,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     {isEs ? 'Marcar Asistencia Rápida (1 Clic):' : isEn ? 'Quick 1-Click Check-in:' : isFr ? 'Présence Rapide en 1 Clic :' : 'Make Prezans Rapid pou Manm (1 Klik):'}
                   </span>
                   <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-1.5 bg-slate-900/90 rounded-xl border border-slate-800">
-                    {members.slice(0, 10).map((m) => (
+                    {members.slice(0, 10).map((m, idx) => (
                       <button
-                        key={m.id}
+                        key={`${m.id || m.memberId || 'm'}-${idx}`}
                         type="button"
-                        id={`btn-hero-quick-checkin-${m.id}`}
+                        id={`btn-hero-quick-checkin-${m.id || idx}`}
                         onClick={() => handleProcessScan(m.barcodeToken || m.memberId, 'qr_scan')}
                         className="px-2 py-1 rounded-lg text-[11px] font-medium bg-slate-800 hover:bg-slate-700 hover:text-amber-300 border border-slate-700 transition-colors text-slate-300 flex items-center gap-1 cursor-pointer"
                       >
@@ -1579,6 +1763,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         services={services}
         attendanceRecords={attendanceRecords}
         language={language}
+      />
+
+      {/* =========================================================================
+          3B. ATTENDANCE AUDIT & FIRESTORE SYNC HEALTH (RECHARTS)
+          ========================================================================= */}
+      <AdminAttendanceAudit
+        church={church}
+        services={services}
+        attendanceRecords={attendanceRecords}
+        language={language}
+        onSyncCompleted={onRefresh}
       />
 
       {/* =========================================================================
@@ -2051,7 +2246,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <button
                         type="button"
                         id="btn-admin-accordion-open-donation"
-                        onClick={() => setIsDonationModalOpen(true)}
+                        onClick={() => {
+                          if (onOpenDonateScreen) {
+                            onOpenDonateScreen();
+                          } else {
+                            setIsDonationModalOpen(true);
+                          }
+                        }}
                         className="w-full py-2 px-3 rounded-lg bg-gradient-to-r from-amber-400 to-amber-300 hover:from-amber-300 hover:to-amber-200 text-slate-950 font-black text-xs flex items-center justify-center gap-1.5 shadow transition-all cursor-pointer"
                       >
                         <Heart className="w-3.5 h-3.5 fill-slate-950 text-slate-950" />
@@ -2104,9 +2305,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           ) : (
             <div className="space-y-2">
-              {attendanceRecords.slice(0, 5).map((record) => (
+              {attendanceRecords.slice(0, 5).map((record, idx) => (
                 <div
-                  key={record.id}
+                  key={`${record.id || record.memberId || 'rec'}-${idx}`}
                   className="flex items-center justify-between p-3 rounded-xl bg-slate-900/60 hover:bg-slate-900 border border-slate-800 transition-colors text-xs"
                 >
                   <div className="flex items-center gap-3">

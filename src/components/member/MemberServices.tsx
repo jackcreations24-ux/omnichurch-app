@@ -5,8 +5,12 @@ import {
   ServiceSession,
   ServiceCategory,
   AttendanceRecord,
+  Language,
 } from '../../types';
 import { SERVICE_CATEGORIES } from '../../utils/i18n';
+import { resolveServiceThumbnailUrl, formatServiceFullDateLabel, formatServiceTimeRangeAmPm } from '../../utils/memberFeedUtils';
+import { isServiceCurrentlyActive } from '../../utils/permissions';
+import { isServiceEnded } from '../../utils/storage';
 import {
   Calendar,
   Clock,
@@ -53,7 +57,7 @@ export const MemberServices: React.FC<MemberServicesProps> = ({
     (att) => att.serviceCategory === selectedCategory
   );
 
-  const activeServiceInCategory = categoryServices.find((s) => s.isOpenForAttendance);
+  const activeServiceInCategory = categoryServices.find((s) => isServiceCurrentlyActive(s, isServiceEnded));
 
   const getCategoryIcon = (id: ServiceCategory) => {
     switch (id) {
@@ -195,23 +199,40 @@ export const MemberServices: React.FC<MemberServicesProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              {categoryServices.map((srv) => (
+              {categoryServices.map((srv) => {
+                const thumbUrl = resolveServiceThumbnailUrl(srv);
+                const isLiveNow = isServiceCurrentlyActive(srv, isServiceEnded);
+                const isEnded = isServiceEnded(srv) || Boolean(srv.isPermanentlyEnded);
+                return (
                 <div
                   key={srv.id}
                   id={`service-card-${srv.id}`}
                   className={`p-4 rounded-xl border transition-all ${
-                    srv.isOpenForAttendance
+                    isLiveNow
                       ? 'bg-emerald-950/20 border-emerald-500/40 shadow-sm'
                       : 'bg-slate-900/70 border-slate-700/80 shadow-sm hover:border-slate-600'
                   }`}
                 >
+                  {thumbUrl && (
+                    <div className="w-full rounded-lg overflow-hidden bg-slate-950/70 mb-3 flex items-center justify-center">
+                      <img
+                        src={thumbUrl}
+                        alt={srv.title}
+                        className="w-full h-auto max-h-56 object-contain object-center mx-auto block"
+                      />
+                    </div>
+                  )}
                   <div className="flex items-start justify-between gap-2 mb-2">
                     <h5 className="font-bold text-sm text-white">
                       {srv.title}
                     </h5>
-                    {srv.isOpenForAttendance ? (
+                    {isLiveNow ? (
                       <span className="px-2 py-0.5 rounded-full bg-amber-400 text-slate-950 text-[10px] font-bold">
                         {isEs ? 'ACTIVO PARA ESCANEO' : isEn ? 'ACTIVE FOR SCAN' : isFr ? 'ACTIF POUR SCAN' : 'AKTIF POU SCAN'}
+                      </span>
+                    ) : isEnded ? (
+                      <span className="px-2 py-0.5 rounded bg-slate-800/80 text-slate-400 text-[10px] font-medium border border-slate-700">
+                        {isEs ? 'Finalizado' : isEn ? 'Ended' : isFr ? 'Terminé' : 'Fini'}
                       </span>
                     ) : (
                       <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-medium border border-slate-700">
@@ -223,11 +244,11 @@ export const MemberServices: React.FC<MemberServicesProps> = ({
                   <div className="grid grid-cols-2 gap-2 text-xs text-slate-400 mb-2.5">
                     <div className="flex items-center gap-1.5">
                       <Calendar className="w-3.5 h-3.5 text-slate-500" />
-                      <span>{srv.date}</span>
+                      <span>{formatServiceFullDateLabel(srv.date, (language as Language) || 'ht')}</span>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-slate-500" />
-                      <span>{srv.startTime} - {srv.endTime}</span>
+                      <span>{formatServiceTimeRangeAmPm(srv.startTime, srv.endTime, '')}</span>
                     </div>
                   </div>
 
@@ -262,7 +283,8 @@ export const MemberServices: React.FC<MemberServicesProps> = ({
                     )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

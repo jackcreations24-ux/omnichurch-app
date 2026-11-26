@@ -2,7 +2,20 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ThumbsUp, Heart, ChevronUp } from 'lucide-react';
 
-export type ReactionType = 'amen' | 'heart' | 'praise' | 'fire' | 'applause' | 'light';
+export type ReactionType =
+  | 'pray'
+  | 'amen'
+  | 'love'
+  | 'like'
+  | 'clap'
+  | 'haha'
+  | 'wow'
+  | 'sad'
+  | 'heart'
+  | 'praise'
+  | 'fire'
+  | 'applause'
+  | 'light';
 
 export interface ReactionConfig {
   id: ReactionType;
@@ -15,48 +28,70 @@ export interface ReactionConfig {
 
 export const REACTION_LIST: ReactionConfig[] = [
   {
-    id: 'amen',
+    id: 'pray',
     emoji: '🙏',
-    label: 'Amen!',
+    label: 'Amen / Lapriyè',
     colorClass: 'text-amber-300',
     badgeBg: 'bg-amber-400/20 border-amber-400/40 text-amber-300',
   },
   {
-    id: 'heart',
+    id: 'love',
     emoji: '❤️',
-    label: 'Kè Kontan',
+    label: 'Renmen',
     colorClass: 'text-rose-400',
     badgeBg: 'bg-rose-500/20 border-rose-400/40 text-rose-300',
   },
   {
-    id: 'praise',
-    emoji: '🙌',
-    label: 'Glwa pou Bondye',
-    colorClass: 'text-indigo-400',
-    badgeBg: 'bg-indigo-500/20 border-indigo-400/40 text-indigo-300',
+    id: 'like',
+    emoji: '👍',
+    label: 'Jèm',
+    colorClass: 'text-sky-400',
+    badgeBg: 'bg-sky-500/20 border-sky-400/40 text-sky-300',
   },
   {
-    id: 'fire',
-    emoji: '🔥',
-    label: 'Dife & Favè',
-    colorClass: 'text-orange-400',
-    badgeBg: 'bg-orange-500/20 border-orange-400/40 text-orange-300',
-  },
-  {
-    id: 'applause',
+    id: 'clap',
     emoji: '👏',
-    label: 'Bravo & Viv!',
+    label: 'Glwa / Bravo',
     colorClass: 'text-emerald-400',
     badgeBg: 'bg-emerald-500/20 border-emerald-400/40 text-emerald-300',
   },
   {
-    id: 'light',
-    emoji: '💡',
-    label: 'Enspirasyon',
+    id: 'haha',
+    emoji: '😄',
+    label: 'Kè Kontan',
     colorClass: 'text-yellow-300',
     badgeBg: 'bg-yellow-400/20 border-yellow-400/40 text-yellow-200',
   },
+  {
+    id: 'wow',
+    emoji: '😮',
+    label: 'Mèvèy',
+    colorClass: 'text-indigo-400',
+    badgeBg: 'bg-indigo-500/20 border-indigo-400/40 text-indigo-300',
+  },
+  {
+    id: 'sad',
+    emoji: '😢',
+    label: 'Konpasyon',
+    colorClass: 'text-blue-300',
+    badgeBg: 'bg-blue-500/20 border-blue-400/40 text-blue-200',
+  },
 ];
+
+const LEGACY_REACTION_MAP: Record<string, ReactionType> = {
+  amen: 'pray',
+  heart: 'love',
+  applause: 'clap',
+  praise: 'clap',
+  fire: 'wow',
+  light: 'like',
+};
+
+export function resolveCanonicalReactionConfig(reaction?: string): ReactionConfig {
+  if (!reaction) return REACTION_LIST[0];
+  const mapped = LEGACY_REACTION_MAP[reaction] || (reaction as ReactionType);
+  return REACTION_LIST.find((r) => r.id === mapped) || REACTION_LIST[0];
+}
 
 interface ReactionPickerProps {
   announcementId: string;
@@ -71,7 +106,7 @@ interface ReactionPickerProps {
 export const ReactionPicker: React.FC<ReactionPickerProps> = ({
   announcementId,
   userLiked,
-  currentReaction = 'amen',
+  currentReaction = 'pray',
   likesCount,
   onSelectReaction,
   onToggleDefault,
@@ -84,7 +119,7 @@ export const ReactionPicker: React.FC<ReactionPickerProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const reactionItemsRef = useRef<Map<ReactionType, HTMLButtonElement>>(new Map());
 
-  const activeReactionConfig = REACTION_LIST.find((r) => r.id === currentReaction) || REACTION_LIST[0];
+  const activeReactionConfig = resolveCanonicalReactionConfig(currentReaction);
 
   // Helper to find which reaction item is under (x, y) coordinates during swipe/drag
   const getReactionAtPoint = useCallback((clientX: number, clientY: number): ReactionType | null => {

@@ -264,11 +264,13 @@ export const CommentsWheel: React.FC<CommentsWheelProps> = ({
               rotateX: 0,
             };
 
+            const displayName = c.userName || c.author || 'Manm';
+            const displayText = c.content || c.text || '';
             const safeCurrentMember = (currentMemberName || '').toLowerCase();
             const isAuthor =
               Boolean(safeCurrentMember) &&
-              (((c.author || '').toLowerCase().includes(safeCurrentMember)) ||
-                safeCurrentMember.includes((c.author || '').toLowerCase()));
+              ((displayName.toLowerCase().includes(safeCurrentMember)) ||
+                safeCurrentMember.includes(displayName.toLowerCase()));
 
             return (
               <div
@@ -291,15 +293,27 @@ export const CommentsWheel: React.FC<CommentsWheelProps> = ({
                 <div className="flex items-start justify-between gap-2.5">
                   {/* Avatar & Author Details */}
                   <div className="flex items-start gap-2.5 flex-1 min-w-0">
-                    <div
-                      className={`rounded-full text-white font-bold flex items-center justify-center shrink-0 shadow transition-all ${
-                        isActive
-                          ? 'w-8 h-8 text-xs bg-gradient-to-br from-amber-500 via-purple-600 to-indigo-600 ring-2 ring-amber-400/50'
-                          : 'w-7 h-7 text-[10px] bg-gradient-to-br from-indigo-600 to-slate-700'
-                      }`}
-                    >
-                      {c.avatarInitials || (c.author || 'M').slice(0, 2).toUpperCase()}
-                    </div>
+                    {c.userPhotoUrl ? (
+                      <img
+                        src={c.userPhotoUrl}
+                        alt={displayName}
+                        className={`rounded-full object-cover shrink-0 shadow transition-all ${
+                          isActive
+                            ? 'w-8 h-8 ring-2 ring-amber-400/50'
+                            : 'w-7 h-7 border border-slate-700'
+                        }`}
+                      />
+                    ) : (
+                      <div
+                        className={`rounded-full text-white font-bold flex items-center justify-center shrink-0 shadow transition-all ${
+                          isActive
+                            ? 'w-8 h-8 text-xs bg-gradient-to-br from-amber-500 via-purple-600 to-indigo-600 ring-2 ring-amber-400/50'
+                            : 'w-7 h-7 text-[10px] bg-gradient-to-br from-indigo-600 to-slate-700'
+                        }`}
+                      >
+                        {c.avatarInitials || displayName.slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
 
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
@@ -308,7 +322,7 @@ export const CommentsWheel: React.FC<CommentsWheelProps> = ({
                             isActive ? 'text-amber-300 text-sm' : 'text-slate-300 text-xs'
                           }`}
                         >
-                          {c.author}
+                          {displayName}
                         </span>
 
                         {isActive && (
@@ -330,7 +344,7 @@ export const CommentsWheel: React.FC<CommentsWheelProps> = ({
                             : 'text-slate-300 text-xs line-clamp-2'
                         }`}
                       >
-                        {c.text}
+                        {displayText}
                       </p>
                     </div>
                   </div>

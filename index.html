@@ -2,15 +2,36 @@
 <html lang="ht">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+    <link rel="apple-touch-icon" href="/icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="preload" as="image" href="/assets/aistudio/download_b4dd93b3.png" />
+    <link rel="preload" as="image" href="/assets/aistudio/download_ea37b16b.png" />
+    <meta name="theme-color" content="#07152F" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>OmniChurch Pro</title>
     <meta name="description" content="Aplikasyon entèlijan jesyon legliz ak manm, prezans QR code offline, ak finans." />
     <meta property="og:title" content="OmniChurch Pro" />
     <meta property="og:description" content="Aplikasyon entèlijan jesyon legliz ak manm, prezans QR code offline, ak finans." />
+    <meta property="og:image" content="/assets/omnichurch-logo.png" />
   </head>
-  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-amber-500 selection:text-white">
-    <div id="root"></div>
+  <body class="bg-[#0F172A] text-slate-100 antialiased selection:bg-amber-500 selection:text-white overflow-x-hidden">
+    <div id="root">
+      <div class="fixed inset-0 h-dvh w-screen max-w-full overflow-hidden flex flex-col items-center justify-center bg-[#07152F] text-slate-200 px-6">
+        <img
+          src="/assets/aistudio/download_b4dd93b3.png"
+          alt="OmniChurch PRO Official Logo"
+          width="128"
+          height="120"
+          class="w-28 sm:w-32 max-w-[42vw] max-h-[26vh] h-auto object-contain bg-transparent"
+        />
+        <p class="mt-4 text-xs font-mono tracking-widest uppercase text-[#FBBF24]">
+          OmniChurch PRO
+        </p>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

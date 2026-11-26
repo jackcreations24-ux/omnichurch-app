@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
-import { Church, Announcement, AnnouncementCategory, Language, ServiceSession } from '../../types';
+import React, { useState, useEffect } from 'react';
+import { Church, Announcement, AnnouncementCategory, Language, ServiceSession, Member } from '../../types';
 import {
   addAnnouncement,
   deleteAnnouncement,
   toggleAnnouncementToastAlert,
   updateAnnouncementSchedule,
   buildServiceAnnouncementContent,
+  formatAnnouncementTimestamp,
 } from '../../utils/storage';
+import { auth } from '../../lib/firebase';
+import { isDeaconAuthorOfRecord } from '../../utils/permissions';
 import { useToast } from '../../context/ToastContext';
 import { ConfirmDeleteModal } from '../common/ConfirmDeleteModal';
 import { PosterLightboxModal } from '../common/PosterLightboxModal';
@@ -38,12 +41,16 @@ import {
   Music,
   Image as ImageIcon,
   Upload,
+  ShieldCheck,
+  AlertCircle,
 } from 'lucide-react';
 
 interface AdminAnnouncementsProps {
   church: Church;
   announcements: Announcement[];
   services?: ServiceSession[];
+  currentMember?: Member | null;
+  isDeaconMode?: boolean;
   language?: Language;
   onAnnouncementsChange?: () => void;
   onAnnouncementsUpdated?: () => void;
@@ -105,6 +112,8 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   church,
   announcements,
   services = [],
+  currentMember = null,
+  isDeaconMode = false,
   language = 'ht',
   onAnnouncementsChange,
   onAnnouncementsUpdated,
@@ -113,6 +122,7 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   const isEs = language === 'es';
   const isEn = language === 'en';
   const isFr = language === 'fr';
+  const authUid = auth.currentUser?.uid || null;
   const audienceOptions = isEs
     ? AUDIENCE_OPTIONS_ES
     : isFr
@@ -121,6 +131,19 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
     ? AUDIENCE_OPTIONS_EN
     : AUDIENCE_OPTIONS_HT;
   const defaultAudience = isEs ? 'Todos' : isFr ? 'Tout le monde' : isEn ? 'Everyone' : 'Tout moun';
+
+  const defaultDeaconAuthorName = currentMember
+    ? `${currentMember.titlePrefix ? `${currentMember.titlePrefix} ` : isEs ? 'Diácono ' : isFr ? 'Diacre ' : isEn ? 'Deacon ' : 'Dyak '}${currentMember.fullName}`.trim()
+    : isEs
+    ? 'Diaconado de la Iglesia'
+    : isFr
+    ? 'Diaconat de l’Église'
+    : isEn
+    ? 'Church Diaconate'
+    : 'Dyakonat Legliz la';
+
+  const canModifyAnnouncementItem = (ann: Announcement): boolean =>
+    !isDeaconMode || isDeaconAuthorOfRecord(currentMember, ann, authUid);
 
   const todayStr = new Date().toISOString().split('T')[0];
 
@@ -132,9 +155,13 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   const [date, setDate] = useState<string>(todayStr);
   const [time, setTime] = useState<string>('');
   const [isPinned, setIsPinned] = useState<boolean>(false);
-  const [authorType, setAuthorType] = useState<'admin' | 'pastor' | 'secretariat' | 'worship' | 'custom'>('admin');
+  const [authorType, setAuthorType] = useState<'admin' | 'pastor' | 'secretariat' | 'worship' | 'deacon' | 'custom'>(
+    isDeaconMode ? 'deacon' : 'admin'
+  );
   const [author, setAuthor] = useState<string>(
-    isEs
+    isDeaconMode
+      ? defaultDeaconAuthorName
+      : isEs
       ? 'Administración de la Iglesia'
       : isFr
       ? 'L’Administration de l’Église'
@@ -192,6 +219,16 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   // Delete State
   const [announcementToDelete, setAnnouncementToDelete] = useState<Announcement | null>(null);
 
+  useEffect(() => {
+    const activeIds = new Set(announcements.map((a) => a.id));
+    if (announcementToDelete && !activeIds.has(announcementToDelete.id)) {
+      setAnnouncementToDelete(null);
+    }
+    if (schedulingAnnouncement && !activeIds.has(schedulingAnnouncement.id)) {
+      setSchedulingAnnouncement(null);
+    }
+  }, [announcements, announcementToDelete, schedulingAnnouncement]);
+
   const notifyChange = () => {
     if (typeof onAnnouncementsChange === 'function') onAnnouncementsChange();
     if (typeof onAnnouncementsUpdated === 'function') onAnnouncementsUpdated();
@@ -206,9 +243,11 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
     setIsPinned(false);
     setImageUrl('');
     setImageCaption('');
-    setAuthorType('admin');
+    setAuthorType(isDeaconMode ? 'deacon' : 'admin');
     setAuthor(
-      isEs
+      isDeaconMode
+        ? defaultDeaconAuthorName
+        : isEs
         ? 'Administración de la Iglesia'
         : isFr
         ? 'L’Administration de l’Église'
@@ -299,17 +338,38 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
       return;
     }
 
+    const resolvedDept =
+      authorType === 'deacon'
+        ? 'Dyakonat / Ministè'
+        : authorType === 'worship'
+        ? 'Depatman Louanj & Mizik'
+        : authorType === 'secretariat'
+        ? 'Sekretarya Legliz la'
+        : authorType === 'pastor'
+        ? 'Biwo Pastoral'
+        : isDeaconMode
+        ? 'Dyakonat / Ministè'
+        : 'Depatman Administrasyon';
+
+    const effectiveAuthorType =
+      isDeaconMode && authorType !== 'custom' ? 'deacon' : authorType;
+
     addAnnouncement(church.id, {
       title: title.trim(),
       content: content.trim(),
+      department: resolvedDept.trim(),
       category,
       date,
       time: time.trim() || undefined,
       isPinned,
+      posterUrl: imageUrl.trim() || null,
       imageUrl: imageUrl.trim() || undefined,
       imageCaption: imageCaption.trim() || undefined,
+      authorId: authUid || currentMember?.id || undefined,
+      createdBy: currentMember?.id || currentMember?.memberId || undefined,
+      authorName: author.trim(),
       author: author.trim(),
-      authorType,
+      authorType: effectiveAuthorType,
       targetAudience,
       leader: leader.trim() || undefined,
       preacher: preacher.trim() || undefined,
@@ -390,6 +450,19 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   };
 
   const handleOpenScheduleModal = (ann: Announcement) => {
+    if (!canModifyAnnouncementItem(ann)) {
+      toast.warning(
+        isEs ? 'Acción Reservada' : isFr ? 'Action Réservée' : isEn ? 'Action Restricted' : 'Aksyon Rezève',
+        isEs
+          ? 'Como diácono solo puede programar los avisos que usted mismo publicó.'
+          : isFr
+          ? 'En tant que diacre, vous pouvez uniquement programmer vos propres annonces.'
+          : isEn
+          ? 'As a deacon, you can only modify announcements you published.'
+          : 'Kòm dyak, ou kapab modifye sèlman anons ou te pibliye yo.'
+      );
+      return;
+    }
     setSchedulingAnnouncement(ann);
     setEditIsScheduled(!!ann.isScheduledNotification);
     setEditScheduledDate(ann.scheduledNotificationDate || ann.date || todayStr);
@@ -453,6 +526,19 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   };
 
   const handleToggleToastAlert = (ann: Announcement) => {
+    if (!canModifyAnnouncementItem(ann)) {
+      toast.warning(
+        isEs ? 'Acción Reservada' : isFr ? 'Action Réservée' : isEn ? 'Action Restricted' : 'Aksyon Rezève',
+        isEs
+          ? 'Como diácono solo puede modificar los avisos que usted mismo publicó.'
+          : isFr
+          ? 'En tant que diacre, vous pouvez uniquement modifier vos propres annonces.'
+          : isEn
+          ? 'As a deacon, you can only modify announcements you published.'
+          : 'Kòm dyak, ou kapab modifye sèlman anons ou te pibliye yo.'
+      );
+      return;
+    }
     const nextState = !ann.showToastOnLogin;
     toggleAnnouncementToastAlert(church.id, ann.id, nextState);
     notifyChange();
@@ -493,7 +579,7 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
     }
   };
 
-  const handleTestToast = (ann: Announcement) => {
+  const handlePreviewToast = (ann: Announcement) => {
     const level = ann.toastAlertLevel || 'info';
     const scheduleNotice = ann.isScheduledNotification
       ? ` • [${isEs ? 'PROGRAMADO' : isFr ? 'PROGRAMMÉ' : isEn ? 'SCHEDULED' : 'PWOGRAME'}: ${ann.scheduledNotificationDate || ann.date}]`
@@ -530,11 +616,28 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
   };
 
   const handleDelete = (ann: Announcement) => {
+    if (!canModifyAnnouncementItem(ann)) {
+      toast.warning(
+        isEs ? 'Eliminación Protegida' : isFr ? 'Suppression Protégée' : isEn ? 'Protected Announcement' : 'Anons Pwoteje',
+        isEs
+          ? 'Como diácono solo puede eliminar los avisos que usted mismo publicó.'
+          : isFr
+          ? 'En tant que diacre, vous ne pouvez supprimer que vos propres annonces.'
+          : isEn
+          ? 'As a deacon, you can only delete announcements you authored.'
+          : 'Kòm dyak, ou kapab efase sèlman anons ou te pibliye yo.'
+      );
+      return;
+    }
     setAnnouncementToDelete(ann);
   };
 
   const handleConfirmDelete = () => {
     if (!announcementToDelete) return;
+    if (!canModifyAnnouncementItem(announcementToDelete)) {
+      setAnnouncementToDelete(null);
+      return;
+    }
     deleteAnnouncement(church.id, announcementToDelete.id);
     notifyChange();
     toast.info(
@@ -580,6 +683,15 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
             <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
               {isEs ? 'Avisos y Feed de Actualidades de la Iglesia' : isEn ? 'Church Announcements & Feed' : isFr ? 'Annonces & Fil d’Actualités de l’Église' : 'Anons & Fil Aktyalite Legliz la'}
             </h2>
+            {isDeaconMode && (
+              <span
+                id="deacon-announcements-role-badge"
+                className="px-2.5 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/40 text-amber-300 text-xs font-bold flex items-center gap-1"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                {isEs ? 'Diácono / Diaconisa' : isFr ? 'Diacre / Diaconesse' : isEn ? 'Deacon / Deaconess' : 'Dyak / Dyakonès'}
+              </span>
+            )}
             <span className="px-2.5 py-0.5 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-300 text-xs font-bold font-mono">
               {announcements.length} {isEs ? 'Publicados' : isFr ? 'Publiés' : isEn ? 'Published' : 'Pibliye'}
             </span>
@@ -634,6 +746,35 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
           <span>{isEs ? 'Crear Aviso / Programar Notificación' : isFr ? 'Créer Annonce / Programmer Notification' : isEn ? 'Create Announcement / Schedule Notification' : 'Kreye Anons / Pwograme Notifikasyon'}</span>
         </button>
       </div>
+
+      {isDeaconMode && !authUid && (
+        <div
+          id="deacon-announcements-cloud-sync-banner"
+          className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-2.5"
+        >
+          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-bold text-amber-300 block">
+              {isEs
+                ? 'Sincronización en la nube requerida para publicar para toda la iglesia'
+                : isFr
+                ? 'Synchronisation Google requise pour publier vers toute l’église'
+                : isEn
+                ? 'Google sign-in required for church-wide cloud sync'
+                : 'Koneksyon Google rekòmande pou pibliye anons lan sou nwaj la'}
+            </span>
+            <span className="text-amber-200/80">
+              {isEs
+                ? 'Conéctese con su cuenta Google en el menú de perfil para que sus anuncios se sincronicen automáticamente con Firebase.'
+                : isFr
+                ? 'Connectez votre compte Google depuis votre profil pour synchroniser automatiquement vos annonces avec Firebase.'
+                : isEn
+                ? 'Connect your Google account in your profile menu so announcements sync cleanly across devices via Firebase.'
+                : 'Konekte kont Google ou nan pwofil la pou anons ou yo ka senkwonize ak tout manm legliz la san pwoblèm.'}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* ANNOUNCEMENTS LIST */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -750,15 +891,17 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
                       )}
                     </div>
 
-                    <button
-                      type="button"
-                      id={`btn-delete-announcement-${ann.id}`}
-                      onClick={() => handleDelete(ann)}
-                      className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 transition-colors cursor-pointer"
-                      title={isEs ? 'Eliminar aviso' : isFr ? 'Supprimer l’annonce' : isEn ? 'Delete announcement' : 'Efase anons'}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    {canModifyAnnouncementItem(ann) && (
+                      <button
+                        type="button"
+                        id={`btn-delete-announcement-${ann.id}`}
+                        onClick={() => handleDelete(ann)}
+                        className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-500/20 transition-colors cursor-pointer"
+                        title={isEs ? 'Eliminar aviso' : isFr ? 'Supprimer l’annonce' : isEn ? 'Delete announcement' : 'Efase anons'}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
 
                   <h3 className="text-base font-bold text-white mb-1.5 leading-snug">
@@ -860,27 +1003,29 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
                   {/* Action toolbar for this announcement */}
                   <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-wrap items-center justify-between gap-2 mt-3">
                     <div className="flex items-center gap-2 flex-wrap">
-                      {/* Schedule / Edit notification button */}
-                      <button
-                        type="button"
-                        id={`btn-schedule-ann-${ann.id}`}
-                        onClick={() => handleOpenScheduleModal(ann)}
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                          isScheduled
-                            ? 'bg-cyan-500 text-slate-950 shadow'
-                            : 'bg-slate-800 text-cyan-300 hover:bg-slate-700 border border-cyan-500/30'
-                        }`}
-                      >
-                        <CalendarClock className="w-3.5 h-3.5" />
-                        <span>
-                          {isScheduled
-                            ? isEs ? 'Programación Activa' : isFr ? 'Programmation Active' : isEn ? 'Active Schedule' : 'Pwogramasyon Aktif'
-                            : isEs ? 'Programar Notificación' : isFr ? 'Programmer Notification' : isEn ? 'Schedule Notification' : 'Pwograme Notifikasyon'}
-                        </span>
-                      </button>
+                      {/* Schedule / Edit notification button (author-scoped for Deacons) */}
+                      {canModifyAnnouncementItem(ann) && (
+                        <button
+                          type="button"
+                          id={`btn-schedule-ann-${ann.id}`}
+                          onClick={() => handleOpenScheduleModal(ann)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                            isScheduled
+                              ? 'bg-cyan-500 text-slate-950 shadow'
+                              : 'bg-slate-800 text-cyan-300 hover:bg-slate-700 border border-cyan-500/30'
+                          }`}
+                        >
+                          <CalendarClock className="w-3.5 h-3.5" />
+                          <span>
+                            {isScheduled
+                              ? isEs ? 'Programación Activa' : isFr ? 'Programmation Active' : isEn ? 'Active Schedule' : 'Pwogramasyon Aktif'
+                              : isEs ? 'Programar Notificación' : isFr ? 'Programmer Notification' : isEn ? 'Schedule Notification' : 'Pwograme Notifikasyon'}
+                          </span>
+                        </button>
+                      )}
 
-                      {/* Quick instant toast toggle */}
-                      {!isScheduled && (
+                      {/* Quick instant toast toggle (author-scoped for Deacons) */}
+                      {canModifyAnnouncementItem(ann) && !isScheduled && (
                         <button
                           type="button"
                           id={`btn-toggle-toast-${ann.id}`}
@@ -901,31 +1046,37 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
                       )}
                     </div>
 
-                    {/* Test toast button */}
+                    {/* Preview toast button */}
                     <button
                       type="button"
-                      id={`btn-test-toast-${ann.id}`}
-                      onClick={() => handleTestToast(ann)}
+                      id={`btn-preview-toast-${ann.id}`}
+                      onClick={() => handlePreviewToast(ann)}
                       className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-amber-300 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                       title={
                         isEs
-                          ? 'Probar cómo aparecerá esta notificación toast para los miembros al iniciar sesión'
+                          ? 'Vista previa de cómo aparecerá esta notificación toast para los miembros al iniciar sesión'
                           : isFr
-                          ? 'Tester l’affichage du toast pour les membres lors de leur connexion'
+                          ? 'Aperçu de l’affichage du toast pour les membres lors de leur connexion'
                           : isEn
-                          ? 'Test how this toast notification will appear to members upon logging in'
-                          : 'Teste kijan notifikasyon toast sa a ap parèt pou manm yo lè yo konekte'
+                          ? 'Preview how this toast notification will appear to members upon logging in'
+                          : 'Apèsi kijan notifikasyon toast sa a ap parèt pou manm yo lè yo konekte'
                       }
                     >
                       <Eye className="w-3.5 h-3.5" />
-                      <span>{isEs ? 'Probar Toast' : isFr ? 'Tester Toast' : isEn ? 'Test Toast' : 'Teste Toast'}</span>
+                      <span>{isEs ? 'Vista Previa Toast' : isFr ? 'Aperçu Toast' : isEn ? 'Preview Toast' : 'Apèsi Toast'}</span>
                     </button>
                   </div>
                 </div>
 
                 <div className="mt-4 pt-3 border-t border-slate-700/80 flex items-center justify-between text-[11px] text-slate-400">
-                  <span>{isEs ? 'Autor:' : isFr ? 'Auteur :' : isEn ? 'Author:' : 'Otè:'} {ann.author}</span>
-                  <span className="font-mono">{ann.date}</span>
+                  <span>
+                    {isEs ? 'Autor:' : isFr ? 'Auteur :' : isEn ? 'Author:' : 'Otè:'}{' '}
+                    {ann.authorName || ann.author || church.pastor || 'Admin'}
+                    {ann.department ? ` • ${ann.department}` : ''}
+                  </span>
+                  <span className="font-mono">
+                    {formatAnnouncementTimestamp(ann.createdAt, ann.date, ann.time, (language as Language) || 'ht')}
+                  </span>
                 </div>
               </div>
             );
@@ -1172,74 +1323,94 @@ export const AdminAnnouncements: React.FC<AdminAnnouncementsProps> = ({
                 <label className="text-slate-300 font-bold block mb-1">
                   {isEs ? 'Autor / Identidad de la Publicación *' : isFr ? 'Auteur / Identité de Publication *' : isEn ? 'Author / Publication Identity *' : 'Otè / Idantite Piblikasyon an *'}
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthorType('admin');
-                      setAuthor(
-                        isEs
-                          ? 'Administración de la Iglesia'
-                          : isFr
-                          ? 'L’Administration de l’Église'
-                          : isEn
-                          ? 'Church Administration'
-                          : 'Administrasyon Legliz la'
-                      );
-                    }}
-                    className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
-                      authorType === 'admin'
-                        ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 shadow'
-                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <span className="text-sm">🏛️</span>
-                    <span className="truncate">{isEs ? 'Administración' : isFr ? 'Administration' : isEn ? 'Administration' : 'Administrasyon'}</span>
-                  </button>
+                <div className={`grid ${isDeaconMode ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-4'} gap-2 mb-2`}>
+                  {isDeaconMode ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthorType('deacon');
+                        setAuthor(defaultDeaconAuthorName);
+                      }}
+                      className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
+                        authorType === 'deacon'
+                          ? 'bg-amber-500/20 border-amber-400 text-amber-200 shadow'
+                          : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <span className="text-sm">🛡️</span>
+                      <span className="truncate">{isEs ? 'Diaconado' : isFr ? 'Diaconat' : isEn ? 'Diaconate' : 'Dyakonat'}</span>
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthorType('admin');
+                          setAuthor(
+                            isEs
+                              ? 'Administración de la Iglesia'
+                              : isFr
+                              ? 'L’Administration de l’Église'
+                              : isEn
+                              ? 'Church Administration'
+                              : 'Administrasyon Legliz la'
+                          );
+                        }}
+                        className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
+                          authorType === 'admin'
+                            ? 'bg-cyan-500/20 border-cyan-400 text-cyan-200 shadow'
+                            : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <span className="text-sm">🏛️</span>
+                        <span className="truncate">{isEs ? 'Administración' : isFr ? 'Administration' : isEn ? 'Administration' : 'Administrasyon'}</span>
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthorType('pastor');
-                      setAuthor(
-                        church.pastor
-                          ? `${isEs ? 'Pastor' : isFr ? 'Pasteur' : isEn ? 'Pastor' : 'Pastè'} ${church.pastor}`
-                          : (isEs ? 'Pastor Principal' : isFr ? 'Pasteur Titulaire' : isEn ? 'Senior Pastor' : 'Pastè Titilè')
-                      );
-                    }}
-                    className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
-                      authorType === 'pastor'
-                        ? 'bg-amber-500/20 border-amber-400 text-amber-200 shadow'
-                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <span className="text-sm">✝️</span>
-                    <span className="truncate">{isEs ? 'El Pastor' : isFr ? 'Le Pasteur' : isEn ? 'The Pastor' : 'Pastè a'}</span>
-                  </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthorType('pastor');
+                          setAuthor(
+                            church.pastor
+                              ? `${isEs ? 'Pastor' : isFr ? 'Pasteur' : isEn ? 'Pastor' : 'Pastè'} ${church.pastor}`
+                              : (isEs ? 'Pastor Principal' : isFr ? 'Pasteur Titulaire' : isEn ? 'Senior Pastor' : 'Pastè Titilè')
+                          );
+                        }}
+                        className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
+                          authorType === 'pastor'
+                            ? 'bg-amber-500/20 border-amber-400 text-amber-200 shadow'
+                            : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <span className="text-sm">✝️</span>
+                        <span className="truncate">{isEs ? 'El Pastor' : isFr ? 'Le Pasteur' : isEn ? 'The Pastor' : 'Pastè a'}</span>
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthorType('secretariat');
-                      setAuthor(
-                        isEs
-                          ? 'Secretaría de la Iglesia'
-                          : isFr
-                          ? 'Secrétariat de l’Église'
-                          : isEn
-                          ? 'Church Secretariat'
-                          : 'Sekretarya Legliz la'
-                      );
-                    }}
-                    className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
-                      authorType === 'secretariat'
-                        ? 'bg-purple-500/20 border-purple-400 text-purple-200 shadow'
-                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    <span className="text-sm">📜</span>
-                    <span className="truncate">{isEs ? 'Secretaría' : isFr ? 'Secrétariat' : isEn ? 'Secretariat' : 'Sekretarya'}</span>
-                  </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthorType('secretariat');
+                          setAuthor(
+                            isEs
+                              ? 'Secretaría de la Iglesia'
+                              : isFr
+                              ? 'Secrétariat de l’Église'
+                              : isEn
+                              ? 'Church Secretariat'
+                              : 'Sekretarya Legliz la'
+                          );
+                        }}
+                        className={`p-2 rounded-xl border text-left flex items-center gap-2 text-xs font-bold transition-all cursor-pointer ${
+                          authorType === 'secretariat'
+                            ? 'bg-purple-500/20 border-purple-400 text-purple-200 shadow'
+                            : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <span className="text-sm">📜</span>
+                        <span className="truncate">{isEs ? 'Secretaría' : isFr ? 'Secrétariat' : isEn ? 'Secretariat' : 'Sekretarya'}</span>
+                      </button>
+                    </>
+                  )}
 
                   <button
                     type="button"

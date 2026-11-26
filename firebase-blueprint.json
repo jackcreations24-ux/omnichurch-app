@@ -10,12 +10,31 @@
         "pastor": { "type": "string", "required": true },
         "address": { "type": "string", "required": true },
         "city": { "type": "string", "required": true },
+        "country": { "type": "string" },
         "phone": { "type": "string", "required": true },
         "email": { "type": "string", "required": true },
         "motto": { "type": "string", "required": true },
         "themeColor": { "type": "string", "required": true },
         "logoIcon": { "type": "string", "required": true },
-        "createdAt": { "type": "string", "required": true }
+        "logoUrl": { "type": "string" },
+        "adminGoogleEmail": { "type": "string" },
+        "adminGoogleUid": { "type": "string" },
+        "adminGoogleName": { "type": "string" },
+        "adminGooglePhoto": { "type": "string" },
+        "adminAuthMethod": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "adminVerified": { "type": "boolean" },
+        "adminVerifiedAt": { "type": "string" },
+        "adminVerifiedBy": { "type": "string" },
+        "adminPasscode": { "type": "string" },
+        "quickPinEnabled": { "type": "boolean" },
+        "autoLockMinutes": { "type": "number" },
+        "rnc": { "type": "string" },
+        "rncVerificationStatus": { "type": "string" },
+        "createdAt": { "type": "string", "required": true },
+        "status": { "type": "string" },
+        "archivedAt": { "type": "string" },
+        "isLegacy": { "type": "boolean" }
       }
     },
     "Member": {
@@ -28,13 +47,36 @@
         "dateOfBirth": { "type": "string", "required": true },
         "phone": { "type": "string", "required": true },
         "email": { "type": "string", "required": true },
+        "googleEmail": { "type": "string" },
+        "googleUid": { "type": "string" },
         "address": { "type": "string" },
         "department": { "type": "string", "required": true },
         "role": { "type": "string", "required": true },
+        "memberType": { "type": "string" },
         "joinedDate": { "type": "string", "required": true },
         "status": { "type": "string", "required": true },
+        "avatarUrl": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "googlePhoto": { "type": "string" },
         "barcodeToken": { "type": "string", "required": true },
-        "notes": { "type": "string" }
+        "notes": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "User": {
+      "collection": "users",
+      "fields": {
+        "userId": { "type": "string", "required": true },
+        "email": { "type": "string", "required": true },
+        "displayName": { "type": "string", "required": true },
+        "photoUrl": { "type": "string" },
+        "churchId": { "type": "string" },
+        "churchName": { "type": "string" },
+        "role": { "type": "string", "required": true },
+        "memberId": { "type": "string" },
+        "language": { "type": "string" },
+        "createdAt": { "type": "string", "required": true },
+        "updatedAt": { "type": "string" }
       }
     },
     "ServiceSession": {
@@ -49,19 +91,37 @@
         "endTime": { "type": "string", "required": true },
         "preacherOrLeader": { "type": "string", "required": true },
         "isOpenForAttendance": { "type": "boolean", "required": true },
+        "isPermanentlyEnded": { "type": "boolean" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "createdBy": { "type": "string" },
         "createdAt": { "type": "string", "required": true }
       }
     },
     "Announcement": {
       "collection": "announcements",
       "fields": {
-        "id": { "type": "string", "required": true },
         "churchId": { "type": "string", "required": true },
         "title": { "type": "string", "required": true },
         "content": { "type": "string", "required": true },
-        "category": { "type": "string", "required": true },
-        "date": { "type": "string", "required": true },
-        "author": { "type": "string", "required": true }
+        "department": { "type": "string", "required": true },
+        "category": { "type": "string" },
+        "date": { "type": "string" },
+        "targetAudience": { "type": "string" },
+        "isPinned": { "type": "boolean", "required": true },
+        "showToastOnLogin": { "type": "boolean" },
+        "toastAlertLevel": { "type": "string" },
+        "isScheduledNotification": { "type": "boolean" },
+        "scheduledNotificationDate": { "type": "string" },
+        "posterUrl": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "serviceId": { "type": "string" },
+        "authorId": { "type": "string", "required": true },
+        "authorName": { "type": "string", "required": true },
+        "reactionsCount": { "type": "number", "required": true },
+        "commentsCount": { "type": "number", "required": true },
+        "createdAt": { "type": "string", "required": true },
+        "updatedAt": { "type": "string" }
       }
     },
     "AttendanceRecord": {
@@ -78,42 +138,61 @@
         "memberName": { "type": "string", "required": true },
         "timestamp": { "type": "string", "required": true },
         "checkInMethod": { "type": "string", "required": true },
-        "recordedBy": { "type": "string", "required": true }
+        "recordedBy": { "type": "string", "required": true },
+        "attendanceStatus": { "type": "string" },
+        "attendanceRole": { "type": "string" },
+        "isVisitor": { "type": "boolean" },
+        "homeChurchId": { "type": "string" },
+        "homeChurchName": { "type": "string" },
+        "hostChurchName": { "type": "string" }
       }
     },
     "AnnouncementComment": {
       "collection": "announcement_comments",
       "fields": {
-        "id": { "type": "string", "required": true },
-        "announcementId": { "type": "string", "required": true },
+        "targetId": { "type": "string", "required": true },
         "churchId": { "type": "string", "required": true },
-        "author": { "type": "string", "required": true },
-        "memberId": { "type": "string" },
-        "text": { "type": "string", "required": true },
-        "time": { "type": "string", "required": true },
-        "avatarInitials": { "type": "string", "required": true },
-        "isDemo": { "type": "boolean" },
+        "userId": { "type": "string", "required": true },
+        "userName": { "type": "string", "required": true },
+        "userPhotoUrl": { "type": "string" },
+        "content": { "type": "string", "required": true },
         "createdAt": { "type": "string", "required": true }
       }
     },
     "AnnouncementReaction": {
       "collection": "announcement_reactions",
       "fields": {
-        "id": { "type": "string", "required": true },
-        "announcementId": { "type": "string", "required": true },
+        "targetId": { "type": "string", "required": true },
         "churchId": { "type": "string", "required": true },
-        "memberId": { "type": "string", "required": true },
-        "reaction": { "type": "string", "required": true },
-        "createdAt": { "type": "string", "required": true },
-        "updatedAt": { "type": "string" }
+        "userId": { "type": "string", "required": true },
+        "userName": { "type": "string", "required": true },
+        "reactionType": { "type": "string", "required": true },
+        "createdAt": { "type": "string", "required": true }
+      }
+    },
+    "Notification": {
+      "collection": "notifications",
+      "fields": {
+        "userId": { "type": "string", "required": true },
+        "churchId": { "type": "string", "required": true },
+        "title": { "type": "string", "required": true },
+        "message": { "type": "string", "required": true },
+        "type": { "type": "string", "required": true },
+        "isRead": { "type": "boolean", "required": true },
+        "createdAt": { "type": "string", "required": true }
       }
     },
     "AppConfig": {
       "collection": "app_config",
       "fields": {
-        "id": { "type": "string", "required": true },
-        "systemStatus": { "type": "string" },
-        "updatedAt": { "type": "string" }
+        "id": { "type": "string" },
+        "maintenanceMode": { "type": "boolean" },
+        "donations": { "type": "object" },
+        "adMob": { "type": "object" },
+        "commentModeration": { "type": "object" },
+        "memberVerification": { "type": "object" },
+        "updatedAt": { "type": "string" },
+        "lastUpdated": { "type": "string" }
       }
     }
   }

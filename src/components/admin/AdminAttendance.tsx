@@ -9,7 +9,6 @@ import {
 } from '../../types';
 import { SERVICE_CATEGORIES } from '../../utils/i18n';
 import {
-  recordAttendanceScan,
   getActiveService,
   isDeviceOnline,
   getPendingOfflineAttendanceCount,
@@ -19,6 +18,14 @@ import {
   isServiceEnded,
   syncServiceAbsencesAutomatically,
 } from '../../utils/storage';
+import {
+  isVisitorMember,
+  isVisitorAttendanceRecord,
+  isServiceCurrentlyActive,
+  isServiceBeforeStart,
+} from '../../utils/permissions';
+import { formatServiceTimeAmPm } from '../../utils/memberFeedUtils';
+import { recordAttendanceScanUnified } from '../../utils/qrSyncLayer';
 import {
   exportAttendanceListToPdf,
   exportAbsenteesListToPdf,
@@ -44,6 +51,7 @@ import {
   Filter,
   Calendar,
   ShieldCheck,
+  Lock,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -77,7 +85,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
 
   // Filters for Attendance
   const [selectedServiceFilter, setSelectedServiceFilter] = useState<string>('all');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'on_time' | 'late'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'on_time' | 'late' | 'visitor'>('all');
   const [searchTerm, setSearchTerm] = useState<string>('');
 
   // Filters for Absentees
@@ -95,12 +103,21 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
     message: string;
   } | null>(null);
 
-  // Active Service context
-  const activeService = getActiveService(church.id) || services[0];
-  const targetServiceForAbsentees =
+  // Active Service context (strictly open services — never treat unopened scheduled services as active)
+  const activeService = getActiveService(church.id);
+  const selectedFilterService =
     selectedServiceFilter !== 'all'
-      ? services.find((s) => s.id === selectedServiceFilter) || activeService
-      : activeService;
+      ? services.find((s) => s.id === selectedServiceFilter)
+      : undefined;
+  const targetServiceForAbsentees = selectedFilterService || activeService;
+  const manualCheckInTarget = targetServiceForAbsentees || activeService;
+  const isManualTargetEnded = Boolean(
+    manualCheckInTarget &&
+      (manualCheckInTarget.isPermanentlyEnded || isServiceEnded(manualCheckInTarget))
+  );
+  const canManualCheckIn = Boolean(
+    manualCheckInTarget && isServiceCurrentlyActive(manualCheckInTarget, isServiceEnded)
+  );
 
   // Manual sync handler
   const handleManualSync = async () => {
@@ -194,9 +211,12 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
     const matchesService =
       selectedServiceFilter === 'all' || rec.serviceId === selectedServiceFilter;
     const isLate = rec.attendanceStatus === 'late';
+    const isVis = isVisitorAttendanceRecord(rec, church.id);
     const matchesStatus =
       statusFilter === 'all'
         ? true
+        : statusFilter === 'visitor'
+        ? isVis
         : statusFilter === 'late'
         ? isLate
         : !isLate;
@@ -205,6 +225,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
       !sTerm ||
       (rec.memberName || '').toLowerCase().includes(sTerm) ||
       (rec.memberId || '').toLowerCase().includes(sTerm) ||
+      (rec.homeChurchName || '').toLowerCase().includes(sTerm) ||
       (rec.serviceTitle || '').toLowerCase().includes(sTerm);
     return matchesService && matchesStatus && matchesSearch;
   });
@@ -238,28 +259,46 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
     }, 450);
   };
 
+  const targetServiceEnded = Boolean(
+    targetServiceForAbsentees && isServiceEnded(targetServiceForAbsentees)
+  );
+
   // Set of member IDs who checked in for the effective service
   const presentMemberIdSet = new Set<string>();
+  const regularPresentIdSet = new Set<string>();
   recordsForEffectiveService.forEach((r) => {
-    if (r.memberId) presentMemberIdSet.add(r.memberId.toUpperCase());
-    if (r.memberDbId) presentMemberIdSet.add(r.memberDbId);
+    const isVis = isVisitorAttendanceRecord(r, church.id);
+    if (r.memberId) {
+      presentMemberIdSet.add(r.memberId.toUpperCase());
+      if (!isVis) regularPresentIdSet.add(r.memberId.toUpperCase());
+    }
+    if (r.memberDbId) {
+      presentMemberIdSet.add(r.memberDbId);
+      if (!isVis) regularPresentIdSet.add(r.memberDbId);
+    }
   });
 
-  const rawAbsentees = members.filter((m) => {
-    const isPresent =
-      (m.memberId && presentMemberIdSet.has(m.memberId.toUpperCase())) ||
-      (m.id && presentMemberIdSet.has(m.id));
-    return !isPresent;
-  });
+  // Absences are ONLY counted when a service has FINISHED AND members verified attendance in it
+  const isTargetServiceEligibleForAbsenceCheck = Boolean(
+    targetServiceForAbsentees &&
+      targetServiceEnded &&
+      presentMemberIdSet.size > 0
+  );
 
-  const targetServiceEnded = targetServiceForAbsentees
-    ? isServiceEnded(targetServiceForAbsentees)
-    : false;
+  const regularMembers = members.filter((m) => !isVisitorMember(m));
+  const rawAbsentees = isTargetServiceEligibleForAbsenceCheck
+    ? regularMembers.filter((m) => {
+        const isPresent =
+          (m.memberId && presentMemberIdSet.has(m.memberId.toUpperCase())) ||
+          (m.id && presentMemberIdSet.has(m.id));
+        return !isPresent;
+      })
+    : [];
 
   const currentAbsenceRecords = useMemo(() => {
-    if (!targetServiceForAbsentees) return [];
+    if (!isTargetServiceEligibleForAbsenceCheck || !targetServiceForAbsentees) return [];
     return getServiceAbsenceRecords(church.id, targetServiceForAbsentees.id);
-  }, [church.id, targetServiceForAbsentees?.id, absenceRefreshKey, attendanceRecords.length]);
+  }, [church.id, isTargetServiceEligibleForAbsenceCheck, targetServiceForAbsentees?.id, absenceRefreshKey, attendanceRecords.length]);
 
   const absenceByMemberMap = useMemo(() => {
     const map = new Map<string, AbsenceRecord>();
@@ -272,7 +311,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
 
   // Handle Excuse Toggle
   const handleToggleExcuse = (m: Member) => {
-    if (!targetServiceForAbsentees) return;
+    if (!isTargetServiceEligibleForAbsenceCheck || !targetServiceForAbsentees) return;
     const existingRec =
       absenceByMemberMap.get(m.id) ||
       (m.memberId ? absenceByMemberMap.get(m.memberId.toUpperCase()) : undefined);
@@ -347,8 +386,16 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
   });
 
   // ---------------- EXECUTIVE KPI STATS ----------------
-  const totalChurchMembers = members.length;
-  const distinctPresentCount = presentMemberIdSet.size;
+  const totalChurchMembers = regularMembers.length;
+  const visitorRecordsCount = recordsForEffectiveService.filter((r) =>
+    isVisitorAttendanceRecord(r, church.id)
+  ).length;
+  const distinctRegularPresent = regularMembers.filter(
+    (m) =>
+      (m.memberId && regularPresentIdSet.has(m.memberId.toUpperCase())) ||
+      (m.id && regularPresentIdSet.has(m.id))
+  ).length;
+  const distinctPresentCount = distinctRegularPresent;
   const onTimeCount = recordsForEffectiveService.filter(
     (r) => r.attendanceStatus !== 'late'
   ).length;
@@ -365,7 +412,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
   const unexcusedAbsentCount = Math.max(0, absentCount - excusedCount);
   const attendanceRate =
     totalChurchMembers > 0
-      ? Math.round((distinctPresentCount / totalChurchMembers) * 100)
+      ? Math.min(100, Math.round((distinctPresentCount / totalChurchMembers) * 100))
       : 0;
 
   // Department list for filters
@@ -374,16 +421,94 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
   ) as string[];
 
   // ---------------- MANUAL CHECK-IN ----------------
-  const handleManualCheckIn = (codeOrMember: string) => {
+  const handleManualCheckIn = async (codeOrMember: string) => {
+    if (!codeOrMember.trim()) return;
     const targetService = targetServiceForAbsentees || activeService;
-    if (!codeOrMember.trim() || !targetService) return;
 
-    const res = recordAttendanceScan({
+    if (!targetService) {
+      const noServiceMsg = isEs
+        ? 'No hay ningún servicio activo abierto en este momento. Abra un servicio en curso antes de registrar asistencia.'
+        : isFr
+        ? 'Aucun service actif n’est ouvert actuellement. Veuillez ouvrir un service en cours avant de pointer une présence.'
+        : isEn
+        ? 'No active service is currently open. Please open an ongoing service before recording attendance.'
+        : 'Pa gen okenn sèvis aktif ki louvri kounye a. Tanpri louvri yon sèvis ki an kou anvan ou anrejistre prezans.';
+      setQuickCheckinFeedback({ success: false, message: `🔒 ${noServiceMsg}` });
+      toast.warning(
+        isEs ? 'Sin Servicio Activo' : isFr ? 'Aucun Service Actif' : isEn ? 'No Active Service' : 'Pa gen Sèvis Aktif',
+        noServiceMsg
+      );
+      setTimeout(() => setQuickCheckinFeedback(null), 5000);
+      return;
+    }
+
+    if (!isServiceCurrentlyActive(targetService, isServiceEnded)) {
+      const targetEndedNow = Boolean(
+        targetService.isPermanentlyEnded || isServiceEnded(targetService)
+      );
+      const targetBeforeStartNow = !targetEndedNow && isServiceBeforeStart(targetService);
+      const startLabel = formatServiceTimeAmPm(targetService.startTime);
+      const lockedMsg = targetEndedNow
+        ? isEs
+          ? `El servicio "${targetService.title}" ya finalizó y está cerrado permanentemente. No se puede registrar ni verificar asistencia.`
+          : isFr
+          ? `Le service « ${targetService.title} » est déjà terminé et définitivement fermé. Impossible d’y enregistrer ou vérifier une présence.`
+          : isEn
+          ? `Service "${targetService.title}" has ended and is permanently closed. Attendance can no longer be recorded or verified.`
+          : `Sèvis « ${targetService.title} » deja fini epi li fèmen pou toutan. Li pa kapab pran oswa verifye prezans ankò.`
+        : targetBeforeStartNow
+        ? isEs
+          ? `El servicio "${targetService.title}" inicia a las ${startLabel}. No se puede registrar ni verificar asistencia antes de la hora del servicio.`
+          : isFr
+          ? `Le service « ${targetService.title} » commence à ${startLabel}. Impossible d’enregistrer ou vérifier une présence avant l’heure du service.`
+          : isEn
+          ? `Service "${targetService.title}" starts at ${startLabel}. Attendance cannot be recorded or verified before the scheduled start time.`
+          : `Sèvis « ${targetService.title} » poko kòmanse (ap kòmanse a ${startLabel}). Okenn prezans pa kapab verifye anvan lè sèvis la.`
+        : isEs
+        ? `El servicio "${targetService.title}" está cerrado actualmente. Ábralo antes de registrar asistencia.`
+        : isFr
+        ? `Le service « ${targetService.title} » est actuellement fermé. Ouvrez-le avant de pointer une présence.`
+        : isEn
+        ? `Service "${targetService.title}" is currently closed. Please open it before recording attendance.`
+        : `Sèvis « ${targetService.title} » fèmen pou prezans kounye a. Louvri l anvan ou anrejistre prezans.`;
+      setQuickCheckinFeedback({ success: false, message: `🔒 ${lockedMsg}` });
+      toast.error(
+        targetEndedNow
+          ? isEs
+            ? 'Servicio Finalizado'
+            : isFr
+            ? 'Service Terminé'
+            : isEn
+            ? 'Service Ended'
+            : 'Sèvis Fini'
+          : targetBeforeStartNow
+          ? isEs
+            ? 'Servicio Aún No Inicia'
+            : isFr
+            ? 'Service Pas Encore Commencé'
+            : isEn
+            ? 'Service Not Started Yet'
+            : 'Sèvis la Poko Kòmanse'
+          : isEs
+          ? 'Servicio Cerrado'
+          : isFr
+          ? 'Service Fermé'
+          : isEn
+          ? 'Service Closed'
+          : 'Sèvis Fèmen',
+        lockedMsg
+      );
+      setTimeout(() => setQuickCheckinFeedback(null), 5000);
+      return;
+    }
+
+    const res = await recordAttendanceScanUnified({
       currentChurchId: church.id,
       rawCode: codeOrMember.trim(),
       serviceId: targetService.id,
       method: 'manual',
       recordedBy: 'Admin Desk',
+      requireActiveOngoingService: true,
     });
 
     if (res.success) {
@@ -393,16 +518,20 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
           ? ` (${isEs ? 'Retardo' : isFr ? 'Retard' : isEn ? 'Late' : 'Reta'}: +${res.record.lateMinutes} min)`
           : '';
 
+      const visitorTag = res.isVisitor
+        ? ` [Vizitè${res.homeChurchName ? ` • ${res.homeChurchName}` : ''}]`
+        : '';
+
       if (res.isOfflineSaved) {
         setQuickCheckinFeedback({
           success: true,
           message: isEs
-            ? `💾 Asistencia guardada offline para ${res.member?.fullName} (${res.member?.memberId}) en ${res.service?.title}${lateStr}.`
+            ? `💾 Asistencia guardada offline para ${res.member?.fullName} (${res.member?.memberId})${visitorTag} en ${res.service?.title}${lateStr}.`
             : isFr
-            ? `💾 Présence enregistrée hors-ligne pour ${res.member?.fullName} (${res.member?.memberId}) dans ${res.service?.title}${lateStr}.`
+            ? `💾 Présence enregistrée hors-ligne pour ${res.member?.fullName} (${res.member?.memberId})${visitorTag} dans ${res.service?.title}${lateStr}.`
             : isEn
-            ? `💾 Attendance saved offline for ${res.member?.fullName} (${res.member?.memberId}) in ${res.service?.title}${lateStr}.`
-            : `💾 Prezans anrejistre offline pou ${res.member?.fullName} (${res.member?.memberId}) nan ${res.service?.title}${lateStr}.`,
+            ? `💾 Attendance saved offline for ${res.member?.fullName} (${res.member?.memberId})${visitorTag} in ${res.service?.title}${lateStr}.`
+            : `💾 Prezans anrejistre offline pou ${res.member?.fullName} (${res.member?.memberId})${visitorTag} nan ${res.service?.title}${lateStr}.`,
         });
         toast.info(
           isEs
@@ -412,28 +541,24 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
             : isEn
             ? '💾 Saved Offline'
             : '💾 Sove Offline',
-          `${res.member?.fullName} (${res.member?.memberId})`
+          `${res.member?.fullName} (${res.member?.memberId})${visitorTag}`
         );
       } else {
         setQuickCheckinFeedback({
           success: true,
           message: isEs
-            ? `Asistencia registrada ✓ para ${res.member?.fullName} (${res.member?.memberId}) en ${res.service?.title}${lateStr}`
+            ? `Asistencia registrada ✓ para ${res.member?.fullName} (${res.member?.memberId})${visitorTag} en ${res.service?.title}${lateStr}`
             : isFr
-            ? `Présence enregistrée ✓ pour ${res.member?.fullName} (${res.member?.memberId}) dans ${res.service?.title}${lateStr}`
+            ? `Présence enregistrée ✓ pour ${res.member?.fullName} (${res.member?.memberId})${visitorTag} dans ${res.service?.title}${lateStr}`
             : isEn
-            ? `Attendance recorded ✓ for ${res.member?.fullName} (${res.member?.memberId}) in ${res.service?.title}${lateStr}`
-            : `Prezans anrejistre ✓ pou ${res.member?.fullName} (${res.member?.memberId}) nan ${res.service?.title}${lateStr}`,
+            ? `Attendance recorded ✓ for ${res.member?.fullName} (${res.member?.memberId})${visitorTag} in ${res.service?.title}${lateStr}`
+            : `Prezans anrejistre ✓ pou ${res.member?.fullName} (${res.member?.memberId})${visitorTag} nan ${res.service?.title}${lateStr}`,
         });
         toast.success(
-          isEs
-            ? '¡Asistencia Registrada!'
-            : isFr
-            ? 'Présence Enregistrée !'
-            : isEn
-            ? 'Attendance Recorded!'
-            : 'Prezans Anrejistre!',
-          `${res.member?.fullName} (${res.member?.memberId}) • ${res.service?.title}`
+          res.isVisitor
+            ? (isEs ? '¡Visitante Registrado!' : isFr ? 'Visiteur Enregistré !' : isEn ? 'Visitor Checked In!' : 'Prezans Vizitè Anrejistre!')
+            : (isEs ? '¡Asistencia Registrada!' : isFr ? 'Présence Enregistrée !' : isEn ? 'Attendance Recorded!' : 'Prezans Anrejistre!'),
+          `${res.member?.fullName} (${res.member?.memberId})${visitorTag} • ${res.service?.title}`
         );
       }
       setPendingCount(getPendingOfflineAttendanceCount(church.id));
@@ -827,6 +952,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
           <div className="text-xl sm:text-2xl font-black text-emerald-300">{distinctPresentCount}</div>
           <div className="text-[10px] text-emerald-400/80 mt-1 font-medium">
             {recordsForEffectiveService.length} {isEs ? 'escaneos' : isFr ? 'scans' : isEn ? 'scans' : 'scan fèt'}
+            {visitorRecordsCount > 0 ? ` (+${visitorRecordsCount} ${isEs ? 'Visit.' : isFr ? 'Visit.' : isEn ? 'Visit.' : 'Vizitè'})` : ''}
           </div>
         </div>
 
@@ -868,11 +994,13 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
           </div>
           <div className="text-xl sm:text-2xl font-black text-rose-300">{absentCount}</div>
           <div className="text-[10px] text-rose-400/80 mt-1 font-medium">
-            {targetServiceEnded
-              ? (excusedCount > 0
-                  ? `${unexcusedAbsentCount} ${isEs ? 'sin justif.' : isEn ? 'unexcused' : isFr ? 'non justif.' : 'san eskiz'} • ${excusedCount} ${isEs ? 'excusados' : isEn ? 'excused' : isFr ? 'excusés' : 'eskize'}`
-                  : (isEs ? 'Marcados ausentes' : isEn ? 'Logged as absent' : isFr ? 'Marqués absents' : 'Tout make absan'))
-              : (isEs ? 'Pendientes de llegar' : isFr ? 'En attente' : isEn ? 'Not yet checked in' : 'Poko anrejistre')}
+            {!isTargetServiceEligibleForAbsenceCheck
+              ? (targetServiceForAbsentees && !targetServiceEnded
+                  ? (isEs ? 'Se calcula al finalizar' : isFr ? 'Calculé après la fin' : isEn ? 'Counted after service ends' : 'Kont apre sèvis la fini')
+                  : (isEs ? 'Sin servicio finalizado' : isFr ? 'Aucun culte terminé' : isEn ? 'No finished service' : 'Pa gen sèvis fini'))
+              : excusedCount > 0
+              ? `${unexcusedAbsentCount} ${isEs ? 'sin justif.' : isEn ? 'unexcused' : isFr ? 'non justif.' : 'san eskiz'} • ${excusedCount} ${isEs ? 'excusados' : isEn ? 'excused' : isFr ? 'excusés' : 'eskize'}`
+              : (isEs ? 'Marcados ausentes' : isEn ? 'Logged as absent' : isFr ? 'Marqués absents' : 'Tout make absan')}
           </div>
         </div>
 
@@ -898,8 +1026,14 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
       <div className="p-4 bg-[#1E293B] text-white rounded-2xl border border-slate-700/80 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <span className="flex h-3 w-3 relative shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+            {activeService ? (
+              <>
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+              </>
+            ) : (
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500/80"></span>
+            )}
           </span>
           <div>
             <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">
@@ -998,15 +1132,73 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
           </div>
         )}
 
+        {/* Lock Notice when target service is closed, ended, or missing */}
+        {!canManualCheckIn && (
+          <div
+            id="banner-manual-checkin-locked"
+            className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+          >
+            <div className="flex items-center gap-2">
+              <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                {!manualCheckInTarget
+                  ? isEs
+                    ? 'No hay ningún servicio activo abierto. Abra un servicio en curso para habilitar el registro manual.'
+                    : isFr
+                    ? 'Aucun service actif ouvert. Ouvrez un service en cours pour activer le pointage manuel.'
+                    : isEn
+                    ? 'No ongoing active service is open. Open an active service to enable manual check-in.'
+                    : 'Pa gen okenn sèvis aktif ki louvri kounye a. Louvri yon sèvis ki an kou pou aktive anrejistreman manyèl la.'
+                  : isManualTargetEnded
+                  ? isEs
+                    ? `El servicio seleccionado («${manualCheckInTarget.title}») ya finalizó y está bloqueado para nuevos registros de asistencia.`
+                    : isFr
+                    ? `Le service sélectionné (« ${manualCheckInTarget.title} ») est terminé et verrouillé contre tout nouveau pointage.`
+                    : isEn
+                    ? `Selected service ("${manualCheckInTarget.title}") has ended and is locked against new attendance check-ins.`
+                    : `Sèvis ou chwazi a (« ${manualCheckInTarget.title} ») deja fini epi li bloke — ou pa kapab anrejistre prezans ladan l ankò.`
+                  : isEs
+                  ? `El servicio seleccionado («${manualCheckInTarget.title}») está cerrado. Ábralo antes de marcar asistencia.`
+                  : isFr
+                  ? `Le service sélectionné (« ${manualCheckInTarget.title} ») est fermé. Ouvrez-le avant de pointer.`
+                  : isEn
+                  ? `Selected service ("${manualCheckInTarget.title}") is closed. Open it before checking members in.`
+                  : `Sèvis ou chwazi a (« ${manualCheckInTarget.title} ») fèmen kounye a. Louvri l anvan ou make prezans.`}
+              </span>
+            </div>
+            {activeService && selectedServiceFilter !== 'all' && selectedServiceFilter !== activeService.id && (
+              <button
+                type="button"
+                id="btn-switch-to-active-service-checkin"
+                onClick={() => setSelectedServiceFilter(activeService.id)}
+                className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-[11px] whitespace-nowrap self-start sm:self-auto cursor-pointer transition-colors"
+              >
+                {isEs
+                  ? 'Ir al Servicio Activo'
+                  : isFr
+                  ? 'Basculer vers le Culte Actif'
+                  : isEn
+                  ? 'Switch to Active Service'
+                  : 'Ale sou Sèvis Aktif la'}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Member Quick Buttons */}
-        <div className="flex flex-wrap gap-1.5 p-2 bg-slate-900/80 rounded-xl border border-slate-700 max-h-24 overflow-y-auto">
-          {members.map((m) => (
+        <div
+          className={`flex flex-wrap gap-1.5 p-2 bg-slate-900/80 rounded-xl border border-slate-700 max-h-24 overflow-y-auto ${
+            !canManualCheckIn ? 'opacity-50' : ''
+          }`}
+        >
+          {members.map((m, idx) => (
             <button
-              key={m.id}
+              key={`${m.id || m.memberId || 'm'}-${idx}`}
               type="button"
-              id={`btn-desk-checkin-${m.id}`}
+              id={`btn-desk-checkin-${m.id || idx}`}
+              disabled={!canManualCheckIn}
               onClick={() => handleManualCheckIn(m.memberId)}
-              className="px-2.5 py-1 rounded-md text-xs bg-slate-800 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 border border-slate-700 transition-colors font-medium text-slate-300 flex items-center gap-1 cursor-pointer"
+              className="px-2.5 py-1 rounded-md text-xs bg-slate-800 hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/30 border border-slate-700 transition-colors font-medium text-slate-300 flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-slate-800 disabled:hover:text-slate-300 disabled:hover:border-slate-700"
             >
               <UserCheck className="w-3 h-3 text-slate-400" />
               <span>{m.fullName}</span>
@@ -1028,6 +1220,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
             <input
               type="text"
               id="input-desk-manual-code"
+              disabled={!canManualCheckIn}
               placeholder={
                 isEs
                   ? 'Escriba Member ID (ej: CH001-JD4827) o nombre...'
@@ -1039,14 +1232,14 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
               }
               value={manualCode}
               onChange={(e) => setManualCode(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-700 bg-slate-900 text-white placeholder:text-slate-500 focus:ring-1 focus:ring-amber-400 focus:border-amber-400 focus:outline-none"
+              className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-700 bg-slate-900 text-white placeholder:text-slate-500 focus:ring-1 focus:ring-amber-400 focus:border-amber-400 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             />
           </div>
           <button
             type="submit"
             id="btn-desk-submit-checkin"
-            disabled={!manualCode.trim()}
-            className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs disabled:opacity-50 transition-colors cursor-pointer"
+            disabled={!canManualCheckIn || !manualCode.trim()}
+            className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer"
           >
             {isEs ? 'Marcar Asistencia' : isFr ? 'Pointer Présence' : isEn ? 'Check-in Member' : 'Make Prezans'}
           </button>
@@ -1123,8 +1316,8 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                   ? `All Services (${attendanceRecords.length} records)`
                   : `Tout Sèvis Yo (${attendanceRecords.length} prezans)`}
               </option>
-              {services.map((s) => (
-                <option key={s.id} value={s.id}>
+              {services.map((s, idx) => (
+                <option key={`${s.id || 'srv'}-${idx}`} value={s.id}>
                   {s.title} ({s.date})
                 </option>
               ))}
@@ -1176,6 +1369,19 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                 >
                   <Timer className="w-3.5 h-3.5 text-amber-400" />
                   <span>{isEs ? 'Retardos' : isFr ? 'Retards' : isEn ? 'Late' : 'Reta'} ({lateCount})</span>
+                </button>
+                <button
+                  type="button"
+                  id="btn-filter-status-visitor"
+                  onClick={() => setStatusFilter('visitor')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    statusFilter === 'visitor'
+                      ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                      : 'text-slate-400 hover:text-sky-300'
+                  }`}
+                >
+                  <UserCheck className="w-3.5 h-3.5 text-sky-400" />
+                  <span>{isEs ? 'Visitantes' : isFr ? 'Visiteurs' : isEn ? 'Visitors' : 'Vizitè'} ({visitorRecordsCount})</span>
                 </button>
               </div>
 
@@ -1231,7 +1437,7 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700/60 font-medium">
-                      {filteredAttendance.map((rec) => {
+                      {filteredAttendance.map((rec, idx) => {
                         const catConfig = SERVICE_CATEGORIES[rec.serviceCategory];
                         const categoryName = catConfig
                           ? isEs
@@ -1244,17 +1450,20 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                           : rec.serviceCategory;
 
                         const isLate = rec.attendanceStatus === 'late';
+                        const isVis = isVisitorAttendanceRecord(rec, church.id);
 
                         return (
                           <tr
-                            key={rec.id}
+                            key={`${rec.id || rec.memberId || 'att'}-${idx}`}
                             className="hover:bg-slate-800/80 transition-colors"
                           >
                             <td className="py-3.5 px-4">
                               <div className="flex items-center gap-2.5">
                                 <div
                                   className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
-                                    isLate
+                                    isVis
+                                      ? 'bg-sky-500/20 border border-sky-500/30 text-sky-300'
+                                      : isLate
                                       ? 'bg-amber-500/20 border border-amber-500/30 text-amber-400'
                                       : 'bg-emerald-500/20 border border-emerald-500/30 text-emerald-400'
                                   }`}
@@ -1262,14 +1471,25 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                                   {rec.memberName[0]}
                                 </div>
                                 <div>
-                                  <span className="font-bold text-white block">
-                                    {rec.memberName}
-                                  </span>
-                                  {rec.memberDepartment && (
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-bold text-white">
+                                      {rec.memberName}
+                                    </span>
+                                    {isVis && (
+                                      <span className="px-1.5 py-0.5 rounded bg-sky-500/20 border border-sky-400/40 text-sky-300 text-[9px] font-extrabold uppercase tracking-wider">
+                                        {isEs ? 'Visitante' : isFr ? 'Visiteur' : isEn ? 'Visitor' : 'Vizitè'}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {isVis && rec.homeChurchName ? (
+                                    <span className="text-[10px] text-sky-300/80 block">
+                                      {isEs ? 'De' : isFr ? 'De' : isEn ? 'From' : 'Soti nan'}: {rec.homeChurchName}
+                                    </span>
+                                  ) : rec.memberDepartment ? (
                                     <span className="text-[10px] text-slate-500">
                                       {rec.memberDepartment}
                                     </span>
-                                  )}
+                                  ) : null}
                                 </div>
                               </div>
                             </td>
@@ -1352,7 +1572,15 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                 <div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="font-bold text-xs text-white">
-                      {isEs
+                      {!isTargetServiceEligibleForAbsenceCheck
+                        ? (isEs
+                            ? 'No hay servicio activo o realizado'
+                            : isFr
+                            ? 'Aucun culte actif ou réalisé'
+                            : isEn
+                            ? 'No active or conducted service'
+                            : 'Pa gen sèvis aktif oswa ki fèt kounye a')
+                        : isEs
                         ? `Miembros ausentes para: ${targetServiceForAbsentees?.title || 'Servicio'}`
                         : isFr
                         ? `Membres absents pour : ${targetServiceForAbsentees?.title || 'Culte'}`
@@ -1360,7 +1588,11 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                         ? `Absent members for: ${targetServiceForAbsentees?.title || 'Service'}`
                         : `Manm ki absan nan: ${targetServiceForAbsentees?.title || 'Sèvis Kilt la'}`}
                     </p>
-                    {targetServiceEnded ? (
+                    {!isTargetServiceEligibleForAbsenceCheck ? (
+                      <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-slate-300 text-[10px] font-bold">
+                        {isEs ? 'En Espera (0 Ausencias)' : isEn ? 'Standby (0 Absences)' : isFr ? 'En Attente (0 Absences)' : 'An Atant (0 Absans)'}
+                      </span>
+                    ) : targetServiceEnded ? (
                       <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-slate-300 text-[10px] font-bold">
                         {isEs ? 'Servicio Finalizado (Ausencias Registradas)' : isEn ? 'Service Ended (Absences Recorded)' : isFr ? 'Culte Terminé (Absences Enregistrées)' : 'Kilt Fini (Absans Anrejistre)'}
                       </span>
@@ -1371,8 +1603,20 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                     )}
                   </div>
                   <p className="text-[11px] text-rose-300/80 mt-0.5">
-                    {targetServiceForAbsentees?.date} • {rawAbsentees.length} {isEs ? 'miembros no han registrado asistencia' : isFr ? 'membres n\'ont pas encore enregistré leur présence' : isEn ? 'members have not checked in' : 'manm pa t eskane pandan sèvis sa a'}
-                    {excusedCount > 0 ? ` (${excusedCount} ${isEs ? 'excusados' : isEn ? 'excused' : isFr ? 'excusés' : 'eskize'})` : ''}.
+                    {!isTargetServiceEligibleForAbsenceCheck
+                      ? (isEs
+                          ? 'Las ausencias no se calculan hasta que se abra un servicio para registrar asistencias.'
+                          : isFr
+                          ? 'Les absences ne sont calculées que lorsqu’un culte a été ouvert pour le pointage.'
+                          : isEn
+                          ? 'Absences are never calculated unless a service was opened for attendance.'
+                          : 'Sistèm nan pa kalkile okenn absans si pa gen yon sèvis ki te louvri pou pran prezans.')
+                      : (
+                        <>
+                          {targetServiceForAbsentees?.date} • {rawAbsentees.length} {isEs ? 'miembros no han registrado asistencia' : isFr ? 'membres n\'ont pas encore enregistré leur présence' : isEn ? 'members have not checked in' : 'manm pa t eskane pandan sèvis sa a'}
+                          {excusedCount > 0 ? ` (${excusedCount} ${isEs ? 'excusados' : isEn ? 'excused' : isFr ? 'excusés' : 'eskize'})` : ''}.
+                        </>
+                      )}
                   </p>
                 </div>
               </div>
@@ -1412,8 +1656,8 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                     <option value="all">
                       {isEs ? 'Todos los Departamentos' : isFr ? 'Tous les Départements' : isEn ? 'All Departments' : 'Tout Depatman Yo'}
                     </option>
-                    {departmentsList.map((dept) => (
-                      <option key={dept} value={dept}>
+                    {departmentsList.map((dept, idx) => (
+                      <option key={`${dept}-${idx}`} value={dept}>
                         {dept}
                       </option>
                     ))}
@@ -1428,7 +1672,15 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                 <div className="p-12 text-center text-slate-400 space-y-2">
                   <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
                   <p className="text-sm font-bold text-white">
-                    {isEs
+                    {!isTargetServiceEligibleForAbsenceCheck
+                      ? (isEs
+                          ? 'No hay ausencias sin un servicio activo o realizado.'
+                          : isFr
+                          ? 'Aucune absence calculée sans culte actif ou réalisé.'
+                          : isEn
+                          ? 'No absences calculated without an active or conducted service.'
+                          : 'Pa gen okenn absans lè pa gen sèvis ki aktif oswa ki fèt.')
+                      : isEs
                       ? '¡Excelente! No hay ausencias registradas para esta selección.'
                       : isFr
                       ? 'Parfait ! Aucune absence enregistrée pour cette sélection.'
@@ -1451,9 +1703,9 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-700/60 font-medium">
-                      {filteredAbsentees.map((m) => (
+                      {filteredAbsentees.map((m, idx) => (
                         <tr
-                          key={m.id}
+                          key={`${m.id || m.memberId || 'abs'}-${idx}`}
                           className="hover:bg-slate-800/80 transition-colors"
                         >
                           <td className="py-3.5 px-4">
@@ -1565,15 +1817,17 @@ export const AdminAttendance: React.FC<AdminAttendanceProps> = ({
                                       </span>
                                     </button>
 
-                                    <button
-                                      type="button"
-                                      id={`btn-mark-absentee-present-${m.id}`}
-                                      onClick={() => handleManualCheckIn(m.memberId)}
-                                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition-all shadow-sm cursor-pointer"
-                                    >
-                                      <CheckCircle2 className="w-3.5 h-3.5" />
-                                      <span>{isEs ? 'Marcar Presente' : isFr ? 'Pointer Présent' : isEn ? 'Mark Present' : 'Make Prezan'}</span>
-                                    </button>
+                                    {canManualCheckIn && (
+                                      <button
+                                        type="button"
+                                        id={`btn-mark-absentee-present-${m.id}`}
+                                        onClick={() => handleManualCheckIn(m.memberId)}
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs transition-all shadow-sm cursor-pointer"
+                                      >
+                                        <CheckCircle2 className="w-3.5 h-3.5" />
+                                        <span>{isEs ? 'Marcar Presente' : isFr ? 'Pointer Présent' : isEn ? 'Mark Present' : 'Make Prezan'}</span>
+                                      </button>
+                                    )}
                                   </div>
                                 </td>
                               </>

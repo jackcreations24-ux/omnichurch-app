@@ -281,6 +281,7 @@ export const AdminEditMemberModal: React.FC<AdminEditMemberModalProps> = ({
         zone: zone.trim() || undefined,
         department,
         role,
+        memberType: 'member',
         cellGroup: cellGroup.trim() || undefined,
         joinedDate: joinedDate || member.joinedDate,
         status,
@@ -366,6 +367,7 @@ export const AdminEditMemberModal: React.FC<AdminEditMemberModalProps> = ({
         'Lidè Jeunesse',
         'Chantre / Mizisyen',
         'Monitè Timoun',
+        'Resepsyon / Akèy',
         'Pwotokòl / Akèy',
         'Teknisyen Son & Média',
         'Sekretè / Administratè',
@@ -928,6 +930,9 @@ export const AdminEditMemberModal: React.FC<AdminEditMemberModalProps> = ({
                     onChange={(e) => setRole(e.target.value)}
                     className="w-full p-2.5 bg-slate-900 border border-slate-700 rounded-xl text-xs text-white focus:ring-2 focus:ring-amber-400 focus:outline-none font-medium"
                   >
+                    {role && !rolesList.includes(role) && (
+                      <option value={role}>{role}</option>
+                    )}
                     {rolesList.map((r) => (
                       <option key={r} value={r}>
                         {r}

@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { Church, Member, Language } from '../../types';
-import { addMember, generateMemberId, compressImageToBase64, generateSecureMemberPin } from '../../utils/storage';
+import { addMemberWithCloudSync, generateMemberId, compressImageToBase64, generateSecureMemberPin } from '../../utils/storage';
 import { useToast } from '../../context/ToastContext';
 import {
   UserPlus,
@@ -96,6 +96,7 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
   const [pin, setPin] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [createdSuccessMember, setCreatedSuccessMember] = useState<Member | null>(null);
 
   // Auto-calculated live ID
@@ -192,67 +193,30 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
     );
   };
 
-  // Quick Demo Auto-Fill
-  const handleQuickDemoFill = () => {
-    const sampleNames = isEs
-      ? [
-          'Carlos Mendoza Batista',
-          'Rosalía Estevez Santos',
-          'Emmanuel Rosario Peña',
-          'María Celeste Valdés',
-          'Samuel Benítez Gómez',
-        ]
-      : [
-          'Jean-Baptiste Pierre',
-          'Roseline Estimé',
-          'Emmanuel Dorvilus',
-          'Marie-Claude Voltaire',
-          'Samuel Bien-Aimé',
-        ];
-    const pickedName = sampleNames[Math.floor(Math.random() * sampleNames.length)];
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const randomPin = generateSecureMemberPin();
-
-    setFullName(pickedName);
-    setTitlePrefix(isEs ? 'Hno.' : 'Frè');
-    setGender('male');
-    setCivilStatus('marie');
-    setProfession(isEs ? 'Ingeniero en Sistemas' : 'Enjenyè Enfòmatik');
-    setDob('1994-06-20');
-    setLegalDocumentType('cin');
-    setLegalDocumentNumber(`001-234-567-${randomSuffix.toString().slice(0, 1)}`);
-    setPhone(`+509 37${randomSuffix.toString().slice(0, 2)}-${randomSuffix.toString().slice(2, 4)}88`);
-    setEmail(`${pickedName.toLowerCase().replace(/[^a-z]/g, '.')}@gmail.com`);
-    setAddress(isEs ? 'Calle Principal #45, Edif. Los Pinos' : 'Delmas 75, Rue Clercine');
-    setCity(isEs ? 'Santo Domingo' : 'Delmas');
-    setZone(isEs ? 'Sector Norte' : 'Sektè Nò');
-    setDepartment(isEs ? 'Jóvenes' : 'Jeunesse');
-    setRole(isEs ? 'Salmista' : 'Chantre');
-    setBaptismDate('2018-04-12');
-    setPin(randomPin);
-    setNotes(isEs ? 'Miembro muy fiel y activo en el ministerio de alabanza.' : 'Manm trè fidèl ak angaje nan ministè louwanj la.');
-    setFormError(null);
-    toast.info(
-      isEs ? 'Llenado Rápido' : 'Ranpli Rapid',
-      isEs ? '¡Formulario llenado con datos de demostración!' : 'Fòmilè a ranpli ak done egzanp pou tès rapid!'
-    );
-  };
-
   // Handle Form Submission
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!fullName.trim() || !phone.trim()) {
-      const errMsg = isEs
-        ? 'Por favor ingrese al menos el Nombre completo y el Teléfono del miembro.'
-        : 'Tanpri antre omwen Non konplè ak Nimewo telefòn manm nan.';
+    if (isSubmitting) return;
+    const trimmedName = fullName.trim();
+    if (trimmedName.length < 2 || !phone.trim()) {
+      const errMsg =
+        trimmedName.length < 2 && trimmedName.length > 0
+          ? isEs
+            ? 'El nombre completo debe tener al menos 2 caracteres.'
+            : 'Non konplè manm nan dwe gen omwen 2 karaktè.'
+          : isEs
+          ? 'Por favor ingrese al menos el Nombre completo y el Teléfono del miembro.'
+          : 'Tanpri antre omwen Non konplè ak Nimewo telefòn manm nan.';
       setFormError(errMsg);
       toast.error(isEs ? 'Información Incompleta' : 'Enfòmasyon Manke', errMsg);
       setActiveTab('identity');
       return;
     }
 
+    setIsSubmitting(true);
+    setFormError(null);
     try {
-      const newMember = addMember(church.id, {
+      const { member: newMember, cloudSynced, permissionError } = await addMemberWithCloudSync(church.id, {
         titlePrefix,
         fullName: fullName.trim(),
         gender,
@@ -269,6 +233,7 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
         zone: zone.trim() || undefined,
         department,
         role,
+        memberType: 'member',
         cellGroup: cellGroup.trim() || undefined,
         joinedDate,
         status,
@@ -281,12 +246,28 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
 
       onMemberAdded(newMember);
       setCreatedSuccessMember(newMember);
-      toast.success(
-        isEs ? '¡Miembro Agregado con Éxito!' : 'Manm Ajoute avèk Siksè!',
-        isEs
-          ? `${newMember.fullName} (${newMember.memberId}) registrado en ${church.name}.`
-          : `${newMember.fullName} (${newMember.memberId}) anrejistre nan ${church.name}.`
-      );
+      if (cloudSynced) {
+        toast.success(
+          isEs ? '¡Miembro Agregado con Éxito!' : 'Manm Ajoute avèk Siksè!',
+          isEs
+            ? `${newMember.fullName} (${newMember.memberId}) registrado en ${church.name}.`
+            : `${newMember.fullName} (${newMember.memberId}) anrejistre nan ${church.name}.`
+        );
+      } else if (permissionError) {
+        toast.warning(
+          isEs ? 'Guardado Local — Sincronización Pendiente' : 'Sove Lokalman — Senkronizasyon an Atant',
+          isEs
+            ? 'El miembro se guardó en este dispositivo, pero su sesión administrativa necesita reconectarse para sincronizar en la nube.'
+            : 'Manm nan sove sou aparèy sa a, men sesyon administratè a bezwen rekonekte pou li senkronize ak nwaj la.'
+        );
+      } else {
+        toast.info(
+          isEs ? 'Miembro Guardado (Modo Sin Conexión)' : 'Manm Sove (Mòd Offline)',
+          isEs
+            ? `${newMember.fullName} (${newMember.memberId}) se sincronizará automáticamente al recuperar conexión.`
+            : `${newMember.fullName} (${newMember.memberId}) ap senkronize otomatikman dèske entènèt la retounen.`
+        );
+      }
 
       try {
         confetti({
@@ -300,6 +281,8 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
     } catch (err) {
       setFormError(isEs ? 'Error al guardar el miembro.' : 'Erè pandan anrejistreman manm nan.');
       toast.error(isEs ? 'Error' : 'Erè', isEs ? 'No se pudo crear el registro del miembro.' : 'Pa t kapab kreye manm nan.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -394,17 +377,6 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {!createdSuccessMember && (
-              <button
-                type="button"
-                id="btn-demo-quick-fill"
-                onClick={handleQuickDemoFill}
-                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs font-semibold border border-slate-700 transition-colors cursor-pointer"
-                title={isEs ? 'Llenar formulario con datos de prueba' : 'Ranpli fòmilè a ak done egzanp pou tès'}
-              >
-                <span>{isEs ? 'Ejemplo Rápido' : 'Egzanp Rapid'}</span>
-              </button>
-            )}
             <button
               type="button"
               id="btn-close-add-modal"
@@ -978,13 +950,13 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
                             className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-white text-xs font-medium focus:ring-2 focus:ring-amber-400 focus:outline-none"
                           >
                             <option value={isEs ? 'Miembro' : 'Manm'}>{isEs ? 'Miembro Regular' : 'Manm Senp'}</option>
-                            <option value={isEs ? 'Recepción' : 'Manm akèy'}>{isEs ? 'Recepción / Protocolo' : 'Manm akèy'}</option>
+                            <option value={isEs ? 'Recepción' : 'Resepsyon'}>{isEs ? 'Recepción / Protocolo' : 'Resepsyon / Akèy (Scan Prezans)'}</option>
                             <option value={isEs ? 'Apóstol' : 'Apot'}>{isEs ? 'Apóstol' : 'Apot'}</option>
                             <option value={isEs ? 'Diácono' : 'Diacre'}>{isEs ? 'Diácono / Diaconisa' : 'Diacre / Diaconesse'}</option>
                             <option value={isEs ? 'Líder' : 'Responsable'}>{isEs ? 'Líder de Ministerio' : 'Responsable Ministè'}</option>
                             <option value={isEs ? 'Salmista' : 'Chantre'}>{isEs ? 'Salmista / Músico' : 'Chantre / Mizisyen'}</option>
                             <option value={isEs ? 'Maestro' : 'Moniteur'}>{isEs ? 'Maestro(a) de Escuela Bíblica' : 'Monitè / Monitris'}</option>
-                            <option value={isEs ? 'Protocolo' : 'Accueil'}>{isEs ? 'Servicio de Bienvenida' : 'Protokòl / Akèy'}</option>
+                            <option value={isEs ? 'Protocolo' : 'Pwotokòl / Akèy'}>{isEs ? 'Servicio de Bienvenida' : 'Pwotokòl / Akèy'}</option>
                             <option value={isEs ? 'Predicador' : 'Prédicateur'}>{isEs ? 'Predicador / Anciano' : 'Predikatè / Ansyen'}</option>
                           </select>
                         </div>
@@ -1227,10 +1199,19 @@ export const AdminAddMemberModal: React.FC<AdminAddMemberModalProps> = ({
                 type="submit"
                 form="form-ultra-add-member"
                 id="btn-submit-create-member"
-                className="px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg cursor-pointer transition-all hover:scale-[1.02]"
+                disabled={isSubmitting}
+                className="px-5 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-60 text-slate-950 font-bold text-xs sm:text-sm flex items-center gap-2 shadow-lg cursor-pointer transition-all hover:scale-[1.02]"
               >
-                <UserPlus className="w-4 h-4 text-slate-950" />
-                <span>{isEs ? 'Registrar Miembro' : 'Anrejistre Manm nan (Create Member)'}</span>
+                {isSubmitting ? (
+                  <RefreshCw className="w-4 h-4 text-slate-950 animate-spin" />
+                ) : (
+                  <UserPlus className="w-4 h-4 text-slate-950" />
+                )}
+                <span>
+                  {isSubmitting
+                    ? (isEs ? 'Guardando...' : 'Anrejistreman...')
+                    : (isEs ? 'Registrar Miembro' : 'Anrejistre Manm nan (Create Member)')}
+                </span>
               </button>
             </div>
           </div>

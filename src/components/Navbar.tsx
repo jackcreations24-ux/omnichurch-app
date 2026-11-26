@@ -18,6 +18,10 @@ import {
   LogOut,
   Globe,
   Languages,
+  Mail,
+  AlertCircle,
+  Plus,
+  Building2,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useToast } from "../context/ToastContext";
@@ -30,8 +34,22 @@ import {
   revokeAdminSession,
   isDeviceOnline,
   getPendingOfflineAttendanceCount,
+  resolveAdminOwnedChurches,
+  resolveChurchAdminAvatarUrl,
 } from "../utils/storage";
+import { isReceptionRole, isDeaconRole } from "../utils/permissions";
+import {
+  EMAIL_VERIFICATION_RESEND_COOLDOWN_SEC,
+  shouldShowProfileResendVerificationButton,
+  needsInlineReauthForVerification,
+  computeResendCooldownRemaining,
+  getVerificationEmailLastSentAt,
+  recordVerificationEmailSent,
+} from "../utils/emailVerificationFlow";
+import { auth } from "../lib/firebase";
 import { ChurchSearchSelector } from "./common/ChurchSearchSelector";
+import { OmniChurchLogo } from "./common/OmniChurchLogo";
+import { DonateButton } from "./common/DonateButton";
 
 export const Navbar: React.FC<any> = ({
   currentChurch,
@@ -59,18 +77,96 @@ export const Navbar: React.FC<any> = ({
   onOpenNotifications,
   onCloseNotifications,
   onNavigateToNotificationTarget,
-  onLockAdmin
+  onLockAdmin,
+  onOpenEmailVerificationScreen,
+  onOpenDonateScreen
 }) => {
   var _a3, _b3;
-  const { googleUser, signInWithGoogle, signOutGoogle, linkChurchAdminGoogleAccount } = useAuth();
+  const {
+    googleUser,
+    isEmailVerified,
+    signInWithGoogle,
+    signOutGoogle,
+    linkChurchAdminGoogleAccount,
+    resendAdminVerificationEmail,
+    refreshAuthUserState,
+  } = useAuth();
   const toast = useToast();
   const isEs = language === "es";
   const isEn = language === "en";
   const isFr = language === "fr";
   const [isMenuDropdownOpen, setIsMenuDropdownOpen] = reactExports.useState(false);
   const [isConnectingGoogle, setIsConnectingGoogle] = reactExports.useState(false);
+  const [isResendingProfileVerif, setIsResendingProfileVerif] = reactExports.useState(false);
+  const [profileVerifCooldown, setProfileVerifCooldown] = reactExports.useState(0);
   const dropdownRef = reactExports.useRef(null);
   const isUserLoggedIn = userRole === "admin" ? Boolean(isAuthorizedAdmin) : Boolean(currentMember);
+  const liveAuthUser = auth.currentUser;
+  const activeAuthEmail = (liveAuthUser == null ? void 0 : liveAuthUser.email) || (googleUser == null ? void 0 : googleUser.email) || "";
+  const showProfileResendVerification = shouldShowProfileResendVerificationButton({
+    userRole,
+    church: currentChurch,
+    hasAuthUser: Boolean((liveAuthUser && liveAuthUser.uid) || (googleUser && googleUser.uid)),
+    authEmailVerified: isEmailVerified,
+    authUserEmail: activeAuthEmail,
+  });
+  reactExports.useEffect(() => {
+    if (!showProfileResendVerification) {
+      setProfileVerifCooldown(0);
+      return;
+    }
+    const email = (currentChurch == null ? void 0 : currentChurch.adminGoogleEmail) || activeAuthEmail || "";
+    const syncCooldown = () => {
+      setProfileVerifCooldown(computeResendCooldownRemaining(getVerificationEmailLastSentAt(email)));
+    };
+    syncCooldown();
+    const interval = window.setInterval(syncCooldown, 1000);
+    return () => window.clearInterval(interval);
+  }, [showProfileResendVerification, activeAuthEmail, currentChurch == null ? void 0 : currentChurch.adminGoogleEmail, isMenuDropdownOpen]);
+  const handleProfileResendVerification = async () => {
+    if (isResendingProfileVerif || profileVerifCooldown > 0) return;
+    const requiresReauth = needsInlineReauthForVerification({
+      church: currentChurch,
+      hasAuthUser: Boolean(auth.currentUser && auth.currentUser.uid),
+      authUserEmail: (auth.currentUser && auth.currentUser.email) || (googleUser && googleUser.email),
+    });
+    if (requiresReauth && onOpenEmailVerificationScreen) {
+      setIsMenuDropdownOpen(false);
+      onOpenEmailVerificationScreen();
+      return;
+    }
+    setIsResendingProfileVerif(true);
+    try {
+      const alreadyVerified = await refreshAuthUserState();
+      if (alreadyVerified) {
+        toast.success(
+          isEs ? "¡Correo ya verificado!" : isFr ? "E-mail déjà vérifié !" : isEn ? "Email already verified!" : "Imèl ou deja verifye!",
+          isEs ? "Su cuenta de propietario está confirmada." : isFr ? "Votre compte propriétaire est confirmé." : isEn ? "Your owner account is already confirmed." : "Kont mèt legliz ou a deja konfime."
+        );
+        return;
+      }
+      await resendAdminVerificationEmail();
+      const email = (currentChurch == null ? void 0 : currentChurch.adminGoogleEmail) || (auth.currentUser == null ? void 0 : auth.currentUser.email) || (googleUser == null ? void 0 : googleUser.email) || "";
+      recordVerificationEmailSent(email);
+      setProfileVerifCooldown(EMAIL_VERIFICATION_RESEND_COOLDOWN_SEC);
+      toast.success(
+        isEs ? "Correo de verificación reenviado" : isFr ? "E-mail de vérification renvoyé" : isEn ? "Verification email sent" : "Imèl verifikasyon voye",
+        isEs ? `Revise su bandeja (o Spam) en ${email}.` : isFr ? `Vérifiez votre boîte (ou Spams) sur ${email}.` : isEn ? `Check your inbox (or Spam) at ${email}.` : `Louvri bwat imèl ou (oswa Spam) nan ${email} epi klike sou lyen an.`
+      );
+    } catch (err) {
+      if (onOpenEmailVerificationScreen && !auth.currentUser) {
+        setIsMenuDropdownOpen(false);
+        onOpenEmailVerificationScreen();
+        return;
+      }
+      toast.error(
+        isEs ? "Error de verificación" : isFr ? "Erreur de vérification" : isEn ? "Verification note" : "Nòt verifikasyon",
+        (err == null ? void 0 : err.message) || (isEn ? "Could not send verification email right now." : "Pa ka voye imèl verifikasyon an kounye a.")
+      );
+    } finally {
+      setIsResendingProfileVerif(false);
+    }
+  };
   reactExports.useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
@@ -94,7 +190,7 @@ export const Navbar: React.FC<any> = ({
   const [unreadNotificationsCount, setUnreadNotificationsCount] = reactExports.useState(0);
   reactExports.useEffect(() => {
     const updateCount = () => {
-      if (!currentChurch) {
+      if (!currentChurch || userRole === "admin" || !currentMember) {
         setUnreadNotificationsCount(0);
         return;
       }
@@ -102,6 +198,7 @@ export const Navbar: React.FC<any> = ({
         const notifs = getContextualNotifications({
           church: currentChurch,
           member: currentMember,
+          userRole,
           announcements: announcements || [],
           services: services || [],
           attendanceRecords: attendanceRecords || [],
@@ -114,11 +211,18 @@ export const Navbar: React.FC<any> = ({
     };
     updateCount();
     window.addEventListener("omnichurch_notifications_updated", updateCount);
+    window.addEventListener("storage", updateCount);
     return () => {
       window.removeEventListener("omnichurch_notifications_updated", updateCount);
+      window.removeEventListener("storage", updateCount);
     };
-  }, [currentChurch, currentMember, announcements, services, attendanceRecords, language]);
-  const isCurrentChurchAdmin = !!(googleUser == null ? void 0 : googleUser.email) && !!(currentChurch == null ? void 0 : currentChurch.adminGoogleEmail) && (googleUser.email || "").toLowerCase() === (currentChurch.adminGoogleEmail || "").toLowerCase();
+  }, [currentChurch, currentMember, userRole, announcements, services, attendanceRecords, language]);
+  const isCurrentChurchAdmin = Boolean(
+    googleUser && currentChurch && (
+      (googleUser.uid && currentChurch.adminGoogleUid && googleUser.uid === currentChurch.adminGoogleUid) ||
+      (googleUser.email && currentChurch.adminGoogleEmail && googleUser.email.toLowerCase() === currentChurch.adminGoogleEmail.toLowerCase())
+    )
+  );
   const isAuthorized = isAuthorizedAdmin !== void 0 ? isAuthorizedAdmin : isCurrentChurchAdmin;
   const handleAdminGoogleSignIn = async () => {
     setIsConnectingGoogle(true);
@@ -156,58 +260,83 @@ export const Navbar: React.FC<any> = ({
     en: "English",
     es: "Español"
   };
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("header", { className: "sticky top-0 z-40 bg-[#0F172A] text-white border-b border-slate-800 shadow-md", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "max-w-7xl mx-auto px-3 sm:px-6 lg:px-8", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between h-16 gap-2 sm:gap-3", children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("header", { className: "sticky top-0 z-40 bg-gradient-to-r from-[#07152F] via-[#0F172A] to-[#07152F] text-white border-b border-slate-800/90 shadow-md", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "max-w-7xl mx-auto px-3 sm:px-6 lg:px-8", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between h-16 sm:h-[68px] gap-2 sm:gap-3", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 sm:gap-3 min-w-0", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "div",
         {
           id: "navbar-brand-header-trigger",
           ...developerTriggerProps,
-          className: "flex items-center gap-2 sm:gap-2.5 cursor-pointer select-none group shrink-0",
-          title: "OmniChurch Platform",
+          className: "flex items-center gap-2 sm:gap-3 cursor-pointer select-none group shrink-0",
+          title: "OmniChurch PRO Official Platform",
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "div",
               {
                 id: "navbar-app-logo-trigger",
-                className: "w-9 h-9 sm:w-10 sm:h-10 rounded-xl overflow-hidden bg-slate-950 flex items-center justify-center font-black text-lg shadow-md shadow-blue-500/25 shrink-0 border border-blue-500/40 group-active:scale-95 transition-transform group-hover:border-blue-400",
+                className: "flex items-center justify-center shrink-0 group-active:scale-95 transition-transform",
                 children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                  "img",
+                  OmniChurchLogo,
                   {
-                    src: "/icon.png",
-                    alt: "OmniChurch Pro",
-                    className: "w-full h-full object-cover pointer-events-none rounded-lg",
-                    referrerPolicy: "no-referrer",
-                    onError: (e3) => {
-                      e3.target.style.display = "none";
-                    }
+                    variant: "responsive",
+                    priority: true,
+                    mobileClassName: "h-9 w-9",
+                    desktopClassName: "h-11 md:h-12 w-auto"
                   }
                 )
               }
             ),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex flex-col min-w-0", children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1 sm:gap-1.5", children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { className: "text-xs sm:text-sm font-extrabold tracking-tight text-white leading-tight group-hover:text-amber-300 transition-colors truncate", children: "OMNICHURCH" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-1 sm:px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[8px] sm:text-[9px] font-mono font-bold leading-none shrink-0", children: "PRO" })
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1.5", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { className: "sm:hidden text-xs font-extrabold tracking-tight text-white leading-tight group-hover:text-[#FBBF24] transition-colors truncate", children: "OMNICHURCH" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "px-1.5 py-0.5 rounded bg-[#FBBF24]/15 border border-[#FBBF24]/35 text-[#FBBF24] text-[9px] font-mono font-bold leading-none shrink-0 tracking-wider", children: "PRO" })
               ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] text-slate-400 hidden sm:block -mt-0.5 truncate", children: "Multi-Tenant Church Platform" })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "text-[10px] text-slate-400 hidden md:block mt-0.5 truncate", children: "Multi-Tenant Church Platform" })
             ] })
           ]
         }
       ),
-      userRole === "admin" && currentChurch && allChurches.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
-        ChurchSearchSelector,
-        {
-          id: "navbar-church-switcher",
-          variant: "compact",
-          churches: allChurches,
-          selectedChurchId: currentChurch.id,
-          onSelectChurch: onChurchChange,
-          onOpenCreateChurch
+      userRole === "admin" && currentChurch && (() => {
+        const ownedList = resolveAdminOwnedChurches(
+          allChurches || [],
+          googleUser == null ? void 0 : googleUser.uid,
+          googleUser == null ? void 0 : googleUser.email
+        );
+        const scopedAdminChurches = ownedList.some((c3) => c3.id === currentChurch.id)
+          ? ownedList
+          : isAuthorized
+          ? [currentChurch, ...ownedList]
+          : ownedList;
+        if (scopedAdminChurches.length > 1) {
+          return /* @__PURE__ */ jsxRuntimeExports.jsx(
+            ChurchSearchSelector,
+            {
+              id: "navbar-church-switcher",
+              variant: "compact",
+              churches: scopedAdminChurches,
+              selectedChurchId: currentChurch.id,
+              onSelectChurch: onChurchChange,
+              onOpenCreateChurch
+            }
+          );
         }
-      )
+        return null;
+      })()
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "flex items-center shrink-0", ref: dropdownRef, children: isUserLoggedIn ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 shrink-0", ref: dropdownRef, children: [
+      onOpenDonateScreen && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        DonateButton,
+        {
+          id: "navbar-header-donate-btn",
+          size: "header",
+          language,
+          onClick: () => {
+            setIsMenuDropdownOpen(false);
+            onOpenDonateScreen();
+          }
+        }
+      ),
+      isUserLoggedIn ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs(
         "button",
         {
@@ -219,28 +348,39 @@ export const Navbar: React.FC<any> = ({
           "aria-expanded": isMenuDropdownOpen,
           children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "relative shrink-0 flex items-center justify-center", children: [
-              (googleUser == null ? void 0 : googleUser.photoURL) ? /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "img",
-                {
-                  src: googleUser.photoURL,
-                  alt: "Google avatar",
-                  referrerPolicy: "no-referrer",
-                  className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full object-cover border border-emerald-400/90 shadow-sm"
+              (() => {
+                const resolvedAdminPhoto =
+                  resolveChurchAdminAvatarUrl(currentChurch, googleUser) ||
+                  (currentChurch && currentChurch.adminGooglePhoto === "" ? undefined : currentChurch == null ? void 0 : currentChurch.logoUrl);
+                const memberPhoto =
+                  userRole === "member" && currentMember
+                    ? currentMember.avatarUrl || currentMember.photoUrl || currentMember.googlePhoto || (googleUser == null ? void 0 : googleUser.photoURL)
+                    : resolvedAdminPhoto || (currentMember == null ? void 0 : currentMember.avatarUrl) || (currentMember == null ? void 0 : currentMember.photoUrl);
+                if (memberPhoto) {
+                  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "img",
+                    {
+                      src: memberPhoto,
+                      alt: (currentMember == null ? void 0 : currentMember.fullName) || (currentChurch == null ? void 0 : currentChurch.pastor) || "Profile avatar",
+                      referrerPolicy: "no-referrer",
+                      className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full object-cover border border-emerald-400/90 shadow-sm"
+                    }
+                  );
                 }
-              ) : (googleUser == null ? void 0 : googleUser.displayName) ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-slate-950 flex items-center justify-center font-black text-[10px] sm:text-xs shadow-sm", children: googleUser.displayName[0].toUpperCase() }) : userRole === "member" && currentMember ? currentMember.photoUrl ? /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "img",
-                {
-                  src: currentMember.photoUrl,
-                  alt: currentMember.fullName,
-                  className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full object-cover border border-indigo-400/90 shadow-sm"
+                if (userRole === "member" && currentMember && currentMember.fullName) {
+                  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-gradient-to-br from-indigo-500 to-indigo-700 text-white flex items-center justify-center font-bold text-[10px] sm:text-xs shadow-sm", children: currentMember.fullName[0].toUpperCase() });
                 }
-              ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-gradient-to-br from-indigo-500 to-indigo-700 text-white flex items-center justify-center font-bold text-[10px] sm:text-xs shadow-sm", children: currentMember.fullName ? currentMember.fullName[0].toUpperCase() : "M" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "div",
-                {
-                  className: `w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center shadow-sm transition-colors ${isMenuDropdownOpen ? "bg-slate-950 text-amber-300" : "bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950"}`,
-                  children: /* @__PURE__ */ jsxRuntimeExports.jsx(UserCheck, { className: "w-3.5 h-3.5 sm:w-4 sm:h-4" })
+                if (googleUser == null ? void 0 : googleUser.displayName) {
+                  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-6 h-6 sm:w-7 sm:h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 text-slate-950 flex items-center justify-center font-black text-[10px] sm:text-xs shadow-sm", children: googleUser.displayName[0].toUpperCase() });
                 }
-              ),
+                return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "div",
+                  {
+                    className: `w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center shadow-sm transition-colors ${isMenuDropdownOpen ? "bg-slate-950 text-amber-300" : "bg-gradient-to-br from-amber-400 to-amber-600 text-slate-950"}`,
+                    children: /* @__PURE__ */ jsxRuntimeExports.jsx(UserCheck, { className: "w-3.5 h-3.5 sm:w-4 sm:h-4" })
+                  }
+                );
+              })(),
               !isDeviceOnline() && /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "span",
                 {
@@ -259,8 +399,15 @@ export const Navbar: React.FC<any> = ({
             ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "hidden sm:flex flex-col text-left leading-tight min-w-0 max-w-[110px] md:max-w-[130px]", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-xs font-bold truncate ${isMenuDropdownOpen ? "text-slate-950" : "text-slate-100"}`, children: ((_a3 = googleUser == null ? void 0 : googleUser.displayName) == null ? void 0 : _a3.split(" ")[0]) || (userRole === "admin" ? "Admin" : ((_b3 = currentMember == null ? void 0 : currentMember.fullName) == null ? void 0 : _b3.split(" ")[0]) || "Profil") }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] truncate font-medium ${isMenuDropdownOpen ? "text-slate-800" : "text-slate-400"}`, children: userRole === "admin" ? isEs ? "Administrador" : isFr ? "Administrateur" : isEn ? "Administrator" : "Administratè" : isEs ? "Miembro" : isFr ? "Membre" : isEn ? "Member" : "Manm" })
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] truncate font-medium ${isMenuDropdownOpen ? "text-slate-800" : "text-slate-400"}`, children: userRole === "admin" ? isEs ? "Administrador" : isFr ? "Administrateur" : isEn ? "Administrator" : "Administratè" : (isDeaconRole(currentMember) && isReceptionRole(currentMember)) ? (isEs ? "Diácono & Recepción" : isFr ? "Diacre & Réception" : isEn ? "Deacon & Reception" : "Dyak & Resepsyon") : isDeaconRole(currentMember) ? (isEs ? "Diácono • Cultos y Avisos" : isFr ? "Diacre • Cultes & Annonces" : isEn ? "Deacon • Services & News" : "Dyak • Sèvis & Anons") : isReceptionRole(currentMember) ? (isEs ? "Recepción • Akèy" : isFr ? "Réception • Accueil" : isEn ? "Reception • Usher" : "Resepsyon • Akèy") : isEs ? "Miembro" : isFr ? "Membre" : isEn ? "Member" : "Manm" })
             ] }),
+            showProfileResendVerification && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              Mail,
+              {
+                className: `w-3.5 h-3.5 shrink-0 ${isMenuDropdownOpen ? "text-slate-950" : "text-amber-400"}`,
+                "aria-label": isEs ? "Verificación de correo pendiente" : isFr ? "Vérification e-mail en attente" : isEn ? "Email verification pending" : "Verifikasyon imèl an atant"
+              }
+            ),
             /* @__PURE__ */ jsxRuntimeExports.jsx(
               "span",
               {
@@ -372,29 +519,41 @@ export const Navbar: React.FC<any> = ({
                   userRole === "admin" ? /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-3 h-3 text-amber-400" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(Users, { className: "w-3 h-3 text-indigo-400" }),
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: userRole === "admin" ? isEs ? "Sesión Administrador" : isFr ? "Session Administrateur" : isEn ? "Admin Session" : "Sesyon Administratè" : isEs ? "Sesión de Miembro" : isFr ? "Session Membre" : isEn ? "Member Session" : "Sesyon Manm" })
                 ] }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] font-mono font-bold px-1.5 py-0.2 rounded ${userRole === "admin" ? isAuthorizedAdmin ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400" : currentMember ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700 text-slate-300"}`, children: userRole === "admin" ? isAuthorizedAdmin ? isEs ? "Admin Autorizado" : isFr ? "Admin Autorisé" : isEn ? "Authorized Admin" : "Admin Otorize" : isEs ? "PIN Requerido" : isFr ? "PIN Requis" : isEn ? "PIN Required" : "PIN Mande" : currentMember ? isEs ? "Conectado" : isFr ? "Connecté" : isEn ? "Connected" : "Konekte" : isEs ? "Modo Visor" : isFr ? "Mode Visiteur" : isEn ? "Guest" : "Vizitè" })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `text-[10px] font-mono font-bold px-1.5 py-0.2 rounded ${userRole === "admin" ? isAuthorizedAdmin ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400" : currentMember ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700 text-slate-300"}`, children: userRole === "admin" ? isAuthorizedAdmin ? isEs ? "Admin Autorizado" : isFr ? "Admin Autorisé" : isEn ? "Authorized Admin" : "Admin Otorize" : isEs ? "Acceso Requerido" : isFr ? "Connexion Requise" : isEn ? "Sign-In Required" : "Koneksyon Admin Mande" : currentMember ? isEs ? "Conectado" : isFr ? "Connecté" : isEn ? "Connected" : "Konekte" : isEs ? "Modo Visor" : isFr ? "Mode Visiteur" : isEn ? "Guest" : "Vizitè" })
               ] }),
-              userRole === "admin" ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-2.5 bg-slate-900/90 rounded-xl border border-slate-700/80 space-y-2", children: [
+              userRole === "admin" ? (() => {
+                const adminSessionPhoto =
+                  resolveChurchAdminAvatarUrl(currentChurch, googleUser) ||
+                  (currentChurch && currentChurch.adminGooglePhoto === "" ? undefined : currentChurch == null ? void 0 : currentChurch.logoUrl);
+                return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-2.5 bg-slate-900/90 rounded-xl border border-slate-700/80 space-y-2", children: [
                 googleUser ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2.5", children: [
-                  googleUser.photoURL ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  adminSessionPhoto ? /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "img",
                     {
-                      src: googleUser.photoURL,
-                      alt: "Google Profile",
+                      src: adminSessionPhoto,
+                      alt: (currentChurch == null ? void 0 : currentChurch.pastor) || googleUser.displayName || "Admin Profile",
                       referrerPolicy: "no-referrer",
                       className: "w-8 h-8 rounded-full border border-emerald-400 object-cover shrink-0"
                     }
-                  ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-full bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-xs shrink-0", children: googleUser.displayName ? googleUser.displayName[0] : "A" }),
+                  ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-full bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-xs shrink-0", children: googleUser.displayName ? googleUser.displayName[0].toUpperCase() : "A" }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 flex-1", children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "font-bold text-xs text-white truncate flex items-center gap-1.5", children: [
-                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: googleUser.displayName || "Admin" }),
-                      /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-3 h-3 text-emerald-400 shrink-0" })
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: googleUser.displayName || (currentChurch == null ? void 0 : currentChurch.pastor) || "Admin" }),
+                      showProfileResendVerification ? /* @__PURE__ */ jsxRuntimeExports.jsx(AlertCircle, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }) : /* @__PURE__ */ jsxRuntimeExports.jsx(CircleCheck, { className: "w-3 h-3 text-emerald-400 shrink-0" })
                     ] }),
                     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-[11px] text-slate-400 truncate", children: googleUser.email })
                   ] })
                 ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between gap-2", children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2 min-w-0", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Shield, { className: "w-4 h-4" }) }),
+                    adminSessionPhoto ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "img",
+                      {
+                        src: adminSessionPhoto,
+                        alt: (currentChurch == null ? void 0 : currentChurch.pastor) || "Admin Profile",
+                        referrerPolicy: "no-referrer",
+                        className: "w-8 h-8 rounded-full border border-amber-400/70 object-cover shrink-0"
+                      }
+                    ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0", children: /* @__PURE__ */ jsxRuntimeExports.jsx(Shield, { className: "w-4 h-4" }) }),
                     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0", children: [
                       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "font-bold text-xs text-white", children: isEs ? "Consola de Administración" : isFr ? "Console d'Administration" : isEn ? "Admin Console" : "Espas Administratè" }),
                       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-[10px] text-slate-400 truncate", children: (currentChurch == null ? void 0 : currentChurch.name) || (isEs ? "Iglesia Activa" : "Legliz") })
@@ -444,6 +603,42 @@ export const Navbar: React.FC<any> = ({
                   /* @__PURE__ */ jsxRuntimeExports.jsx(Users, { className: "w-3.5 h-3.5 shrink-0 text-indigo-400" }),
                   /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Cuenta Google Conectada" : isFr ? "Compte Google Connecté" : isEn ? "Connected Google Account" : "Kont Google Konekte" })
                 ] }) }),
+                showProfileResendVerification && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "navbar-profile-email-verification-box", className: "pt-2 border-t border-slate-800 space-y-2", children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center justify-between gap-2 text-[11px]", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-amber-300 font-semibold flex items-center gap-1.5 min-w-0", children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(AlertCircle, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "truncate", children: isEs ? "Correo aún sin confirmar" : isFr ? "E-mail non confirmé" : isEn ? "Email not confirmed yet" : "Imèl ou poko konfime" })
+                    ] }),
+                    onOpenEmailVerificationScreen && /* @__PURE__ */ jsxRuntimeExports.jsx("button", {
+                      type: "button",
+                      id: "navbar-profile-open-verify-screen-btn",
+                      onClick: () => {
+                        setIsMenuDropdownOpen(false);
+                        onOpenEmailVerificationScreen();
+                      },
+                      className: "text-[11px] text-amber-300 hover:text-amber-200 underline font-semibold shrink-0 cursor-pointer",
+                      children: isEs ? "Verificar" : isFr ? "Vérifier" : isEn ? "Verify" : "Verifye"
+                    })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("button", {
+                    type: "button",
+                    id: "navbar-profile-resend-verification-btn",
+                    disabled: isResendingProfileVerif || profileVerifCooldown > 0,
+                    onClick: handleProfileResendVerification,
+                    className: "w-full min-h-[36px] py-1.5 px-2.5 rounded-lg bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-200 text-[11px] font-bold transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed whitespace-nowrap",
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(Mail, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", {
+                        className: "truncate tabular-nums",
+                        children: isResendingProfileVerif
+                          ? (isEs ? "Enviando..." : isFr ? "Envoi..." : isEn ? "Sending..." : "Ap voye...")
+                          : profileVerifCooldown > 0
+                          ? `${isEs ? "Reenviar correo de verificación" : isFr ? "Renvoyer l’e-mail de vérification" : isEn ? "Resend verification email" : "Resend imel verifikasyon"} (${profileVerifCooldown}s)`
+                          : (isEs ? "Reenviar correo de verificación" : isFr ? "Renvoyer l’e-mail de vérification" : isEn ? "Resend verification email" : "Resend imel verifikasyon")
+                      })
+                    ]
+                  })
+                ] }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-1.5 border-t border-slate-800/80 space-y-1.5", children: [
                   onLockAdmin && /* @__PURE__ */ jsxRuntimeExports.jsxs(
                     "button",
@@ -497,15 +692,29 @@ export const Navbar: React.FC<any> = ({
                     )
                   ] }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-0.5 text-[10px] text-slate-400 flex items-center justify-center gap-1.5", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: "w-3 h-3 text-emerald-400 shrink-0" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Auto-bloqueo activo (5 min sin uso)" : isFr ? "Auto-verrouillage actif (5 min)" : isEn ? "Auto-lock active (5 min inactivity)" : "Oto-blokaj sekirite aktif (5 min)" })
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(ShieldCheck, { className: `w-3 h-3 shrink-0 ${((currentChurch == null ? void 0 : currentChurch.autoLockMinutes) ?? 5) > 0 ? "text-emerald-400" : "text-slate-500"}` }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: (() => {
+                      const lockMins = typeof (currentChurch == null ? void 0 : currentChurch.autoLockMinutes) === "number" ? currentChurch.autoLockMinutes : 5;
+                      if (lockMins <= 0) {
+                        return isEs ? "Auto-bloqueo desactivado" : isFr ? "Auto-verrouillage désactivé" : isEn ? "Auto-lock disabled" : "Oto-blokaj dezaktive";
+                      }
+                      return isEs ? `Auto-bloqueo activo (${lockMins} min sin uso)` : isFr ? `Auto-verrouillage actif (${lockMins} min)` : isEn ? `Auto-lock active (${lockMins} min inactivity)` : `Oto-blokaj sekirite aktif (${lockMins} min)`;
+                    })() })
                   ] })
                 ] })
-              ] }) : (
+              ] }) })() : (
                 /* MEMBER MODE ACTIVE CARD */
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "p-2.5 bg-slate-900/90 rounded-xl border border-slate-700/80 space-y-2", children: [
                   currentMember ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-2.5", children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-full bg-indigo-500 text-white flex items-center justify-center font-bold text-xs shrink-0", children: currentMember.fullName ? currentMember.fullName[0] : "M" }),
+                    (currentMember.avatarUrl || currentMember.photoUrl || currentMember.googlePhoto || (googleUser == null ? void 0 : googleUser.photoURL)) ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "img",
+                      {
+                        src: currentMember.avatarUrl || currentMember.photoUrl || currentMember.googlePhoto || (googleUser == null ? void 0 : googleUser.photoURL),
+                        alt: currentMember.fullName,
+                        referrerPolicy: "no-referrer",
+                        className: "w-8 h-8 rounded-full border border-indigo-400 object-cover shrink-0"
+                      }
+                    ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "w-8 h-8 rounded-full bg-indigo-500 text-white flex items-center justify-center font-bold text-xs shrink-0", children: currentMember.fullName ? currentMember.fullName[0] : "M" }),
                     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "min-w-0 flex-1", children: [
                       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "font-bold text-xs text-white truncate", children: currentMember.fullName }),
                       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-[10px] text-amber-400 font-mono flex items-center gap-1 truncate", children: [
@@ -581,6 +790,24 @@ export const Navbar: React.FC<any> = ({
                 ] })
               )
             ] }),
+            onOpenCreateChurch && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "pt-1 border-t border-slate-700/80", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  type: "button",
+                  id: "navbar-dropdown-create-church-btn",
+                  onClick: () => {
+                    setIsMenuDropdownOpen(false);
+                    onOpenCreateChurch();
+                  },
+                  className: "w-full py-2 px-3 rounded-xl bg-amber-400/15 hover:bg-amber-400/25 border border-amber-400/40 text-amber-300 text-xs font-extrabold transition-all flex items-center justify-center gap-1.5 cursor-pointer",
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "w-3.5 h-3.5 text-amber-400 shrink-0" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Registrar Nueva Iglesia" : isFr ? "Créer une Nouvelle Église" : isEn ? "Register New Church" : "Kreye yon Nouvo Legliz" })
+                  ]
+                }
+              )
+            ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "space-y-2 pt-1 border-t border-slate-700/80", children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "text-[10px] uppercase font-bold text-slate-400 tracking-wider px-1 flex items-center justify-between", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "flex items-center gap-1.5", children: [
@@ -628,23 +855,39 @@ export const Navbar: React.FC<any> = ({
           ]
         }
       )
-    ] }) : onOpenLanguageModal ? (
-      /* Compact language trigger for unauthenticated users */
-      /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "button",
-        {
-          type: "button",
-          id: "navbar-guest-language-btn",
-          onClick: onOpenLanguageModal,
-          className: "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#1E293B] hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-bold transition-all cursor-pointer shadow-sm",
-          title: isEs ? "Cambiar Idioma" : isFr ? "Changer de Langue" : isEn ? "Change Language" : "Chanje Lang",
-          children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx(Globe, { className: "w-3.5 h-3.5 text-amber-400" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "uppercase text-[11px] font-mono tracking-wider font-extrabold text-amber-400", children: language })
-          ]
-        }
+    ] }) : (
+      /* Compact actions for unauthenticated / auth-screen users: always show Create Church + Language */
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex items-center gap-1.5 sm:gap-2", children: [
+        onOpenCreateChurch && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "navbar-guest-create-church-btn",
+            onClick: onOpenCreateChurch,
+            className: "flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold text-[11px] sm:text-xs transition-all cursor-pointer shadow-sm whitespace-nowrap",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Plus, { className: "w-3.5 h-3.5 shrink-0" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isEs ? "Nueva Iglesia" : isFr ? "Créer Église" : isEn ? "New Church" : "Kreye Legliz" })
+            ]
+          }
+        ),
+        onOpenLanguageModal && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "navbar-guest-language-btn",
+            onClick: onOpenLanguageModal,
+            className: "flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-[#1E293B] hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/80 text-xs font-bold transition-all cursor-pointer shadow-sm",
+            title: isEs ? "Cambiar Idioma" : isFr ? "Changer de Langue" : isEn ? "Change Language" : "Chanje Lang",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(Globe, { className: "w-3.5 h-3.5 text-amber-400" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "uppercase text-[11px] font-mono tracking-wider font-extrabold text-amber-400", children: language })
+            ]
+          }
+        )
+      ] })
       )
-    ) : null })
+    ] })
   ] }) }) });
 };
 export default Navbar;

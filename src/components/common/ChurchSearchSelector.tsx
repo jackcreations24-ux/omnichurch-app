@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Church } from '../../types';
 import { hasActiveChurchLicense } from '../../utils/developerStorage';
+import { cacheChurchLocally } from '../../utils/storage';
+import { searchChurchesInFirestore } from '../../services/firestoreService';
 import {
   Search,
   Building2,
@@ -40,12 +42,20 @@ export const ChurchSearchSelector: React.FC<ChurchSearchSelectorProps> = ({
 }) => {
   const [isOpen, setIsOpen] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [cloudMatches, setCloudMatches] = useState<Church[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  const mergedChurches = useMemo(() => {
+    if (cloudMatches.length === 0) return churches;
+    const map = new Map<string, Church>(churches.map((c) => [c.id, c]));
+    cloudMatches.forEach((c) => map.set(c.id, c));
+    return Array.from(map.values());
+  }, [churches, cloudMatches]);
+
   const selectedChurch = useMemo(
-    () => churches.find((c) => c.id === selectedChurchId) || churches[0],
-    [churches, selectedChurchId]
+    () => mergedChurches.find((c) => c.id === selectedChurchId) || mergedChurches[0],
+    [mergedChurches, selectedChurchId]
   );
 
   // Close dropdown when clicking outside
@@ -74,12 +84,12 @@ export const ChurchSearchSelector: React.FC<ChurchSearchSelectorProps> = ({
     }
   }, [isOpen]);
 
-  // Scalable search filtering for thousands of churches
+  // Scalable search filtering for churches + on-demand Firestore fallback beyond initial 25
   const filteredChurches = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return churches;
+    if (!query) return mergedChurches;
 
-    return churches.filter((church) => {
+    return mergedChurches.filter((church) => {
       const matchId = (church.id || '').toLowerCase().includes(query);
       const matchCode = (church.code || '').toLowerCase().includes(query);
       const matchName = (church.name || '').toLowerCase().includes(query);
@@ -96,7 +106,31 @@ export const ChurchSearchSelector: React.FC<ChurchSearchSelectorProps> = ({
         matchAddress
       );
     });
-  }, [churches, searchQuery]);
+  }, [mergedChurches, searchQuery]);
+
+  useEffect(() => {
+    const term = searchQuery.trim();
+    if (!isOpen || term.length < 3) return;
+    if (filteredChurches.length > 0) return;
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      searchChurchesInFirestore(term, 15).then((found) => {
+        if (cancelled || !found || found.length === 0) return;
+        found.forEach((c) => cacheChurchLocally(c));
+        setCloudMatches((prev) => {
+          const map = new Map<string, Church>(prev.map((c) => [c.id, c]));
+          found.forEach((c) => map.set(c.id, c));
+          return Array.from(map.values());
+        });
+      }).catch(() => {});
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [isOpen, searchQuery, filteredChurches.length]);
 
   const handleSelect = (churchId: string) => {
     onSelectChurch(churchId);

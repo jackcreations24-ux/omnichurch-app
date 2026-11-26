@@ -521,11 +521,11 @@ export const UserTutorialModal: React.FC<UserTutorialModalProps> = ({
             },
             {
               title: 'Respaldo y Exportación de Datos',
-              description: 'Exporte registros en formato JSON o sincronice de forma segura con Cloud Firestore.',
+              description: 'Exporte registros en formato JSON o sincronice de forma segura en la nube.',
               icon: Layers,
             },
           ],
-          tip: 'Todos los datos se almacenan con doble redundancia: localmente en el dispositivo y en Cloud Firestore.',
+          tip: 'Todos los datos se almacenan con doble redundancia: localmente en el dispositivo y en la nube.',
         },
       ];
     }
@@ -694,11 +694,11 @@ export const UserTutorialModal: React.FC<UserTutorialModalProps> = ({
           },
           {
             title: 'Sovgad & Enpòtasyon Done',
-            description: 'Eksporté tout done legliz ou yo an fòma JSON oswa fè sovgad sekirize nan Cloud Firestore.',
+            description: 'Eksporté tout done legliz ou yo an fòma JSON oswa fè sovgad sekirize nan nwaj la.',
             icon: Layers,
           },
         ],
-        tip: 'Tout enfòmasyon yo anrejistre an doub: sou aparèy la lokalman ak nan Cloud Firestore an sekirite.',
+        tip: 'Tout enfòmasyon yo anrejistre an doub: sou aparèy la lokalman ak nan nwaj la an sekirite.',
       },
     ];
   };

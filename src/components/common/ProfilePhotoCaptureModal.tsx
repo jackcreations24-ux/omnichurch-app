@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Member, Church, Language } from '../../types';
-import { updateMember } from '../../utils/storage';
+import { updateMemberProfilePhoto } from '../../utils/storage';
 import { optimizeImageFile } from '../../utils/imageOptimizer';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import { requestCameraPermission, triggerHapticFeedback } from '../../utils/devicePermissions';
 import {
   Camera,
@@ -37,6 +38,7 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
   onPhotoSaved,
 }) => {
   const toast = useToast();
+  const { googleUser } = useAuth();
   const isEs = language === 'es';
   const isEn = language === 'en';
   const isFr = language === 'fr';
@@ -128,6 +130,30 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
     };
   }, [isOpen, activeTab, facingMode, capturedDataUrl]);
 
+  const clampPhotoDataUrl = async (rawDataUrl: string): Promise<string> => {
+    if (!rawDataUrl || rawDataUrl.length <= 450000) return rawDataUrl;
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 360;
+        canvas.height = 360;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(rawDataUrl);
+          return;
+        }
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, 360, 360);
+        const compressed = canvas.toDataURL('image/jpeg', 0.78);
+        resolve(compressed.length <= 450000 ? compressed : canvas.toDataURL('image/jpeg', 0.65));
+      };
+      img.onerror = () => resolve(rawDataUrl);
+      img.src = rawDataUrl;
+    });
+  };
+
   // Handle Capture Snap
   const executeSnap = () => {
     if (!videoRef.current) return;
@@ -145,22 +171,28 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
     const startX = (width - size) / 2;
     const startY = (height - size) / 2;
 
-    canvas.width = 480;
-    canvas.height = 480;
+    canvas.width = 400;
+    canvas.height = 400;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     // Flip horizontally if front selfie camera for natural mirror reflection
     if (facingMode === 'user') {
-      ctx.translate(480, 0);
+      ctx.translate(400, 0);
       ctx.scale(-1, 1);
     }
 
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, startX, startY, size, size, 0, 0, 480, 480);
+    ctx.drawImage(video, startX, startY, size, size, 0, 0, 400, 400);
 
-    const dataUrl = canvas.toDataURL('image/webp', 0.88);
+    let dataUrl = canvas.toDataURL('image/webp', 0.84);
+    if (!dataUrl.startsWith('data:image/webp') || dataUrl.length > 450000) {
+      dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    }
+    if (dataUrl.length > 450000) {
+      dataUrl = canvas.toDataURL('image/jpeg', 0.68);
+    }
     setCapturedDataUrl(dataUrl);
     stopCamera();
   };
@@ -189,6 +221,7 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
     if (!file) return;
 
     if (file.size > 12 * 1024 * 1024) {
+      e.target.value = '';
       toast.error(
         isEs ? 'Archivo muy pesado' : isFr ? 'Fichier trop lourd' : isEn ? 'File too large' : 'Fichye a twò lou',
         isEs ? 'El tamaño máximo es de 12 MB.' : isFr ? 'La taille maximale est de 12 Mo.' : isEn ? 'Max size is 12 MB.' : 'Gwosè maksimòm se 12 MB.'
@@ -199,17 +232,82 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
     try {
       setIsProcessing(true);
       const optimized = await optimizeImageFile(file, {
-        maxWidth: 600,
-        maxHeight: 600,
-        quality: 0.88,
+        maxWidth: 400,
+        maxHeight: 400,
+        quality: 0.84,
         format: 'image/webp',
       });
-      setCapturedDataUrl(optimized);
+      const safeDataUrl = await clampPhotoDataUrl(optimized);
+      setCapturedDataUrl(safeDataUrl);
     } catch (err) {
       console.error('File optimization error:', err);
       toast.error(
         isEs ? 'Error al procesar foto' : isFr ? 'Erreur de traitement' : isEn ? 'Error processing photo' : 'Erè nan trete foto a',
         isEs ? 'No se pudo optimizar la imagen.' : 'Pa ka prepare foto sa a.'
+      );
+    } finally {
+      e.target.value = '';
+      setIsProcessing(false);
+    }
+  };
+
+  const applySavedPhotoUpdate = async (nextPhoto: string | null, mode: 'save' | 'remove' | 'google') => {
+    setIsProcessing(true);
+    try {
+      const res = await updateMemberProfilePhoto(church.id, member, nextPhoto);
+      const savedMember = res.member;
+
+      if (onPhotoSaved) {
+        onPhotoSaved(savedMember);
+      }
+
+      if (mode === 'remove') {
+        setCapturedDataUrl(null);
+        toast.info(
+          isEs ? 'Foto Removida' : isFr ? 'Photo Retirée' : isEn ? 'Photo Removed' : 'Foto Retire',
+          isEs
+            ? 'Se ha restablecido el avatar por defecto.'
+            : isFr
+            ? 'L’avatar par défaut a été réinitialisé.'
+            : isEn
+            ? 'Default avatar has been restored.'
+            : 'Avatar pa defo a retabli.'
+        );
+      } else {
+        try {
+          confetti({
+            particleCount: 50,
+            spread: 60,
+            origin: { y: 0.6 },
+          });
+        } catch {
+          // ignore
+        }
+        toast.success(
+          isEs
+            ? '¡Foto Oficial Actualizada!'
+            : isFr
+            ? 'Photo Officielle Mise à Jour !'
+            : isEn
+            ? 'Official Photo Updated!'
+            : 'Foto Ofisyèl Mete Ajou!',
+          isEs
+            ? `La fotografía de ${member.fullName} ya está lista en el carnet oficial de identidad.`
+            : isFr
+            ? `La photo de ${member.fullName} est prête sur sa carte d’identité officielle.`
+            : isEn
+            ? `The photo for ${member.fullName} is now live on your official member ID card.`
+            : `Foto ${member.fullName} an parèt kounye a sou kat idantite ofisyèl la.`
+        );
+      }
+
+      onClose();
+    } catch (err: any) {
+      toast.error(
+        mode === 'remove'
+          ? (isEs ? 'Error' : isEn ? 'Error' : isFr ? 'Erreur' : 'Erè')
+          : (isEs ? 'Error al guardar foto' : isFr ? 'Erreur d’enregistrement' : isEn ? 'Error saving photo' : 'Erè nan anrejistre foto a'),
+        err?.message || (isEs ? 'Ocurrió un error.' : 'Yon erè rive.')
       );
     } finally {
       setIsProcessing(false);
@@ -219,102 +317,19 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
   // Save Photo to Member Record
   const handleSavePhoto = () => {
     if (!capturedDataUrl) return;
+    void applySavedPhotoUpdate(capturedDataUrl, 'save');
+  };
 
-    setIsProcessing(true);
-    try {
-      const updatedMember: Member = {
-        ...member,
-        avatarUrl: capturedDataUrl,
-        googlePhoto: capturedDataUrl, // Ensure both sources point to updated photo
-      };
-
-      updateMember(church.id, updatedMember);
-
-      // Notify parent & dispatch real-time custom event
-      if (onPhotoSaved) {
-        onPhotoSaved(updatedMember);
-      }
-      window.dispatchEvent(
-        new CustomEvent('omnichurch_member_updated', { detail: updatedMember })
-      );
-
-      try {
-        confetti({
-          particleCount: 50,
-          spread: 60,
-          origin: { y: 0.6 },
-        });
-      } catch {
-        // ignore
-      }
-
-      toast.success(
-        isEs
-          ? '¡Foto Oficial Actualizada!'
-          : isFr
-          ? 'Photo Officielle Mise à Jour !'
-          : isEn
-          ? 'Official Photo Updated!'
-          : 'Foto Ofisyèl Mete Ajou!',
-        isEs
-          ? `La fotografía de ${member.fullName} ya está lista en el carnet oficial de identidad.`
-          : isFr
-          ? `La photo de ${member.fullName} est prête sur sa carte d’identité officielle.`
-          : isEn
-          ? `The photo for ${member.fullName} is now live on your official member ID card.`
-          : `Foto ${member.fullName} an parèt kounye a sou kat idantite ofisyèl la.`
-      );
-
-      onClose();
-    } catch (err: any) {
-      toast.error(
-        isEs ? 'Error al guardar foto' : isFr ? 'Erreur d’enregistrement' : isEn ? 'Error saving photo' : 'Erè nan anrejistre foto a',
-        err?.message || (isEs ? 'Ocurrió un error.' : 'Yon erè rive.')
-      );
-    } finally {
-      setIsProcessing(false);
-    }
+  // Use linked Google profile photo
+  const handleUseGooglePhoto = () => {
+    const gPhoto = googleUser?.photoURL?.trim();
+    if (!gPhoto) return;
+    void applySavedPhotoUpdate(gPhoto, 'google');
   };
 
   // Remove current photo
   const handleRemovePhoto = () => {
-    setIsProcessing(true);
-    try {
-      const updatedMember: Member = {
-        ...member,
-        avatarUrl: undefined,
-        googlePhoto: undefined,
-      };
-
-      updateMember(church.id, updatedMember);
-
-      if (onPhotoSaved) {
-        onPhotoSaved(updatedMember);
-      }
-      window.dispatchEvent(
-        new CustomEvent('omnichurch_member_updated', { detail: updatedMember })
-      );
-
-      setCapturedDataUrl(null);
-      toast.info(
-        isEs ? 'Foto Removida' : isFr ? 'Photo Retirée' : isEn ? 'Photo Removed' : 'Foto Retire',
-        isEs
-          ? 'Se ha restablecido el avatar por defecto.'
-          : isFr
-          ? 'L’avatar par défaut a été réinitialisé.'
-          : isEn
-          ? 'Default avatar has been restored.'
-          : 'Avatar pa defo a retabli.'
-      );
-      onClose();
-    } catch (err: any) {
-      toast.error(
-        isEs ? 'Error' : isEn ? 'Error' : isFr ? 'Erreur' : 'Erè',
-        err?.message || (isEs ? 'No se pudo remover la foto.' : 'Pa ka retire foto a.')
-      );
-    } finally {
-      setIsProcessing(false);
-    }
+    void applySavedPhotoUpdate(null, 'remove');
   };
 
   const handleRetake = () => {
@@ -326,7 +341,9 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
 
   if (!isOpen) return null;
 
-  const currentPhoto = member.googlePhoto || member.avatarUrl;
+  const currentPhoto = member.avatarUrl || member.photoUrl || member.googlePhoto;
+  const googleFallbackPhoto = googleUser?.photoURL?.trim();
+  const canUseGooglePhoto = Boolean(googleFallbackPhoto && googleFallbackPhoto !== currentPhoto);
 
   return (
     <div
@@ -635,37 +652,63 @@ export const ProfilePhotoCaptureModal: React.FC<ProfilePhotoCaptureModalProps> =
             </div>
           )}
 
-          {/* CURRENT PHOTO & REMOVE OPTION */}
-          {currentPhoto && !capturedDataUrl && (
-            <div className="pt-3 border-t border-slate-800/80 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <img
-                  src={currentPhoto}
-                  alt={member.fullName}
-                  className="w-10 h-10 rounded-xl object-cover border border-amber-400/40"
-                />
-                <div>
-                  <span className="text-[11px] font-bold text-slate-200 block">
-                    {isEs ? 'Foto Actual Activa' : isFr ? 'Photo Actuelle' : isEn ? 'Current Photo' : 'Foto Ou Genyen Kounye a'}
-                  </span>
-                  <span className="text-[10px] text-emerald-400 flex items-center gap-1">
-                    <Check className="w-3 h-3" />
-                    {isEs ? 'Mostrándose en el carnet' : isFr ? 'Visible sur la carte' : isEn ? 'Active on ID card' : 'Ap parèt sou kat la'}
-                  </span>
+          {/* CURRENT PHOTO, GOOGLE PHOTO OPTION & REMOVE OPTION */}
+          {(currentPhoto || canUseGooglePhoto) && !capturedDataUrl && (
+            <div className="pt-3 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2.5">
+              {currentPhoto ? (
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <img
+                    src={currentPhoto}
+                    alt={member.fullName}
+                    referrerPolicy="no-referrer"
+                    className="w-10 h-10 rounded-xl object-cover border border-amber-400/40 shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <span className="text-[11px] font-bold text-slate-200 block truncate">
+                      {isEs ? 'Foto Actual Activa' : isFr ? 'Photo Actuelle' : isEn ? 'Current Photo' : 'Foto Ou Genyen Kounye a'}
+                    </span>
+                    <span className="text-[10px] text-emerald-400 flex items-center gap-1">
+                      <Check className="w-3 h-3 shrink-0" />
+                      {isEs ? 'Mostrándose en el carnet' : isFr ? 'Visible sur la carte' : isEn ? 'Active on ID card' : 'Ap parèt sou kat la'}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="text-[11px] text-slate-400">
+                  {isEs ? 'Opción rápida Google' : isFr ? 'Option Google rapide' : isEn ? 'Quick Google option' : 'Opsyon rapid Google'}
+                </div>
+              )}
 
-              <button
-                type="button"
-                onClick={handleRemovePhoto}
-                disabled={isProcessing}
-                className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>
-                  {isEs ? 'Eliminar Foto' : isFr ? 'Supprimer' : isEn ? 'Remove' : 'Retire Foto'}
-                </span>
-              </button>
+              <div className="flex items-center gap-2 ml-auto">
+                {canUseGooglePhoto && (
+                  <button
+                    type="button"
+                    id="btn-use-google-member-photo"
+                    onClick={handleUseGooglePhoto}
+                    disabled={isProcessing}
+                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-900 border border-slate-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <span>
+                      {isEs ? 'Usar Foto Google' : isFr ? 'Photo Google' : isEn ? 'Use Google Photo' : 'Itilize Foto Google'}
+                    </span>
+                  </button>
+                )}
+
+                {currentPhoto && (
+                  <button
+                    type="button"
+                    id="btn-remove-member-photo"
+                    onClick={handleRemovePhoto}
+                    disabled={isProcessing}
+                    className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>
+                      {isEs ? 'Eliminar Foto' : isFr ? 'Supprimer' : isEn ? 'Remove' : 'Retire Foto'}
+                    </span>
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>

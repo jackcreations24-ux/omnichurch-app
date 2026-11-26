@@ -24,6 +24,7 @@ import {
   deleteDeveloperBroadcast,
 } from '../../utils/developerStorage';
 import { useToast } from '../../context/ToastContext';
+import { ConfirmDeleteModal } from '../common/ConfirmDeleteModal';
 
 interface DevBroadcastsTabProps {
   allChurches: Church[];
@@ -48,6 +49,7 @@ export const DevBroadcastsTab: React.FC<DevBroadcastsTabProps> = ({
   const [type, setType] = useState<DeveloperBroadcast['type']>('info');
   const [priority, setPriority] = useState<DeveloperBroadcast['priority']>('normal');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [broadcastToDelete, setBroadcastToDelete] = useState<{ id: string; title: string } | null>(null);
 
   // Add Broadcast
   const handleAddBroadcast = async (e: React.FormEvent) => {
@@ -98,12 +100,17 @@ export const DevBroadcastsTab: React.FC<DevBroadcastsTabProps> = ({
   };
 
   // Delete Broadcast
-  const handleDelete = async (id: string, broadcastTitle: string) => {
-    if (!confirm(`Èske w vle efase kominike "${broadcastTitle}" nèt?`)) return;
-    await deleteDeveloperBroadcast(id);
-    const nextBroadcasts = broadcasts.filter((item) => item.id !== id);
+  const handleDelete = (id: string, broadcastTitle: string) => {
+    setBroadcastToDelete({ id, title: broadcastTitle });
+  };
+
+  const confirmDeleteBroadcast = async () => {
+    if (!broadcastToDelete) return;
+    await deleteDeveloperBroadcast(broadcastToDelete.id);
+    const nextBroadcasts = broadcasts.filter((item) => item.id !== broadcastToDelete.id);
     await onUpdateSettings({ broadcasts: nextBroadcasts });
-    toast.success('Kominike Efase', `Alèt "${broadcastTitle}" efase.`);
+    toast.success('Kominike Efase', `Alèt "${broadcastToDelete.title}" efase.`);
+    setBroadcastToDelete(null);
   };
 
   return (
@@ -348,6 +355,16 @@ export const DevBroadcastsTab: React.FC<DevBroadcastsTabProps> = ({
           </div>
         )}
       </div>
+
+      <ConfirmDeleteModal
+        isOpen={Boolean(broadcastToDelete)}
+        title="Efase Kominike Sistèm"
+        message={`Èske w vle efase kominike "${broadcastToDelete?.title || ''}" nèt?`}
+        itemName={broadcastToDelete?.title}
+        confirmButtonText="Wi, Efase Kominike"
+        onConfirm={confirmDeleteBroadcast}
+        onClose={() => setBroadcastToDelete(null)}
+      />
     </div>
   );
 };

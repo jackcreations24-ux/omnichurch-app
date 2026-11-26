@@ -59,16 +59,39 @@ try {
 
 export const db: Firestore = firestoreInstance;
 
-async function testConnection() {
+export async function measureFirestoreLatency(): Promise<{
+  ok: boolean;
+  latencyMs: number;
+  online: boolean;
+  error?: string;
+}> {
+  const online = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
+    const end = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    return {
+      ok: true,
+      latencyMs: Math.max(1, Math.round(end - start)),
+      online: true,
+    };
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+    const end = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const message = error instanceof Error ? error.message : String(error);
+    const isOffline = message.toLowerCase().includes('the client is offline') || !online;
+    if (isOffline) {
+      console.warn('Firestore server reachability check: client is offline.');
     }
+    return {
+      ok: false,
+      latencyMs: Math.max(1, Math.round(end - start)),
+      online: !isOffline,
+      error: message,
+    };
   }
 }
-testConnection();
+
+measureFirestoreLatency().catch(() => {});
 
 export const auth: Auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();

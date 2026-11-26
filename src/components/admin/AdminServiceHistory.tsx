@@ -140,7 +140,7 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
   }, [church.id, activeService, syncKey]);
 
   // Member roll filters
-  const [statusFilter, setStatusFilter] = useState<'all' | 'present' | 'on_time' | 'late' | 'absent' | 'excused'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'present' | 'on_time' | 'late' | 'absent' | 'excused' | 'visitor'>('all');
   const [departmentFilter, setDepartmentFilter] = useState<string>('all');
   const [searchMemberQuery, setSearchMemberQuery] = useState<string>('');
   const [sortOrder, setSortOrder] = useState<'name_asc' | 'status' | 'time'>('name_asc');
@@ -166,11 +166,12 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
     if (!stats) return [];
     return stats.membersList.filter((m) => {
       // Status filter
+      if (statusFilter === 'visitor' && !m.isVisitor) return false;
       if (statusFilter === 'present' && m.status !== 'on_time' && m.status !== 'late') return false;
       if (statusFilter === 'on_time' && m.status !== 'on_time') return false;
       if (statusFilter === 'late' && m.status !== 'late') return false;
-      if (statusFilter === 'absent' && m.status !== 'absent') return false;
-      if (statusFilter === 'excused' && m.status !== 'excused') return false;
+      if (statusFilter === 'absent' && (m.status !== 'absent' || m.isVisitor)) return false;
+      if (statusFilter === 'excused' && (m.status !== 'excused' || m.isVisitor)) return false;
 
       // Department filter
       if (departmentFilter !== 'all' && m.department !== departmentFilter) return false;
@@ -181,7 +182,8 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
         const matchName = (m.fullName || '').toLowerCase().includes(q);
         const matchId = (m.memberId || '').toLowerCase().includes(q);
         const matchPhone = (m.phone || '').includes(q);
-        return matchName || matchId || matchPhone;
+        const matchOrigin = (m.homeChurchName || '').toLowerCase().includes(q);
+        return matchName || matchId || matchPhone || matchOrigin;
       }
       return true;
     }).sort((a, b) => {
@@ -516,6 +518,11 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
                       </div>
                       <div className="text-[11px] text-emerald-400/90 font-medium">
                         {stats.attendanceRate}% {isEs ? 'asistencia' : isEn ? 'rate' : isFr ? 'taux' : 'to prezans'}
+                        {(stats.totalVisitors || 0) > 0 ? (
+                          <span className="text-sky-300 font-bold ml-1.5">
+                            +{stats.totalVisitors} {isEs ? 'Visit.' : isEn ? 'Visit.' : isFr ? 'Visit.' : 'Vizitè'}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
 
@@ -670,7 +677,7 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
                           : 'bg-slate-800 text-slate-400 hover:text-white'
                       }`}
                     >
-                      {t.serviceHistoryAllStatus || 'Tout'} ({stats.totalMembers})
+                      {t.serviceHistoryAllStatus || 'Tout'} ({stats.membersList.length})
                     </button>
                     <button
                       type="button"
@@ -727,6 +734,18 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
                     >
                       {t.serviceHistoryExcused || 'Eskize'} ({stats.totalExcused})
                     </button>
+                    <button
+                      type="button"
+                      id="btn-service-history-filter-visitor"
+                      onClick={() => setStatusFilter('visitor')}
+                      className={`px-3 py-1.5 rounded-xl font-bold transition-colors cursor-pointer ${
+                        statusFilter === 'visitor'
+                          ? 'bg-sky-500 text-white'
+                          : 'bg-slate-800 text-slate-400 hover:text-sky-300'
+                      }`}
+                    >
+                      {isEs ? 'Visitantes' : isEn ? 'Visitors' : isFr ? 'Visiteurs' : 'Vizitè'} ({stats.totalVisitors || 0})
+                    </button>
 
                     {/* Department Filter */}
                     {departments.length > 0 && (
@@ -777,7 +796,9 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
                                   <div className="flex items-center gap-2.5">
                                     <div
                                       className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${
-                                        m.status === 'on_time'
+                                        m.isVisitor
+                                          ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                                          : m.status === 'on_time'
                                           ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                                           : m.status === 'late'
                                           ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
@@ -789,12 +810,22 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
                                       {m.fullName.charAt(0).toUpperCase()}
                                     </div>
                                     <div>
-                                      <div className="font-bold text-white text-xs">
-                                        {m.fullName}
+                                      <div className="font-bold text-white text-xs flex items-center gap-1.5 flex-wrap">
+                                        <span>{m.fullName}</span>
+                                        {m.isVisitor && (
+                                          <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-400/40 text-[9px] font-black uppercase tracking-wider">
+                                            {isEs ? 'Visitante' : isEn ? 'Visitor' : isFr ? 'Visiteur' : 'Vizitè'}
+                                          </span>
+                                        )}
                                       </div>
                                       <div className="text-[10px] text-slate-400 font-mono">
                                         ID: {m.memberId || '—'} {m.phone ? `• ${m.phone}` : ''}
                                       </div>
+                                      {m.isVisitor && m.homeChurchName && (
+                                        <div className="text-[10px] text-sky-300/90 font-medium">
+                                          {isEs ? 'Iglesia de origen' : isEn ? 'Home Church' : isFr ? 'Église d’origine' : 'Soti nan'}: {m.homeChurchName}
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
                                 </td>
@@ -812,30 +843,38 @@ export const AdminServiceHistory: React.FC<AdminServiceHistoryProps> = ({
 
                                 {/* Status Badge */}
                                 <td className="py-3 px-3">
-                                  {m.status === 'on_time' && (
-                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold text-[11px]">
-                                      <CheckCircle2 className="w-3 h-3" />
-                                      <span>{t.serviceHistoryOnTime || 'Alè'}</span>
-                                    </span>
-                                  )}
-                                  {m.status === 'late' && (
-                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold text-[11px]">
-                                      <Timer className="w-3 h-3" />
-                                      <span>{t.serviceHistoryLate || 'An Reta'}</span>
-                                    </span>
-                                  )}
-                                  {m.status === 'absent' && (
-                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold text-[11px]">
-                                      <XCircle className="w-3 h-3" />
-                                      <span>{t.serviceHistoryAbsent || 'Absan'}</span>
-                                    </span>
-                                  )}
-                                  {m.status === 'excused' && (
-                                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-bold text-[11px]">
-                                      <ShieldCheck className="w-3 h-3" />
-                                      <span>{t.serviceHistoryExcused || 'Eskize'}</span>
-                                    </span>
-                                  )}
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    {m.isVisitor && (
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-400/40 font-bold text-[10px]">
+                                        <UserCheck className="w-3 h-3" />
+                                        <span>{isEs ? 'Visitante' : isEn ? 'Visitor' : isFr ? 'Visiteur' : 'Vizitè'}</span>
+                                      </span>
+                                    )}
+                                    {m.status === 'on_time' && (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold text-[11px]">
+                                        <CheckCircle2 className="w-3 h-3" />
+                                        <span>{t.serviceHistoryOnTime || 'Alè'}</span>
+                                      </span>
+                                    )}
+                                    {m.status === 'late' && (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold text-[11px]">
+                                        <Timer className="w-3 h-3" />
+                                        <span>{t.serviceHistoryLate || 'An Reta'}</span>
+                                      </span>
+                                    )}
+                                    {m.status === 'absent' && (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold text-[11px]">
+                                        <XCircle className="w-3 h-3" />
+                                        <span>{t.serviceHistoryAbsent || 'Absan'}</span>
+                                      </span>
+                                    )}
+                                    {m.status === 'excused' && (
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-bold text-[11px]">
+                                        <ShieldCheck className="w-3 h-3" />
+                                        <span>{t.serviceHistoryExcused || 'Eskize'}</span>
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
 
                                 {/* Timestamp & Details */}

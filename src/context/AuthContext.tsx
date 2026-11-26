@@ -6,6 +6,15 @@ import {
   getRedirectResult,
   GoogleAuthProvider,
   signInWithCredential,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  sendPasswordResetEmail,
+  sendEmailVerification,
+  updateProfile,
+  setPersistence,
+  browserLocalPersistence,
+  browserSessionPersistence,
+  User,
 } from 'firebase/auth';
 import { Capacitor } from '@capacitor/core';
 import { GoogleAuth } from '@codetrix-studio/capacitor-google-auth';
@@ -20,12 +29,60 @@ import {
   addMember,
   generateSecureMemberPin,
   revokeAdminSession,
+  clearChurchAdminLock,
+  unifyMemberProfile,
+  isCustomMemberPhoto,
 } from '../utils/storage';
+import { isSuperDeveloperEmail } from '../utils/cryptoSecurity';
+import {
+  clearVerifiedChurchCache,
+  firestoreAutoPurgeAccidentalTestChurches,
+} from '../services/firestoreService';
+
+async function forceRefreshAuthToken(user: User | null | undefined): Promise<void> {
+  if (!user) return;
+  try {
+    await user.getIdToken(true);
+  } catch {
+    // Non-fatal offline/network token refresh note
+  }
+}
+
+async function applyAuthPersistence(rememberMe: boolean): Promise<void> {
+  try {
+    await setPersistence(
+      auth,
+      rememberMe ? browserLocalPersistence : browserSessionPersistence
+    );
+  } catch (err) {
+    console.warn('Firebase auth persistence note:', err);
+  }
+}
 
 export interface AuthContextType {
   googleUser: GoogleAuthUser | null;
+  developerUser: GoogleAuthUser | null;
+  isEmailVerified: boolean;
   isLoadingAuth: boolean;
-  signInWithGoogle: () => Promise<GoogleAuthUser>;
+  signInWithGoogle: (options?: { rememberMe?: boolean }) => Promise<GoogleAuthUser>;
+  signInSuperDeveloperWithGoogle: () => Promise<{
+    user: GoogleAuthUser;
+    isSuperDeveloper: boolean;
+    emailVerified: boolean;
+  }>;
+  registerChurchAdminWithEmail: (
+    email: string,
+    password: string,
+    displayName?: string
+  ) => Promise<GoogleAuthUser>;
+  signInChurchAdminWithEmail: (
+    email: string,
+    password: string,
+    options?: { rememberMe?: boolean }
+  ) => Promise<GoogleAuthUser>;
+  sendChurchAdminPasswordReset: (email: string) => Promise<void>;
+  resendAdminVerificationEmail: () => Promise<void>;
+  refreshAuthUserState: () => Promise<boolean>;
   signOutGoogle: () => Promise<void>;
   linkMemberGoogleAccount: (
     churchId: string,
@@ -34,6 +91,11 @@ export interface AuthContextType {
   ) => boolean;
   unlinkMemberGoogleAccount: (churchId: string, memberId: string) => boolean;
   linkChurchAdminGoogleAccount: (
+    churchId: string,
+    customUser?: GoogleAuthUser | null,
+    authMethod?: Church['adminAuthMethod']
+  ) => boolean;
+  linkChurchAdminEmailAccount: (
     churchId: string,
     customUser?: GoogleAuthUser | null
   ) => boolean;
@@ -50,17 +112,103 @@ export interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const LOCAL_STORAGE_GOOGLE_USER_KEY = 'app_legiz_google_user_session_v1';
+const RESERVED_DEV_ACCOUNT_ERROR =
+  'Kont sa a rezève sèlman pou Panèl Administrasyon Jeneral sistèm nan. Li pa ka itilize kòm kont manm oswa administratè legliz.';
+
+function buildAuthUserData(user: User, fallbackName?: string | null, fallbackPhoto?: string | null): GoogleAuthUser {
+  return {
+    uid: user.uid,
+    email: user.email,
+    displayName:
+      user.displayName ||
+      fallbackName ||
+      user.email?.split('@')[0] ||
+      'Administratè Legliz',
+    photoURL: user.photoURL || fallbackPhoto || null,
+  };
+}
+
+function mapFirebaseAuthError(err: any, fallbackMessage: string): string {
+  const code = String(err?.code || '');
+  const rawMsg = String(err?.message || '');
+
+  if (code === 'auth/email-already-in-use' || rawMsg.includes('email-already-in-use')) {
+    return 'Imèl sa a deja gen yon kont Administratè anrejistre. Konekte ak modpas kont sa a oswa itilize yon lòt imèl.';
+  }
+  if (
+    code === 'auth/invalid-credential' ||
+    code === 'auth/wrong-password' ||
+    code === 'auth/user-not-found' ||
+    rawMsg.includes('invalid-credential') ||
+    rawMsg.includes('wrong-password') ||
+    rawMsg.includes('user-not-found')
+  ) {
+    return 'Imèl oswa modpas la pa kòrèk. Tanpri verifye yo epi re-eseye.';
+  }
+  if (code === 'auth/weak-password' || rawMsg.includes('weak-password')) {
+    return 'Modpas la twò fèb. Li dwe gen omwen 6 karaktè.';
+  }
+  if (code === 'auth/invalid-email' || rawMsg.includes('invalid-email')) {
+    return 'Adrès imèl la pa gen yon fòma ki valab.';
+  }
+  if (code === 'auth/too-many-requests' || rawMsg.includes('too-many-requests')) {
+    return 'Ou fè twòp tantativ. Tanpri tann kèk minit anvan ou re-eseye oswa chanje modpas ou.';
+  }
+  if (code === 'auth/operation-not-allowed' || rawMsg.includes('operation-not-allowed')) {
+    return 'Otantifikasyon pa Imèl/Modpas poko aktive nan paramèt sistèm nan.';
+  }
+  if (rawMsg.includes('action is invalid')) {
+    return 'Aksyon an pa valab kounye a oswa fenèt la te fèmen. Tanpri re-eseye.';
+  }
+  return rawMsg || fallbackMessage;
+}
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [googleUser, setGoogleUser] = useState<GoogleAuthUser | null>(() => {
     try {
       const saved = localStorage.getItem(LOCAL_STORAGE_GOOGLE_USER_KEY);
-      return saved ? JSON.parse(saved) : null;
+      if (!saved) return null;
+      const parsed: GoogleAuthUser = JSON.parse(saved);
+      if (isSuperDeveloperEmail(parsed?.email)) {
+        localStorage.removeItem(LOCAL_STORAGE_GOOGLE_USER_KEY);
+        return null;
+      }
+      return parsed;
     } catch {
       return null;
     }
   });
+  const [developerUser, setDeveloperUser] = useState<GoogleAuthUser | null>(null);
+  const [isEmailVerified, setIsEmailVerified] = useState<boolean>(false);
   const [isLoadingAuth, setIsLoadingAuth] = useState<boolean>(true);
+
+  const applyAuthenticatedUserState = useCallback(
+    (authUserData: GoogleAuthUser, verified: boolean) => {
+      setIsEmailVerified(verified);
+      if (isSuperDeveloperEmail(authUserData.email)) {
+        // Strictly isolate the Super Developer account from church/member flows
+        setDeveloperUser(authUserData);
+        setGoogleUser(null);
+        if (verified) {
+          firestoreAutoPurgeAccidentalTestChurches().catch(() => {});
+        }
+        try {
+          localStorage.removeItem(LOCAL_STORAGE_GOOGLE_USER_KEY);
+        } catch {
+          // ignore
+        }
+      } else {
+        setDeveloperUser(null);
+        setGoogleUser(authUserData);
+        try {
+          localStorage.setItem(LOCAL_STORAGE_GOOGLE_USER_KEY, JSON.stringify(authUserData));
+        } catch {
+          // ignore
+        }
+      }
+    },
+    []
+  );
 
   useEffect(() => {
     try {
@@ -80,95 +228,260 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     getRedirectResult(auth)
       .then((result) => {
         if (result && result.user) {
-          const user = result.user;
-          const authUserData: GoogleAuthUser = {
-            uid: user.uid,
-            email: user.email,
-            displayName: user.displayName || user.email?.split('@')[0] || 'Itilizatè Google',
-            photoURL: user.photoURL,
-          };
-          setGoogleUser(authUserData);
-          localStorage.setItem(LOCAL_STORAGE_GOOGLE_USER_KEY, JSON.stringify(authUserData));
+          const authUserData = buildAuthUserData(result.user);
+          applyAuthenticatedUserState(authUserData, Boolean(result.user.emailVerified));
         }
       })
       .catch((err) => {
-        console.warn('Firebase getRedirectResult note:', err?.message || err);
+        console.warn('Auth redirect note:', err?.message || err);
       });
-  }, []);
+  }, [applyAuthenticatedUserState]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
+      clearVerifiedChurchCache();
       if (user) {
-        const authUserData: GoogleAuthUser = {
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName || user.email?.split('@')[0] || 'Itilizatè Google',
-          photoURL: user.photoURL,
-        };
-        setGoogleUser(authUserData);
-        localStorage.setItem(LOCAL_STORAGE_GOOGLE_USER_KEY, JSON.stringify(authUserData));
+        const authUserData = buildAuthUserData(user);
+        applyAuthenticatedUserState(authUserData, Boolean(user.emailVerified));
       } else {
-        const saved = localStorage.getItem(LOCAL_STORAGE_GOOGLE_USER_KEY);
-        if (!saved) {
-          setGoogleUser(null);
+        setGoogleUser(null);
+        setDeveloperUser(null);
+        setIsEmailVerified(false);
+        try {
+          localStorage.removeItem(LOCAL_STORAGE_GOOGLE_USER_KEY);
+        } catch {
+          // ignore
         }
       }
       setIsLoadingAuth(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [applyAuthenticatedUserState]);
 
-  const signInWithGoogle = useCallback(async (): Promise<GoogleAuthUser> => {
-    setIsLoadingAuth(true);
-    if (Capacitor.isNativePlatform()) {
-      try {
-        const nativeUser = await GoogleAuth.signIn();
-        if (nativeUser && nativeUser.authentication?.idToken) {
-          const credential = GoogleAuthProvider.credential(nativeUser.authentication.idToken);
-          const fbCredential = await signInWithCredential(auth, credential);
-          const user = fbCredential.user;
-          const authUserData: GoogleAuthUser = {
-            uid: user.uid,
-            email: user.email || nativeUser.email,
-            displayName:
-              user.displayName ||
-              nativeUser.name ||
-              user.email?.split('@')[0] ||
-              'Itilizatè Google',
-            photoURL: user.photoURL || nativeUser.imageUrl,
-          };
-          setGoogleUser(authUserData);
-          localStorage.setItem(LOCAL_STORAGE_GOOGLE_USER_KEY, JSON.stringify(authUserData));
-          setIsLoadingAuth(false);
-          return authUserData;
+  const signInWithGoogle = useCallback(
+    async (options?: { rememberMe?: boolean }): Promise<GoogleAuthUser> => {
+      const rememberMe = options?.rememberMe ?? true;
+      setIsLoadingAuth(true);
+      await applyAuthPersistence(rememberMe);
+      if (Capacitor.isNativePlatform()) {
+        try {
+          const nativeUser = await GoogleAuth.signIn();
+          if (nativeUser && nativeUser.authentication?.idToken) {
+            const credential = GoogleAuthProvider.credential(nativeUser.authentication.idToken);
+            const fbCredential = await signInWithCredential(auth, credential);
+            await forceRefreshAuthToken(fbCredential.user);
+            clearVerifiedChurchCache();
+            const authUserData = buildAuthUserData(
+              fbCredential.user,
+              nativeUser.name,
+              nativeUser.imageUrl
+            );
+            if (!authUserData.email && nativeUser.email) {
+              authUserData.email = nativeUser.email;
+            }
+            applyAuthenticatedUserState(authUserData, Boolean(fbCredential.user.emailVerified));
+            setIsLoadingAuth(false);
+            return authUserData;
+          }
+        } catch (nativeErr) {
+          console.warn('Native GoogleAuth sign-in fallback to web popup:', nativeErr);
         }
-      } catch (nativeErr) {
-        console.warn('Native GoogleAuth sign-in fallback to web popup:', nativeErr);
       }
-    }
 
+      try {
+        const result = await signInWithPopup(auth, googleAuthProvider);
+        await forceRefreshAuthToken(result.user);
+        clearVerifiedChurchCache();
+        const authUserData = buildAuthUserData(result.user);
+        applyAuthenticatedUserState(authUserData, Boolean(result.user.emailVerified));
+        setIsLoadingAuth(false);
+        return authUserData;
+      } catch (err: any) {
+        setIsLoadingAuth(false);
+        throw new Error(mapFirebaseAuthError(err, 'Erè otantifikasyon Google.'));
+      }
+    },
+    [applyAuthenticatedUserState]
+  );
+
+  const signInSuperDeveloperWithGoogle = useCallback(async (): Promise<{
+    user: GoogleAuthUser;
+    isSuperDeveloper: boolean;
+    emailVerified: boolean;
+  }> => {
+    const authUserData = await signInWithGoogle();
+    const liveUser = auth.currentUser;
+    let verified = Boolean(liveUser?.emailVerified);
+    if (liveUser) {
+      try {
+        await liveUser.reload();
+        verified = Boolean(liveUser.emailVerified);
+      } catch {
+        // non-fatal
+      }
+      await forceRefreshAuthToken(liveUser);
+    }
+    const email = (liveUser?.email || authUserData.email || '').trim().toLowerCase();
+    const isSuperDev = isSuperDeveloperEmail(email) && verified;
+    applyAuthenticatedUserState(authUserData, verified);
+    return {
+      user: authUserData,
+      isSuperDeveloper: isSuperDev,
+      emailVerified: verified,
+    };
+  }, [signInWithGoogle, applyAuthenticatedUserState]);
+
+  const registerChurchAdminWithEmail = useCallback(
+    async (email: string, password: string, displayName?: string): Promise<GoogleAuthUser> => {
+      const cleanEmail = (email || '').trim().toLowerCase();
+      if (!cleanEmail || !cleanEmail.includes('@')) {
+        throw new Error('Tanpri antre yon adrès imèl administratè ki valab.');
+      }
+      if (isSuperDeveloperEmail(cleanEmail)) {
+        throw new Error(RESERVED_DEV_ACCOUNT_ERROR);
+      }
+      if (!password || password.length < 6) {
+        throw new Error('Modpas administratè a dwe gen omwen 6 karaktè.');
+      }
+
+      setIsLoadingAuth(true);
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+        if (displayName && displayName.trim()) {
+          try {
+            await updateProfile(cred.user, { displayName: displayName.trim() });
+          } catch {
+            // Non-blocking profile display name update
+          }
+        }
+        try {
+          await sendEmailVerification(cred.user);
+        } catch (verErr) {
+          console.warn('Non-blocking sendEmailVerification note:', verErr);
+        }
+
+        await forceRefreshAuthToken(cred.user);
+        clearVerifiedChurchCache();
+
+        const authUserData = buildAuthUserData(cred.user, displayName);
+        applyAuthenticatedUserState(authUserData, Boolean(cred.user.emailVerified));
+        setIsLoadingAuth(false);
+        return authUserData;
+      } catch (err: any) {
+        // If this email already exists in Auth AND the creator typed the matching password,
+        // verify ownership cleanly via signInWithEmailAndPassword so multi-church owners can reuse their email.
+        const code = String(err?.code || '');
+        if (code === 'auth/email-already-in-use') {
+          try {
+            const existingCred = await signInWithEmailAndPassword(auth, cleanEmail, password);
+            if (!existingCred.user.emailVerified) {
+              try {
+                await sendEmailVerification(existingCred.user);
+              } catch (verErr) {
+                console.warn('Non-blocking existing user sendEmailVerification note:', verErr);
+              }
+            }
+            await forceRefreshAuthToken(existingCred.user);
+            clearVerifiedChurchCache();
+            const authUserData = buildAuthUserData(existingCred.user, displayName);
+            applyAuthenticatedUserState(authUserData, Boolean(existingCred.user.emailVerified));
+            setIsLoadingAuth(false);
+            return authUserData;
+          } catch {
+            setIsLoadingAuth(false);
+            throw new Error(
+              'Imèl sa a deja gen yon kont nan sistèm nan ak yon lòt modpas. Antre bon modpas kont lan oswa sèvi ak yon lòt imèl.'
+            );
+          }
+        }
+
+        setIsLoadingAuth(false);
+        throw new Error(mapFirebaseAuthError(err, 'Pa ka kreye kont administratè a ak imèl sa a.'));
+      }
+    },
+    [applyAuthenticatedUserState]
+  );
+
+  const signInChurchAdminWithEmail = useCallback(
+    async (
+      email: string,
+      password: string,
+      options?: { rememberMe?: boolean }
+    ): Promise<GoogleAuthUser> => {
+      const cleanEmail = (email || '').trim().toLowerCase();
+      if (!cleanEmail || !password) {
+        throw new Error('Tanpri antre imèl administratè a ak modpas li.');
+      }
+      if (isSuperDeveloperEmail(cleanEmail)) {
+        throw new Error(RESERVED_DEV_ACCOUNT_ERROR);
+      }
+
+      const rememberMe = options?.rememberMe ?? true;
+      setIsLoadingAuth(true);
+      try {
+        await applyAuthPersistence(rememberMe);
+        const cred = await signInWithEmailAndPassword(auth, cleanEmail, password);
+        await forceRefreshAuthToken(cred.user);
+        clearVerifiedChurchCache();
+        const authUserData = buildAuthUserData(cred.user);
+        applyAuthenticatedUserState(authUserData, Boolean(cred.user.emailVerified));
+        setIsLoadingAuth(false);
+        return authUserData;
+      } catch (err: any) {
+        setIsLoadingAuth(false);
+        throw new Error(mapFirebaseAuthError(err, 'Erè pandan koneksyon administratè a.'));
+      }
+    },
+    [applyAuthenticatedUserState]
+  );
+
+  const sendChurchAdminPasswordReset = useCallback(async (email: string): Promise<void> => {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      throw new Error('Tanpri antre yon adrès imèl valab pou voye lyen re-inisyalizasyon an.');
+    }
     try {
-      const result = await signInWithPopup(auth, googleAuthProvider);
-      const user = result.user;
-      const authUserData: GoogleAuthUser = {
-        uid: user.uid,
-        email: user.email,
-        displayName: user.displayName || user.email?.split('@')[0] || 'Itilizatè Google',
-        photoURL: user.photoURL,
-      };
-      setGoogleUser(authUserData);
-      localStorage.setItem(LOCAL_STORAGE_GOOGLE_USER_KEY, JSON.stringify(authUserData));
-      setIsLoadingAuth(false);
-      return authUserData;
+      await sendPasswordResetEmail(auth, cleanEmail);
     } catch (err: any) {
-      setIsLoadingAuth(false);
-      throw new Error(
-        err?.message?.includes('action is invalid')
-          ? 'Aksyon an pa valab kounye a oswa fenèt la te fèmen. Tanpri re-eseye.'
-          : err?.message || 'Erè otantifikasyon Google.'
-      );
+      throw new Error(mapFirebaseAuthError(err, 'Pa ka voye imèl re-inisyalizasyon modpas la.'));
     }
   }, []);
+
+  const resendAdminVerificationEmail = useCallback(async (): Promise<void> => {
+    if (!auth.currentUser) {
+      throw new Error('Ou dwe konekte ak kont imèl la anvan pou w voye verifikasyon an.');
+    }
+    try {
+      await auth.currentUser.reload();
+    } catch {
+      // ignore reload note
+    }
+    if (auth.currentUser.emailVerified) {
+      await forceRefreshAuthToken(auth.currentUser);
+      setIsEmailVerified(true);
+      return;
+    }
+    try {
+      await sendEmailVerification(auth.currentUser);
+    } catch (err: any) {
+      throw new Error(mapFirebaseAuthError(err, 'Pa ka voye imèl verifikasyon an kounye a.'));
+    }
+  }, []);
+
+  const refreshAuthUserState = useCallback(async (): Promise<boolean> => {
+    if (!auth.currentUser) return false;
+    try {
+      await auth.currentUser.reload();
+      await forceRefreshAuthToken(auth.currentUser);
+      clearVerifiedChurchCache();
+      const verified = Boolean(auth.currentUser.emailVerified);
+      const authUserData = buildAuthUserData(auth.currentUser);
+      applyAuthenticatedUserState(authUserData, verified);
+      return verified;
+    } catch {
+      return Boolean(auth.currentUser?.emailVerified);
+    }
+  }, [applyAuthenticatedUserState]);
 
   const signOutGoogle = useCallback(async () => {
     try {
@@ -181,10 +494,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       await signOut(auth);
     } catch (err) {
-      console.warn('Firebase signout note:', err);
+      console.warn('Signout note:', err);
     } finally {
+      clearVerifiedChurchCache();
       revokeAdminSession();
+      clearChurchAdminLock();
       setGoogleUser(null);
+      setDeveloperUser(null);
+      setIsEmailVerified(false);
       localStorage.removeItem(LOCAL_STORAGE_GOOGLE_USER_KEY);
     }
   }, []);
@@ -193,17 +510,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     (churchId: string, memberId: string, customUser?: GoogleAuthUser | null) => {
       const targetUser = customUser || googleUser;
       if (!targetUser || !targetUser.email) return false;
+      if (isSuperDeveloperEmail(targetUser.email)) return false;
       const members = getMembersByChurch(churchId);
       const member = members.find(
         (m) => m.id === memberId || m.memberId.toUpperCase() === memberId.toUpperCase()
       );
       if (!member) return false;
-      const updated: Member = {
-        ...member,
-        googleEmail: targetUser.email.toLowerCase(),
-        googleUid: targetUser.uid,
-        googlePhoto: targetUser.photoURL || member.avatarUrl,
-      };
+      const updated = unifyMemberProfile(member, undefined, targetUser);
       updateMember(churchId, updated);
       return true;
     },
@@ -216,20 +529,62 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       (m) => m.id === memberId || m.memberId.toUpperCase() === memberId.toUpperCase()
     );
     if (!member) return false;
+    const preservedCustomPhoto = isCustomMemberPhoto(member.avatarUrl || member.photoUrl)
+      ? member.avatarUrl || member.photoUrl
+      : undefined;
     const updated: Member = {
       ...member,
       googleEmail: undefined,
       googleUid: undefined,
-      googlePhoto: undefined,
+      googlePhoto: preservedCustomPhoto,
+      avatarUrl: preservedCustomPhoto,
+      photoUrl: preservedCustomPhoto,
     };
     updateMember(churchId, updated);
     return true;
   }, []);
 
   const linkChurchAdminGoogleAccount = useCallback(
+    (
+      churchId: string,
+      customUser?: GoogleAuthUser | null,
+      authMethod?: Church['adminAuthMethod']
+    ) => {
+      const targetUser = customUser || googleUser;
+      if (!targetUser || !targetUser.email) return false;
+      if (isSuperDeveloperEmail(targetUser.email)) return false;
+      const church = getChurchById(churchId);
+      if (!church) return false;
+      const resolvedMethod: Church['adminAuthMethod'] =
+        authMethod ||
+        (church.adminAuthMethod === 'email_password' ? 'both' : 'google');
+      const hasExistingCustomPhoto = isCustomMemberPhoto(church.adminGooglePhoto);
+      const hasExplicitlyClearedPhoto =
+        Boolean(church.adminGoogleEmail) && church.adminGooglePhoto === '';
+      const resolvedAdminPhoto = hasExistingCustomPhoto
+        ? church.adminGooglePhoto
+        : hasExplicitlyClearedPhoto
+        ? ''
+        : church.adminGooglePhoto || targetUser.photoURL || undefined;
+      const updated: Church = {
+        ...church,
+        adminGoogleEmail: targetUser.email.toLowerCase(),
+        adminGoogleUid: targetUser.uid,
+        adminGoogleName: targetUser.displayName || targetUser.email.split('@')[0],
+        adminGooglePhoto: resolvedAdminPhoto,
+        adminAuthMethod: resolvedMethod,
+      };
+      saveChurch(updated);
+      return true;
+    },
+    [googleUser]
+  );
+
+  const linkChurchAdminEmailAccount = useCallback(
     (churchId: string, customUser?: GoogleAuthUser | null) => {
       const targetUser = customUser || googleUser;
       if (!targetUser || !targetUser.email) return false;
+      if (isSuperDeveloperEmail(targetUser.email)) return false;
       const church = getChurchById(churchId);
       if (!church) return false;
       const updated: Church = {
@@ -237,7 +592,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         adminGoogleEmail: targetUser.email.toLowerCase(),
         adminGoogleUid: targetUser.uid,
         adminGoogleName: targetUser.displayName || targetUser.email.split('@')[0],
-        adminGooglePhoto: targetUser.photoURL || undefined,
+        adminAuthMethod:
+          church.adminAuthMethod === 'google' ? 'both' : 'email_password',
       };
       saveChurch(updated);
       return true;
@@ -248,12 +604,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const unlinkChurchAdminGoogleAccount = useCallback((churchId: string) => {
     const church = getChurchById(churchId);
     if (!church) return false;
+    const preservedCustomPhoto = isCustomMemberPhoto(church.adminGooglePhoto)
+      ? church.adminGooglePhoto
+      : undefined;
     const updated: Church = {
       ...church,
       adminGoogleEmail: undefined,
       adminGoogleUid: undefined,
       adminGoogleName: undefined,
-      adminGooglePhoto: undefined,
+      adminGooglePhoto: preservedCustomPhoto,
+      adminAuthMethod: church.adminPasscode ? 'legacy_pin' : undefined,
     };
     saveChurch(updated);
     return true;
@@ -262,6 +622,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const findMemberByGoogleEmail = useCallback(
     (churchId: string, email?: string | null) => {
       if (!email) return undefined;
+      if (isSuperDeveloperEmail(email)) return undefined;
       const cleanEmail = email.trim().toLowerCase();
       const members = getMembersByChurch(churchId);
       return members.find(
@@ -275,6 +636,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const findMemberByGoogleEmailAnyChurch = useCallback((email?: string | null) => {
     if (!email) return undefined;
+    if (isSuperDeveloperEmail(email)) return undefined;
     const cleanEmail = email.trim().toLowerCase();
     const churches = getAllChurches();
     for (const ch of churches) {
@@ -297,6 +659,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!targetUser || !targetUser.email) {
         throw new Error('Kont Google pa disponib pou kreye manm.');
       }
+      if (isSuperDeveloperEmail(targetUser.email)) {
+        throw new Error(RESERVED_DEV_ACCOUNT_ERROR);
+      }
       const email = targetUser.email.trim().toLowerCase();
       const displayName = targetUser.displayName || email.split('@')[0] || 'Nouvo Manm';
       const defaultPin = generateSecureMemberPin();
@@ -312,12 +677,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         avatarUrl: targetUser.photoURL || undefined,
         notes: `Kreye otomatikman atravè Google Sign-In (${email})`,
       });
-      const updated: Member = {
-        ...newMember,
-        googleEmail: email,
-        googleUid: targetUser.uid,
-        googlePhoto: targetUser.photoURL || newMember.avatarUrl,
-      };
+      const updated = unifyMemberProfile(newMember, undefined, targetUser);
       updateMember(churchId, updated);
       return updated;
     },
@@ -328,12 +688,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider
       value={{
         googleUser,
+        developerUser,
+        isEmailVerified,
         isLoadingAuth,
         signInWithGoogle,
+        signInSuperDeveloperWithGoogle,
+        registerChurchAdminWithEmail,
+        signInChurchAdminWithEmail,
+        sendChurchAdminPasswordReset,
+        resendAdminVerificationEmail,
+        refreshAuthUserState,
         signOutGoogle,
         linkMemberGoogleAccount,
         unlinkMemberGoogleAccount,
         linkChurchAdminGoogleAccount,
+        linkChurchAdminEmailAccount,
         unlinkChurchAdminGoogleAccount,
         findMemberByGoogleEmail,
         findMemberByGoogleEmailAnyChurch,
