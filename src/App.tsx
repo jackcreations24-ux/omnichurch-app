@@ -406,7 +406,7 @@ export function App() {
     if (typeof window !== "undefined") {
       try {
         const nextUrl = getLegalDocumentPath(page);
-        window.history.pushState({ legalPage: page }, document.title, nextUrl);
+        window.history.replaceState({ legalPage: page }, document.title, nextUrl);
       } catch {
       }
       try {
@@ -417,26 +417,9 @@ export function App() {
     }
   }, []);
   const closeLegalPage = reactExports.useCallback(() => {
-    setActiveLegalPage(null);
     if (typeof window !== "undefined") {
       try {
-        const url = new URL(window.location.href);
-        url.searchParams.delete("page");
-        url.searchParams.delete("legal");
-        url.searchParams.delete("privacy");
-        url.searchParams.delete("privacy-policy");
-        url.searchParams.delete("policy-privacy");
-        url.searchParams.delete("terms");
-        url.searchParams.delete("terms-of-service");
-        url.searchParams.delete("tos");
-        if (parseLegalRouteFromUrl("", url.hash, "") !== null) {
-          url.hash = "";
-        }
-        const nextPathname =
-          parseLegalRouteFromUrl("", "", url.pathname) !== null ? "/" : url.pathname;
-        const cleanSearch = url.searchParams.toString();
-        const cleanUrl = `${nextPathname}${cleanSearch ? `?${cleanSearch}` : ""}${url.hash}`;
-        window.history.replaceState({}, document.title, cleanUrl);
+        window.close();
       } catch {
       }
     }
@@ -447,7 +430,23 @@ export function App() {
       if (parsed.isOpen && parsed.memberCode) {
         setVerificationView(parsed);
       }
-      setActiveLegalPage(parseLegalRouteFromUrl());
+      const nextLegal = parseLegalRouteFromUrl();
+      setActiveLegalPage((prev) => {
+        if (nextLegal) return nextLegal;
+        if (prev) {
+          try {
+            window.close();
+          } catch {
+          }
+          try {
+            const lockedPath = getLegalDocumentPath(prev);
+            window.history.replaceState({ legalPage: prev }, document.title, lockedPath);
+          } catch {
+          }
+          return prev;
+        }
+        return null;
+      });
     };
     window.addEventListener("popstate", handleUrlChange);
     window.addEventListener("hashchange", handleUrlChange);

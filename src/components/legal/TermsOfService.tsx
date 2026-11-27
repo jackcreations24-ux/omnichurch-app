@@ -41,13 +41,31 @@ export const TermsOfService: React.FC<TermsOfServiceProps> = ({
     }
   };
 
-  const handleBack = () => {
-    if (onBack) {
-      onBack();
-    } else if (typeof window !== 'undefined' && window.history.length > 1) {
-      window.history.back();
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.history.pushState({ standaloneLegal: 'terms' }, document.title, window.location.href);
+    } catch {
+      // ignore
     }
-  };
+    const handlePopState = () => {
+      try {
+        window.close();
+      } catch {
+        // ignore
+      }
+      // If browser blocks window.close() on a non-popup tab, keep locked on the legal document page
+      try {
+        window.history.pushState({ standaloneLegal: 'terms' }, document.title, '/terms-of-service');
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
 
   const content = TERMS_DEFAULT_CONTENT[activeLang] || TERMS_DEFAULT_CONTENT.ht;
   const customOverride = legalConfig?.customTerms?.[activeLang];
@@ -59,17 +77,8 @@ export const TermsOfService: React.FC<TermsOfServiceProps> = ({
   return (
     <div className="min-h-screen w-full bg-white text-black font-sans antialiased selection:bg-gray-200 selection:text-black">
       <div className="max-w-3xl mx-auto px-5 sm:px-8 py-8 sm:py-12">
-        {/* Top Utility Navigation Line (Flat, No Cards) */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-5 border-b border-gray-300 text-xs sm:text-sm print:hidden">
-          <button
-            type="button"
-            id="legal-terms-back-btn"
-            onClick={handleBack}
-            className="text-black hover:underline font-medium cursor-pointer bg-transparent border-0 p-0"
-          >
-            {content.backLabel}
-          </button>
-
+        {/* Top Utility Navigation Line (Flat, No Return-to-App Button) */}
+        <div className="flex flex-wrap items-center justify-end gap-3 pb-5 border-b border-gray-300 text-xs sm:text-sm print:hidden">
           <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs">
             <div className="flex items-center gap-1.5" role="group" aria-label="Language">
               {(['ht', 'fr', 'en', 'es'] as Language[]).map((code, idx) => (
@@ -197,13 +206,6 @@ export const TermsOfService: React.FC<TermsOfServiceProps> = ({
                 {content.otherDocLinkLabel}
               </button>
             )}
-            <button
-              type="button"
-              onClick={handleBack}
-              className="text-black underline hover:text-gray-700 cursor-pointer bg-transparent border-0 p-0"
-            >
-              {content.backLabel}
-            </button>
           </div>
         </footer>
       </div>
