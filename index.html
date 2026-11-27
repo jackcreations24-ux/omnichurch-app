@@ -19,7 +19,7 @@
   </head>
   <body class="bg-[#0F172A] text-slate-100 antialiased selection:bg-amber-500 selection:text-white overflow-x-hidden">
     <div id="root">
-      <div class="fixed inset-0 h-dvh w-screen max-w-full overflow-hidden flex flex-col items-center justify-center bg-[#07152F] text-slate-200 px-6">
+      <div id="initial-boot-splash" class="fixed inset-0 h-dvh w-screen max-w-full overflow-hidden flex flex-col items-center justify-center bg-[#07152F] text-slate-200 px-6">
         <img
           src="/assets/aistudio/download_b4dd93b3.png"
           alt="OmniChurch PRO Official Logo"
@@ -32,6 +32,34 @@
         </p>
       </div>
     </div>
+    <script>
+      (function () {
+        try {
+          var p = (window.location.pathname || '').toLowerCase().replace(/\/+$/, '').replace(/^\/+/, '');
+          var s = (window.location.search || '').toLowerCase();
+          var h = (window.location.hash || '').toLowerCase();
+          var isLegal =
+            p === 'privacy-policy' ||
+            p === 'policy-privacy' ||
+            p === 'privacy' ||
+            p === 'terms-of-service' ||
+            p === 'terms' ||
+            p === 'tos' ||
+            s.indexOf('page=privacy') !== -1 ||
+            s.indexOf('page=terms') !== -1 ||
+            s.indexOf('legal=privacy') !== -1 ||
+            s.indexOf('legal=terms') !== -1 ||
+            h.indexOf('privacy') !== -1 ||
+            h.indexOf('terms') !== -1;
+          if (isLegal) {
+            document.body.style.backgroundColor = '#ffffff';
+            document.body.style.color = '#000000';
+            var splash = document.getElementById('initial-boot-splash');
+            if (splash) splash.style.display = 'none';
+          }
+        } catch (e) {}
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

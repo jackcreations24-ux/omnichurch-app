@@ -1025,7 +1025,8 @@ export function subscribeToDeveloperSettings(
               data.commentModeration ||
               data.memberVerification ||
               data.licenses ||
-              data.donations)
+              data.donations ||
+              data.legalConfig)
           ) {
             const localCurrent = getDeveloperSettings();
             const mergedRemote = {
