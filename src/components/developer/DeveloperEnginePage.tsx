@@ -50,12 +50,14 @@ import {
   Clock,
   AlertCircle,
   BadgeCheck,
+  Share2,
 } from 'lucide-react';
 import { DevDashboardTab } from './DevDashboardTab';
 import { DevChurchesTab } from './DevChurchesTab';
 import { DevDatabaseTab } from './DevDatabaseTab';
 import { DevBroadcastsTab } from './DevBroadcastsTab';
 import { DevUpdatesTab } from './DevUpdatesTab';
+import { DevShareAppTab } from './DevShareAppTab';
 import { DevLicensesTab } from './DevLicensesTab';
 import { DevDonationsTab } from './DevDonationsTab';
 import { DevAdMobTab } from './DevAdMobTab';
@@ -112,6 +114,7 @@ export const DeveloperEnginePage = ({
     | 'database'
     | 'broadcasts'
     | 'updates'
+    | 'share_app'
     | 'licenses'
     | 'donations'
     | 'admob'
@@ -392,6 +395,7 @@ export const DeveloperEnginePage = ({
     databaseTab: isEn ? 'Data & Diagnostics' : isFr ? 'Données & Diagnostic' : isEs ? 'Datos y Diagnóstico' : 'Baz Done & Entegrite',
     broadcastsTab: isEn ? 'Alerts & Broadcasts' : isFr ? 'Alertes & Annonces' : isEs ? 'Alertas y Comunicados' : 'Alèt & Kominike',
     updatesTab: isEn ? 'App Updates' : isFr ? 'Mises à Jour App' : isEs ? 'Actualizaciones' : 'Mizajou App',
+    shareAppTab: isEn ? 'Share App & Links' : isFr ? 'Partage App & Liens' : isEs ? 'Compartir App y Enlaces' : 'Pataj App & Lyen',
     licensesTab: isEn ? 'Licenses & Activation' : isFr ? 'Licences & Activation' : isEs ? 'Licencias' : 'Lisans & Aktivasyon',
     donationsTab: isEn ? 'Donations & Support' : isFr ? 'Dons & Soutien' : isEs ? 'Donaciones' : 'Kont Donasyon',
     admobTab: isEn ? 'AdMob Settings' : isFr ? 'Paramètres AdMob' : isEs ? 'Configuración AdMob' : 'AdMob Anons',
@@ -594,6 +598,35 @@ export const DeveloperEnginePage = ({
             <span>{navCopy.updatesTab}</span>
             <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-950/40 font-mono font-bold text-amber-300">
               v{settings.appUpdate?.latestVersion || APP_BASE_VERSION}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            id="tab-btn-dev-share-app"
+            onClick={() => setActiveTab('share_app')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-extrabold whitespace-nowrap transition-all cursor-pointer ${
+              activeTab === 'share_app'
+                ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20'
+                : 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+            }`}
+          >
+            <Share2 className="w-4 h-4 text-emerald-400" />
+            <span>{navCopy.shareAppTab}</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded font-bold ${
+                settings.shareApp?.enabled !== false
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              {settings.shareApp?.enabled !== false
+                ? isEn
+                  ? 'Active'
+                  : 'Aktif'
+                : isEn
+                  ? 'Off'
+                  : 'Dezaktive'}
             </span>
           </button>
 
@@ -1083,6 +1116,16 @@ export const DeveloperEnginePage = ({
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
             language={language}
+          />
+        )}
+
+        {/* TAB: SHARE APP & REFERRAL LINK ENGINE */}
+        {activeTab === 'share_app' && (
+          <DevShareAppTab
+            settings={settings}
+            onUpdateSettings={handleUpdateSettings}
+            language={language}
+            sampleChurchName={currentChurch?.name || allChurches[0]?.name}
           />
         )}
 

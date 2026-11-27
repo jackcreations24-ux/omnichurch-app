@@ -5449,6 +5449,90 @@ IER-DUP01,Dezyèm Manm,50933334444,CH001
   });
 
   // -----------------------------------------------------------------
+  // Suite 52: Share App & Referral Link Engine (HT / FR / EN / ES)
+  // -----------------------------------------------------------------
+  console.log('\n--- Suite 52: Share App & Referral Link Engine (HT / FR / EN / ES) ---');
+
+  await runTest('sanitizeShareAppConfig, resolveLocalizedShareAppCopy, resolveEffectiveShareAppUrl & buildFormattedShareAppPreview enforce exact Firestore schema and 4-language dynamic formatting', async () => {
+    const {
+      sanitizeShareAppConfig,
+      resolveLocalizedShareAppCopy,
+      resolveEffectiveShareAppUrl,
+      buildFormattedShareAppPreview,
+      DEFAULT_LOCALIZED_SHARE_APP_COPY,
+      OFFICIAL_SHARE_APP_URL,
+    } = await import('../utils/developerStorage');
+
+    const defaults = sanitizeShareAppConfig(undefined);
+    assert(defaults.enabled === true, 'Default shareApp.enabled must be true');
+    assert(defaults.shareUrl === OFFICIAL_SHARE_APP_URL, 'Default shareApp.shareUrl must be https://omnichurch.download');
+    assert(defaults.androidUrl === '', 'Default shareApp.androidUrl must be empty string');
+    assert(
+      defaults.localizedCopy.ht.header === DEFAULT_LOCALIZED_SHARE_APP_COPY.ht.header &&
+        defaults.localizedCopy.fr.header === DEFAULT_LOCALIZED_SHARE_APP_COPY.fr.header &&
+        defaults.localizedCopy.en.header === DEFAULT_LOCALIZED_SHARE_APP_COPY.en.header &&
+        defaults.localizedCopy.es.header === DEFAULT_LOCALIZED_SHARE_APP_COPY.es.header,
+      'All 4 languages (ht, fr, en, es) must initialize with exact schema copy'
+    );
+
+    // Fallback when androidUrl is empty
+    assert(
+      resolveEffectiveShareAppUrl(defaults, 'web') === 'https://omnichurch.download',
+      'Web resolves shareUrl'
+    );
+    assert(
+      resolveEffectiveShareAppUrl(defaults, 'android') === 'https://omnichurch.download',
+      'Android falls back to shareUrl when androidUrl is empty'
+    );
+
+    // Android override when androidUrl is populated
+    const withAndroidUrl = sanitizeShareAppConfig({
+      enabled: true,
+      shareUrl: 'https://omnichurch.download',
+      androidUrl: 'https://play.google.com/store/apps/details?id=com.omnichurch.pro',
+    });
+    assert(
+      resolveEffectiveShareAppUrl(withAndroidUrl, 'android') ===
+        'https://play.google.com/store/apps/details?id=com.omnichurch.pro',
+      'Android uses androidUrl when non-empty'
+    );
+    assert(
+      resolveEffectiveShareAppUrl(withAndroidUrl, 'web') === 'https://omnichurch.download',
+      'Web still uses shareUrl even when androidUrl is set'
+    );
+
+    // Unsafe URLs are sanitized safely
+    const unsafeCfg = sanitizeShareAppConfig({
+      enabled: false,
+      shareUrl: 'javascript:alert(1)',
+      androidUrl: 'javascript:evil()',
+    });
+    assert(unsafeCfg.enabled === false, 'enabled=false preserved');
+    assert(unsafeCfg.shareUrl === OFFICIAL_SHARE_APP_URL, 'Unsafe shareUrl falls back to https://omnichurch.download');
+    assert(unsafeCfg.androidUrl === '', 'Unsafe androidUrl is stripped to empty string');
+
+    // Preview formatting with {church} and {url} placeholders
+    const previewFr = buildFormattedShareAppPreview(withAndroidUrl, {
+      language: 'fr',
+      churchName: 'Église Philadelphie',
+      isAndroid: true,
+      mode: 'church_invite',
+    });
+    assert(
+      previewFr.headline.includes('Église Philadelphie'),
+      'French churchHeaderTemplate replaces {church} placeholder'
+    );
+    assert(
+      previewFr.effectiveUrl === 'https://play.google.com/store/apps/details?id=com.omnichurch.pro',
+      'Preview effectiveUrl uses Android override when platform is android'
+    );
+    assert(
+      previewFr.fullText.includes(resolveLocalizedShareAppCopy(withAndroidUrl, 'fr').contentFooterLabel),
+      'Preview fullText includes localized contentFooterLabel'
+    );
+  });
+
+  // -----------------------------------------------------------------
   // FINAL REPORT
   // -----------------------------------------------------------------
   console.log('\n======================================================');

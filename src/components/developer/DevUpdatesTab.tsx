@@ -20,6 +20,7 @@ import {
 import { APP_BASE_VERSION } from '../../version';
 import { useToast } from '../../context/ToastContext';
 import { AppUpdateModal } from '../common/AppUpdateModal';
+import { DevShareAppTab } from './DevShareAppTab';
 import {
   Sparkles,
   Download,
@@ -741,6 +742,16 @@ export const DevUpdatesTab: React.FC<DevUpdatesTabProps> = ({
           </button>
         </div>
       </form>
+
+      {/* SHARE APP & REFERRAL LINK ENGINE SECTION */}
+      <div className="pt-4 border-t border-slate-800/80">
+        <DevShareAppTab
+          settings={settings}
+          onUpdateSettings={onUpdateSettings}
+          language={language}
+          sampleChurchName={allChurches[0]?.name}
+        />
+      </div>
 
       {/* LIVE PREVIEW MODAL */}
       <AppUpdateModal

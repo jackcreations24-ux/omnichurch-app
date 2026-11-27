@@ -22,6 +22,9 @@ export type { DevVerificationTabProps } from './DevVerificationTab';
 export { DevSecurityTab } from './DevSecurityTab';
 export type { DevSecurityTabProps } from './DevSecurityTab';
 
+export { DevShareAppTab } from './DevShareAppTab';
+export type { DevShareAppTabProps } from './DevShareAppTab';
+
 export { DevDatabaseTab } from './DevDatabaseTab';
 export { DeveloperAuthModal } from './DeveloperAuthModal';
 export { DeveloperEnginePage } from './DeveloperEnginePage';

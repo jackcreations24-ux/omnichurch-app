@@ -580,6 +580,22 @@ export interface DeveloperLanguageConfig {
   lastLanguageConfigUpdatedAt?: string;
 }
 
+export interface LocalizedShareAppCopy {
+  header: string;
+  churchHeaderTemplate: string;
+  message: string;
+  contentFooterLabel: string;
+  chooserTitle: string;
+}
+
+export interface DeveloperShareAppConfig {
+  enabled: boolean;
+  shareUrl: string;
+  androidUrl: string;
+  localizedCopy: Record<Language, LocalizedShareAppCopy>;
+  lastUpdatedAt?: string;
+}
+
 export interface DeveloperSettings {
   masterPin: string;          // Default: "7799"
   maintenanceMode: boolean;
@@ -597,6 +613,7 @@ export interface DeveloperSettings {
   sponsors: SponsorItem[];
   licenses: ChurchLicense[];
   donations?: DeveloperDonationConfig;
+  shareApp?: DeveloperShareAppConfig;
   broadcasts?: DeveloperBroadcast[];
   auditLogs?: DeveloperAuditLog[];
   appUpdate?: DeveloperAppUpdateConfig;

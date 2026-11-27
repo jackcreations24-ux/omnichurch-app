@@ -10,6 +10,8 @@ import {
   AnnouncementComment,
   DeveloperDonationConfig,
   LocalizedDonationCopy,
+  DeveloperShareAppConfig,
+  LocalizedShareAppCopy,
   Language,
   DeveloperAuditLog,
   DeveloperBroadcast,
@@ -507,6 +509,256 @@ export function parseMemberVerificationLookupInput(
   return { memberCode: clean, churchId: fallbackChurch };
 }
 
+export const OFFICIAL_SHARE_APP_URL = 'https://omnichurch.download';
+
+export const DEFAULT_LOCALIZED_SHARE_APP_COPY: Record<Language, LocalizedShareAppCopy> = {
+  ht: {
+    header: '🔥 Dekouvri OmniChurch Pro — Legliz la nan pòch ou!',
+    churchHeaderTemplate: '🔥 Rejwenn {church} sou OmniChurch Pro!',
+    message:
+      'Swiv tout sèvis adorasyon an dirèk, anons ofisyèl, kat idantite manm dijital QR, ak prezans legliz ou sou OmniChurch Pro.',
+    contentFooterLabel: '📲 OmniChurch Pro (Legliz la nan pòch ou):',
+    chooserTitle: 'Pataje sou OmniChurch',
+  },
+  fr: {
+    header: '🔥 Découvrez OmniChurch Pro — Votre église dans votre poche !',
+    churchHeaderTemplate: '🔥 Rejoignez {church} sur OmniChurch Pro !',
+    message:
+      'Suivez les cultes en direct, les annonces officielles, votre carte de membre numérique QR et les présences de votre église sur OmniChurch Pro.',
+    contentFooterLabel: '📲 OmniChurch Pro (Votre église connectée) :',
+    chooserTitle: 'Partager via OmniChurch',
+  },
+  en: {
+    header: '🔥 Discover OmniChurch Pro — Your church in your pocket!',
+    churchHeaderTemplate: '🔥 Join {church} on OmniChurch Pro!',
+    message:
+      'Follow live worship services, official announcements, your digital QR member ID card, and church attendance on OmniChurch Pro.',
+    contentFooterLabel: '📲 OmniChurch Pro (Your connected church):',
+    chooserTitle: 'Share via OmniChurch',
+  },
+  es: {
+    header: '🔥 ¡Descubre OmniChurch Pro — Tu iglesia en tu bolsillo!',
+    churchHeaderTemplate: '🔥 ¡Únete a {church} en OmniChurch Pro!',
+    message:
+      'Sigue los cultos en vivo, anuncios oficiales, tu credencial digital QR de miembro y la asistencia de tu iglesia en OmniChurch Pro.',
+    contentFooterLabel: '📲 OmniChurch Pro (Tu iglesia conectada):',
+    chooserTitle: 'Compartir con OmniChurch',
+  },
+};
+
+export const DEFAULT_SHARE_APP_CONFIG: DeveloperShareAppConfig = {
+  enabled: true,
+  shareUrl: OFFICIAL_SHARE_APP_URL,
+  androidUrl: '',
+  localizedCopy: {
+    ht: { ...DEFAULT_LOCALIZED_SHARE_APP_COPY.ht },
+    fr: { ...DEFAULT_LOCALIZED_SHARE_APP_COPY.fr },
+    en: { ...DEFAULT_LOCALIZED_SHARE_APP_COPY.en },
+    es: { ...DEFAULT_LOCALIZED_SHARE_APP_COPY.es },
+  },
+};
+
+function sanitizeHttpShareUrl(rawUrl?: string | null, fallback = ''): string {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return fallback;
+  const candidate =
+    trimmed.startsWith('https://') || trimmed.startsWith('http://')
+      ? trimmed
+      : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return candidate.replace(/\/+$/, '');
+    }
+  } catch {
+    // ignore malformed URL
+  }
+  return fallback;
+}
+
+export function sanitizeShareAppConfig(
+  raw?: Partial<DeveloperShareAppConfig> | null
+): DeveloperShareAppConfig {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const rawLoc =
+    source.localizedCopy && typeof source.localizedCopy === 'object'
+      ? source.localizedCopy
+      : ({} as Partial<Record<Language, Partial<LocalizedShareAppCopy>>>);
+
+  const pickLangField = (
+    lang: Language,
+    field: keyof LocalizedShareAppCopy
+  ): string => {
+    const candidate = rawLoc?.[lang]?.[field];
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+    return DEFAULT_LOCALIZED_SHARE_APP_COPY[lang][field];
+  };
+
+  const localizedCopy: Record<Language, LocalizedShareAppCopy> = {
+    ht: {
+      header: pickLangField('ht', 'header'),
+      churchHeaderTemplate: pickLangField('ht', 'churchHeaderTemplate'),
+      message: pickLangField('ht', 'message'),
+      contentFooterLabel: pickLangField('ht', 'contentFooterLabel'),
+      chooserTitle: pickLangField('ht', 'chooserTitle'),
+    },
+    fr: {
+      header: pickLangField('fr', 'header'),
+      churchHeaderTemplate: pickLangField('fr', 'churchHeaderTemplate'),
+      message: pickLangField('fr', 'message'),
+      contentFooterLabel: pickLangField('fr', 'contentFooterLabel'),
+      chooserTitle: pickLangField('fr', 'chooserTitle'),
+    },
+    en: {
+      header: pickLangField('en', 'header'),
+      churchHeaderTemplate: pickLangField('en', 'churchHeaderTemplate'),
+      message: pickLangField('en', 'message'),
+      contentFooterLabel: pickLangField('en', 'contentFooterLabel'),
+      chooserTitle: pickLangField('en', 'chooserTitle'),
+    },
+    es: {
+      header: pickLangField('es', 'header'),
+      churchHeaderTemplate: pickLangField('es', 'churchHeaderTemplate'),
+      message: pickLangField('es', 'message'),
+      contentFooterLabel: pickLangField('es', 'contentFooterLabel'),
+      chooserTitle: pickLangField('es', 'chooserTitle'),
+    },
+  };
+
+  return {
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : true,
+    shareUrl: sanitizeHttpShareUrl(source.shareUrl, OFFICIAL_SHARE_APP_URL),
+    androidUrl: sanitizeHttpShareUrl(source.androidUrl, ''),
+    localizedCopy,
+    ...(typeof source.lastUpdatedAt === 'string' && source.lastUpdatedAt
+      ? { lastUpdatedAt: source.lastUpdatedAt }
+      : {}),
+  };
+}
+
+export function resolveLocalizedShareAppCopy(
+  config: DeveloperShareAppConfig | undefined | null,
+  language: Language | string = 'ht'
+): LocalizedShareAppCopy {
+  const safeLang: Language =
+    language === 'fr' || language === 'en' || language === 'es' ? language : 'ht';
+  const cleaned = sanitizeShareAppConfig(config || undefined);
+  return cleaned.localizedCopy[safeLang] || DEFAULT_LOCALIZED_SHARE_APP_COPY[safeLang];
+}
+
+/**
+ * Resolves the effective share URL:
+ * - On Android (`isAndroid === true`), uses `androidUrl` when non-empty; otherwise falls back to `shareUrl`.
+ * - On Web / Desktop (`isAndroid === false`), uses `shareUrl` (default `https://omnichurch.download`).
+ */
+export function resolveEffectiveShareAppUrl(
+  config: DeveloperShareAppConfig | undefined | null,
+  isAndroidOrPlatform: boolean | 'android' | 'web' = false
+): string {
+  const cleaned = sanitizeShareAppConfig(config || undefined);
+  const isAndroid =
+    isAndroidOrPlatform === true || isAndroidOrPlatform === 'android';
+  if (isAndroid && cleaned.androidUrl.trim().length > 0) {
+    return cleaned.androidUrl.trim();
+  }
+  return cleaned.shareUrl.trim() || OFFICIAL_SHARE_APP_URL;
+}
+
+export function applySharePlaceholders(
+  template: string,
+  replacements: { church?: string; url?: string }
+): string {
+  let output = String(template || '');
+  const churchVal = (replacements.church || 'OmniChurch Pro').trim();
+  const urlVal = (replacements.url || OFFICIAL_SHARE_APP_URL).trim();
+  output = output.replace(/\{church\}/gi, churchVal);
+  output = output.replace(/\{url\}/gi, urlVal);
+  return output;
+}
+
+export function buildFormattedShareAppPreview(
+  config: DeveloperShareAppConfig | undefined | null,
+  options?: {
+    language?: Language | string;
+    churchName?: string;
+    isAndroid?: boolean;
+    mode?: 'church_invite' | 'general_app' | 'content_footer';
+    sampleContent?: string;
+  }
+): {
+  effectiveUrl: string;
+  chooserTitle: string;
+  headline: string;
+  bodyMessage: string;
+  footerLabel: string;
+  fullText: string;
+} {
+  const cleaned = sanitizeShareAppConfig(config || undefined);
+  const langCopy = resolveLocalizedShareAppCopy(cleaned, options?.language || 'ht');
+  const effectiveUrl = resolveEffectiveShareAppUrl(cleaned, Boolean(options?.isAndroid));
+  const churchName = (options?.churchName || '').trim();
+  const mode = options?.mode || (churchName ? 'church_invite' : 'general_app');
+
+  const rawHeadline =
+    mode === 'church_invite' && churchName
+      ? langCopy.churchHeaderTemplate
+      : langCopy.header;
+
+  const headline = applySharePlaceholders(rawHeadline, {
+    church: churchName || 'OmniChurch Pro',
+    url: effectiveUrl,
+  });
+
+  const bodyMessage = applySharePlaceholders(langCopy.message, {
+    church: churchName || 'OmniChurch Pro',
+    url: effectiveUrl,
+  });
+
+  const footerLabel = applySharePlaceholders(langCopy.contentFooterLabel, {
+    church: churchName || 'OmniChurch Pro',
+    url: effectiveUrl,
+  });
+
+  const chooserTitle = applySharePlaceholders(langCopy.chooserTitle, {
+    church: churchName || 'OmniChurch Pro',
+    url: effectiveUrl,
+  });
+
+  if (mode === 'content_footer') {
+    const samplePost =
+      options?.sampleContent?.trim() ||
+      `📢 *${churchName || 'Legliz Evanjelik'}*\n📅 *Kilt Dimanch Maten — 9:00 AM - 11:30 AM*`;
+    const footerLine = footerLabel.includes(effectiveUrl)
+      ? footerLabel
+      : `${footerLabel}\n🔗 ${effectiveUrl}`;
+    return {
+      effectiveUrl,
+      chooserTitle,
+      headline,
+      bodyMessage,
+      footerLabel,
+      fullText: `${samplePost}\n\n${footerLine}`,
+    };
+  }
+
+  const footerLine = footerLabel.includes(effectiveUrl)
+    ? footerLabel
+    : `${footerLabel}\n🔗 ${effectiveUrl}`;
+
+  const fullText = `${headline}\n\n${bodyMessage}\n\n${footerLine}`.trim();
+
+  return {
+    effectiveUrl,
+    chooserTitle,
+    headline,
+    bodyMessage,
+    footerLabel,
+    fullText,
+  };
+}
+
 export const DEFAULT_DEVELOPER_SETTINGS: DeveloperSettings = {
   masterPin: '7799', // Initial default code until developer sets custom PIN
   maintenanceMode: false,
@@ -522,6 +774,7 @@ export const DEFAULT_DEVELOPER_SETTINGS: DeveloperSettings = {
   sponsors: [],
   licenses: [],
   donations: DEFAULT_DONATION_CONFIG,
+  shareApp: DEFAULT_SHARE_APP_CONFIG,
   broadcasts: [],
   auditLogs: [],
   appUpdate: DEFAULT_DEVELOPER_APP_UPDATE_CONFIG,
@@ -761,6 +1014,7 @@ export function getDeveloperSettings(): DeveloperSettings {
       legalConfig: sanitizeLegalConfig(parsed.legalConfig),
       languageConfig: sanitizeLanguageConfig(parsed.languageConfig),
       donations: cleanDonationConfig(parsed.donations),
+      shareApp: sanitizeShareAppConfig(parsed.shareApp),
       sponsors: cleanSponsors,
       licenses: cleanLicenses,
       broadcasts: Array.isArray(parsed.broadcasts) ? parsed.broadcasts : [],
@@ -823,6 +1077,7 @@ function sanitizeRemoteDeveloperSettings(data: any): DeveloperSettings {
     legalConfig: sanitizeLegalConfig(data.legalConfig),
     languageConfig: sanitizeLanguageConfig(data.languageConfig),
     donations: cleanDonationConfig(data.donations),
+    shareApp: sanitizeShareAppConfig(data.shareApp),
     sponsors: cleanSponsors,
     licenses: cleanLicenses,
     broadcasts: Array.isArray(data.broadcasts) ? data.broadcasts : [],
@@ -916,6 +1171,7 @@ export async function saveDeveloperSettings(
     ),
     legalConfig: sanitizeLegalConfig(settings.legalConfig || currentLocal.legalConfig),
     languageConfig: sanitizeLanguageConfig(settings.languageConfig || currentLocal.languageConfig),
+    shareApp: sanitizeShareAppConfig(settings.shareApp || currentLocal.shareApp),
     licenses: Array.isArray(settings.licenses) ? settings.licenses : currentLocal.licenses,
     showSponsorsInFooter: resolvedShowSponsors,
     sponsorsEnabled: resolvedShowSponsors,
@@ -941,7 +1197,7 @@ export async function saveDeveloperSettings(
     };
   }
 
-  // Cloud Firestore sync (merges commentModeration alongside adMob, licenses, and updatedAt into app_config/developer_engine)
+  // Cloud Firestore sync (merges commentModeration alongside adMob, licenses, shareApp, and updatedAt into app_config/developer_engine)
   try {
     const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
     const cleaned = cleanObjectForFirestore({
@@ -978,7 +1234,9 @@ export async function fetchRemoteDeveloperSettings(): Promise<DeveloperSettings 
           data.commentModeration ||
           data.memberVerification ||
           data.licenses ||
-          data.donations)
+          data.donations ||
+          data.shareApp ||
+          data.legalConfig)
       ) {
         const mergedRemote = {
           ...localCurrent,
@@ -1026,6 +1284,7 @@ export function subscribeToDeveloperSettings(
               data.memberVerification ||
               data.licenses ||
               data.donations ||
+              data.shareApp ||
               data.legalConfig)
           ) {
             const localCurrent = getDeveloperSettings();
@@ -2144,6 +2403,116 @@ export async function verifyAndPushMemberVerificationToCloud(
     pushedAt,
     reason: 'remote_doc_missing',
     remoteMemberVerification: mergedVerification,
+  };
+}
+
+export interface ShareAppCloudPushResult {
+  savedLocally: boolean;
+  syncedToCloud: boolean;
+  remoteVerified: boolean;
+  pushedAt: string;
+  reason?: string;
+  remoteShareApp?: DeveloperShareAppConfig;
+}
+
+export function getShareAppConfig(): DeveloperShareAppConfig {
+  const settings = getDeveloperSettings();
+  return sanitizeShareAppConfig(settings.shareApp);
+}
+
+export async function updateShareAppConfig(
+  partial: Partial<DeveloperShareAppConfig>
+): Promise<DeveloperShareAppConfig> {
+  const settings = getDeveloperSettings();
+  const nextShareApp = sanitizeShareAppConfig({
+    ...sanitizeShareAppConfig(settings.shareApp),
+    ...partial,
+    lastUpdatedAt: new Date().toISOString(),
+  });
+  await saveDeveloperSettings({
+    ...settings,
+    shareApp: nextShareApp,
+  });
+  return nextShareApp;
+}
+
+/**
+ * Explicitly merges `{ shareApp }` into `app_config/developer_engine` using `setDoc(..., { merge: true })`
+ * and verifies readback parity on the shared named Firestore database.
+ */
+export async function verifyAndPushShareAppToCloud(
+  settings: DeveloperSettings,
+  shareAppOverride?: Partial<DeveloperShareAppConfig>
+): Promise<ShareAppCloudPushResult> {
+  const pushedAt = new Date().toISOString();
+  const mergedShareApp = sanitizeShareAppConfig({
+    ...(settings.shareApp || DEFAULT_SHARE_APP_CONFIG),
+    ...(shareAppOverride || {}),
+    lastUpdatedAt: pushedAt,
+  });
+
+  const nextSettings: DeveloperSettings = {
+    ...settings,
+    shareApp: mergedShareApp,
+  };
+
+  const saveRes = await saveDeveloperSettings(nextSettings);
+  if (!saveRes.syncedToCloud) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: false,
+      remoteVerified: false,
+      pushedAt,
+      reason: saveRes.reason || 'cloud_sync_skipped',
+      remoteShareApp: mergedShareApp,
+    };
+  }
+
+  try {
+    const devDocRef = doc(db, FIRESTORE_DEV_DOC, FIRESTORE_DEV_ID);
+    await setDoc(
+      devDocRef,
+      cleanObjectForFirestore({
+        shareApp: mergedShareApp,
+        lastUpdated: pushedAt,
+        updatedAt: pushedAt,
+      }),
+      { merge: true }
+    );
+    const snap = await getDoc(devDocRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      const remoteShareApp = sanitizeShareAppConfig(data?.shareApp);
+      const remoteVerified =
+        remoteShareApp.enabled === mergedShareApp.enabled &&
+        remoteShareApp.shareUrl === mergedShareApp.shareUrl &&
+        remoteShareApp.androidUrl === mergedShareApp.androidUrl;
+      return {
+        savedLocally: saveRes.savedLocally,
+        syncedToCloud: true,
+        remoteVerified,
+        pushedAt,
+        remoteShareApp,
+      };
+    }
+  } catch (err: any) {
+    return {
+      savedLocally: saveRes.savedLocally,
+      syncedToCloud: true,
+      remoteVerified: false,
+      pushedAt,
+      reason: err?.message || 'remote_readback_failed',
+      remoteShareApp: mergedShareApp,
+    };
+  }
+
+  return {
+    savedLocally: saveRes.savedLocally,
+    syncedToCloud: true,
+    remoteVerified: false,
+    pushedAt,
+    reason: 'remote_doc_missing',
+    remoteShareApp: mergedShareApp,
   };
 }
 
